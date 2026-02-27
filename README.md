@@ -455,6 +455,76 @@ oui:{vendor-oui}:{mac-address-without-colons}
 
 ---
 
+## Getting Started with OptimACS
+
+`ac-client` reports to an [OptimACS](https://acs.optimcloud.com) controller. This section walks through creating an account and configuring your first tenant so devices can connect.
+
+### 1. Create an account
+
+Navigate to **[acs.optimcloud.com](https://acs.optimcloud.com)** and click **Create account** on the sign-in page, or go directly to `/signup`.
+
+![Sign-in page with Create account link](docs/images/screens/login.png)
+
+Fill in the four sections of the signup form:
+
+![Signup form](docs/images/screens/signup.png)
+
+| Section | What to fill in |
+|---------|----------------|
+| **Your Account** | First name, last name, work email, and a password (minimum 8 characters) |
+| **Your Organization** | Company name, phone (optional), and country |
+| **Choose a Plan** | Select the plan that fits your AP fleet size — you can upgrade at any time |
+| **Payment Method** | Card details are collected via the Airwallex-hosted form. Card numbers are **never stored** on OptimACS servers — only a tokenized reference is saved in an isolated, encrypted PII database |
+
+Click **Create account**. Your tenant is provisioned immediately and you are signed in automatically.
+
+---
+
+### 2. Manage your account
+
+Access account settings at any time via the **user menu → My Account** in the top-right corner of the console.
+
+#### Profile
+
+Update your name, email address, and phone number.
+
+![Account — Profile](docs/images/screens/account-profile.png)
+
+#### Organization & Billing Address
+
+Set your company name and billing address. This information appears on all invoices.
+
+![Account — Organization](docs/images/screens/account-org.png)
+
+#### Security
+
+Change your password using the live strength meter. Two-factor authentication via authenticator app is coming soon.
+
+![Account — Security](docs/images/screens/account-security.png)
+
+#### Danger Zone
+
+Permanently delete your account and all associated data, or export a GDPR-compliant JSON copy of your personal data.
+
+![Account — Danger Zone](docs/images/screens/account-danger.png)
+
+> Deleting your account removes all access points, users, PII records, and billing data permanently. You must type `DELETE` to confirm. This action cannot be undone.
+
+---
+
+### 3. Point ac-client at your tenant
+
+Once your account is created, set `server_host` and `server_cn` in `/etc/apclient/ac_client.conf` on each device:
+
+```ini
+server_host = acs.optimcloud.com
+server_cn   = acs.optimcloud.com
+```
+
+The controller URL is the same for all tenants — authentication is handled via the device's provisioned client certificate issued by your tenant's step-ca instance. See [Certificate Deployment](#certificate-deployment) for details.
+
+---
+
 ## License
 
 Copyright (c) 2026 Optim Enterprises BV. Released under the [BSD 3-Clause License](LICENSE).
