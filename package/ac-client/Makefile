@@ -69,9 +69,15 @@ define Package/ac-client/description
   matching the ac-server rustls-post-quantum configuration.
 endef
 
-# Config file is preserved across package upgrades
+# Config file and init certificates are preserved across package upgrades.
+# The default bootstrap certificates (CN=00:00:00:00:00:00) let the daemon
+# start immediately after flashing so provisioning can begin.  Replace them
+# with certificates issued by your own step-ca CA for production deployments.
 define Package/ac-client/conffiles
 /etc/apclient/ac_client.conf
+/etc/apclient/init/ca.crt
+/etc/apclient/init/client.crt
+/etc/apclient/init/client.key
 endef
 
 # ── Additional host build tools ───────────────────────────────────────────────
@@ -90,8 +96,17 @@ define Package/ac-client/install
 	$(INSTALL_DIR) $(1)/etc/apclient
 	$(INSTALL_CONF) ./files/ac_client.conf $(1)/etc/apclient/ac_client.conf
 
-	# Certificate directories (empty; populated by server provisioning)
+	# Default bootstrap init certificates (CN=00:00:00:00:00:00).
+	# These allow the daemon to start and attempt provisioning immediately
+	# after flashing.  The CA private key is NOT included — it was discarded
+	# at generation time and is not needed on the device.
+	# Replace with certificates from your own step-ca for production.
 	$(INSTALL_DIR) $(1)/etc/apclient/init
+	$(INSTALL_DATA) ./files/init/ca.crt     $(1)/etc/apclient/init/ca.crt
+	$(INSTALL_DATA) ./files/init/client.crt $(1)/etc/apclient/init/client.crt
+	$(INSTALL_DATA) ./files/init/client.key $(1)/etc/apclient/init/client.key
+
+	# Provisioned certificate directory (empty; populated during CERT exchange)
 	$(INSTALL_DIR) $(1)/etc/apclient/certs
 
 	# procd init script
@@ -110,12 +125,19 @@ set -e
 echo ""
 echo "ac-client installed."
 echo ""
-echo "Before starting, deploy the init certificate from the OptimACS server:"
-echo "  scp <server>:<client_dir>/00:00:00:00:00:00/client.crt /etc/apclient/init/"
-echo "  scp <server>:<client_dir>/00:00:00:00:00:00/client.key /etc/apclient/init/"
-echo "  scp <server>:<ssl.ca_file>                             /etc/apclient/init/ca.crt"
+echo "Default bootstrap certificates (CN=00:00:00:00:00:00) have been"
+echo "installed to /etc/apclient/init/.  These allow the daemon to start"
+echo "and connect to acs.optimcloud.com for initial provisioning."
 echo ""
-echo "Then edit /etc/apclient/ac_client.conf and run:"
+echo "  WARNING: The default certificates are public (shipped in the package)."
+echo "  For production deployments, replace them with certificates issued"
+echo "  by your own step-ca CA:"
+echo ""
+echo "    scp <server>:<client_dir>/00:00:00:00:00:00/client.crt /etc/apclient/init/"
+echo "    scp <server>:<client_dir>/00:00:00:00:00:00/client.key /etc/apclient/init/"
+echo "    scp <server>:<ssl.ca_file>                             /etc/apclient/init/ca.crt"
+echo ""
+echo "Edit /etc/apclient/ac_client.conf (set server_host / server_cn), then:"
 echo "  /etc/init.d/ac-client enable"
 echo "  /etc/init.d/ac-client start"
 echo ""

@@ -419,9 +419,24 @@ make package/ac-client/compile V=s
 
 ## Certificate Deployment
 
-Before starting `ac-client`, deploy the bootstrap (init) certificate issued by the OptimACS server:
+### Default bootstrap certificates (out-of-box)
+
+The OpenWrt package ships with a set of **default bootstrap certificates** in `package/ac-client/files/init/`. These are installed to `/etc/apclient/init/` automatically during `opkg install`, allowing `ac-client` to start and attempt provisioning immediately after flashing — no manual cert deployment required for initial bring-up.
+
+| File | CN | Purpose |
+|------|----|---------|
+| `ca.crt` | `OptimACS Default Bootstrap CA` | Verifies the server certificate chain |
+| `client.crt` | `00:00:00:00:00:00` | Default init identity presented during INIT handshake |
+| `client.key` | — | Private key for `client.crt` |
+
+> **Security notice:** These certificates are **public** — the key material is included in the open-source repository and must be considered known to any third party. They are suitable for development, lab bring-up, and initial provisioning only. Replace them with certificates from your own step-ca before connecting devices to a production controller.
+
+### Production certificate deployment
+
+For production, overwrite the default files with certificates issued by your OptimACS server's step-ca instance:
 
 ```sh
+# Copy from the server's peer directory for the default init CN
 scp <server>:/var/ac-server/peers/00:00:00:00:00:00/client.crt \
     root@<ap>:/etc/apclient/init/client.crt
 scp <server>:/var/ac-server/peers/00:00:00:00:00:00/client.key \
@@ -432,6 +447,8 @@ scp <server>:/etc/optimacs/CA/rootCA.crt \
 /etc/init.d/ac-client enable
 /etc/init.d/ac-client start
 ```
+
+> Because these three files are listed as `conffiles` in the package, `opkg upgrade` will never overwrite operator-deployed certificates.
 
 ---
 
