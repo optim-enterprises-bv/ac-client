@@ -1,0 +1,111 @@
+# OptimACS ac-client UCI configuration
+# File: /etc/config/optimacs
+#
+# This is the OpenWrt-native way to configure ac-client.
+# Use standard UCI tools to read and write settings:
+#
+#   uci get  optimacs.agent.server_host
+#   uci set  optimacs.agent.server_host='controller.example.com'
+#   uci commit optimacs
+#   /etc/init.d/ac-client restart
+#
+# Or load in shell scripts via:
+#   . /lib/functions.sh
+#   config_load optimacs
+#   config_get SERVER_HOST agent server_host
+#
+# After any change run:   /etc/init.d/ac-client restart
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ── Agent identity ────────────────────────────────────────────────────────────
+# One named section of type 'optimacs', name 'agent'.
+# Access each option as:  uci get optimacs.agent.<option>
+
+config optimacs 'agent'
+
+	# ── Server / MTP ──────────────────────────────────────────────────────
+	# Hostname or IP of the OptimACS server (used to build ws_url when
+	# ws_url is left empty).
+	option server_host   ''
+
+	# TCP port for the legacy ACP/TLS connection (default: 3490).
+	# Also used as the fallback WS port when ws_url is not set.
+	option server_port   '3490'
+
+	# TLS SNI name — must match the CN in the server's certificate.
+	option server_cn     'ac-server'
+
+	# ── USP Message Transport Protocol (MTP) ──────────────────────────────
+	# Which MTP(s) to use: websocket | mqtt | both
+	option mtp           'websocket'
+
+	# WebSocket MTP: direct WSS URL to ac-server.
+	# When left empty, built automatically from server_host + server_port.
+	# Example: wss://controller.example.com:3491/usp
+	option ws_url        ''
+
+	# MQTT MTP: URL of the EMQX (or other) broker.
+	# Required only when mtp = mqtt or mtp = both.
+	# Example: mqtt://emqx.example.com:1883
+	# option mqtt_url    ''
+
+	# ── USP endpoint identifiers ───────────────────────────────────────────
+	# Agent endpoint ID sent in every USP Record.
+	# Leave empty to auto-generate from the device MAC address as:
+	#   os::<OUI>::<MAC-without-colons>
+	# option usp_endpoint_id ''
+
+	# Controller endpoint ID that this agent will accept messages from.
+	option controller_id 'oui:00005A:OptimACS-Controller-1'
+
+	# ── TLS / certificate paths ────────────────────────────────────────────
+	# CA certificate — used to verify the server's TLS certificate.
+	option ca_file       '/etc/apclient/init/ca.crt'
+
+	# Init (bootstrap) certificate, used before the device is provisioned.
+	option init_cert     '/etc/apclient/init/client.crt'
+	option init_key      '/etc/apclient/init/client.key'
+
+	# Provisioned certificate, written here by ac-client after a successful
+	# CERT exchange with the server.
+	option cert_file     '/etc/apclient/certs/client.crt'
+	option key_file      '/etc/apclient/certs/client.key'
+
+	# Directory where provisioned certs are persisted.
+	option cert_dir      '/etc/apclient/certs'
+
+	# ── Device identity ────────────────────────────────────────────────────
+	# MAC address sent in INIT packets and used as the device CN.
+	# Leave empty to auto-detect from br-lan / eth0 / wlan0.
+	# option mac_addr    ''
+
+	# CPU architecture string reported to the server (e.g. mipsel_24kc).
+	# option arch        ''
+
+	# Device model string reported to the server (e.g. tplink-c7).
+	# option sys_model   ''
+
+	# ── Polling intervals (seconds) ────────────────────────────────────────
+	# How often ac-client polls the server for configuration changes.
+	option update_interval '60'
+
+	# How often ac-client sends a STATUS heartbeat (uptime, load, wifi …).
+	option status_interval '300'
+
+	# How often ac-client runs a camera discovery + capture cycle.
+	option cam_interval    '360'
+
+	# ── GNSS / GPS receiver ────────────────────────────────────────────────
+	# Serial device for a NMEA-0183 GPS receiver.
+	# Leave empty (or comment out) to disable GPS reporting.
+	# option gnss_dev    '/dev/ttyUSB0'
+	option gnss_baud     '9600'
+
+	# ── Storage paths ──────────────────────────────────────────────────────
+	option fw_dir        '/tmp/firmware'
+	option img_dir       '/var/apclient/images'
+	option pid_file      '/var/run/apclient.pid'
+
+	# ── Process behaviour ──────────────────────────────────────────────────
+	# Send log messages to syslog (1) or stderr (0).
+	option log_syslog    '1'

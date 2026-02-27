@@ -28,9 +28,16 @@ use log::{error, info};
 #[derive(Debug, Parser)]
 #[command(name = "ac-client", about = "USP Agent (TR-369) — OptimACS access-point client")]
 struct Cli {
-    /// Path to the configuration file.
+    /// Path to the flat key=value configuration file.
+    /// Ignored when --uci is set.
     #[arg(short = 'c', long = "config", default_value = "/etc/apclient/ac_client.conf")]
     config: PathBuf,
+
+    /// Read configuration from UCI (/etc/config/optimacs) instead of the
+    /// flat config file.  All options are read from the 'agent' section:
+    ///   uci show optimacs.agent
+    #[arg(short = 'u', long = "uci")]
+    uci: bool,
 
     /// Log to stderr instead of syslog (useful for debugging).
     #[arg(long)]
@@ -43,11 +50,21 @@ struct Cli {
 async fn main() {
     let cli = Cli::parse();
 
-    let cfg = match config::load_config(&cli.config) {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("ac-client: config error: {e}");
-            process::exit(1);
+    let cfg = if cli.uci {
+        match config::load_config_uci() {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("ac-client: UCI config error: {e}");
+                process::exit(1);
+            }
+        }
+    } else {
+        match config::load_config(&cli.config) {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("ac-client: config error: {e}");
+                process::exit(1);
+            }
         }
     };
     if let Err(e) = config::validate_config(&cfg) {

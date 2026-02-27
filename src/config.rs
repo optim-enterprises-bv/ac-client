@@ -181,6 +181,87 @@ pub fn load_config(path: &Path) -> Result<ClientConfig> {
     Ok(cfg)
 }
 
+// ── UCI loader ────────────────────────────────────────────────────────────────
+
+/// Query a single UCI option from the `optimacs` package.
+///
+/// Path sent to `uci get`: `optimacs.agent.<key>`
+///
+/// Returns `None` when the option is absent or the `uci` call fails.
+fn uci_get_str(key: &str) -> Option<String> {
+    let path = format!("optimacs.agent.{key}");
+    let out = std::process::Command::new("uci")
+        .args(["get", &path])
+        .output()
+        .ok()?;
+    if out.status.success() {
+        let v = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if v.is_empty() { None } else { Some(v) }
+    } else {
+        None
+    }
+}
+
+/// Load configuration from the UCI package `/etc/config/optimacs`.
+///
+/// Every option maps directly to a field in [`ClientConfig`]; any option that
+/// is absent or empty in UCI retains the compiled-in default.
+///
+/// All options live in the single named section `optimacs.agent`:
+/// ```sh
+/// uci get  optimacs.agent.server_host
+/// uci show optimacs.agent
+///
+/// uci set  optimacs.agent.server_host='controller.example.com'
+/// uci set  optimacs.agent.ws_url='wss://controller.example.com:3491/usp'
+/// uci set  optimacs.agent.mtp='websocket'
+/// uci commit optimacs
+/// /etc/init.d/ac-client restart
+///
+/// # From a shell script:
+/// . /lib/functions.sh
+/// config_load optimacs
+/// config_get SERVER_HOST agent server_host
+/// ```
+pub fn load_config_uci() -> Result<ClientConfig> {
+    let mut cfg = ClientConfig::default();
+
+    if let Some(v) = uci_get_str("server_host")     { cfg.server_host     = v; }
+    if let Some(v) = uci_get_str("server_port")     { cfg.server_port     = v.parse().unwrap_or(PORT); }
+    if let Some(v) = uci_get_str("server_cn")       { cfg.server_cn       = v; }
+    if let Some(v) = uci_get_str("ca_file")         { cfg.ca_file         = PathBuf::from(v); }
+    if let Some(v) = uci_get_str("init_cert")       { cfg.init_cert       = PathBuf::from(v); }
+    if let Some(v) = uci_get_str("init_key")        { cfg.init_key        = PathBuf::from(v); }
+    if let Some(v) = uci_get_str("cert_file")       { cfg.cert_file       = PathBuf::from(v); }
+    if let Some(v) = uci_get_str("key_file")        { cfg.key_file        = PathBuf::from(v); }
+    if let Some(v) = uci_get_str("cert_dir")        { cfg.cert_dir        = PathBuf::from(v); }
+    if let Some(v) = uci_get_str("mac_addr")        { cfg.mac_addr        = v; }
+    if let Some(v) = uci_get_str("arch")            { cfg.arch            = v; }
+    if let Some(v) = uci_get_str("sys_model")       { cfg.sys_model       = v; }
+    if let Some(v) = uci_get_str("gnss_dev")        { cfg.gnss_dev        = v; }
+    if let Some(v) = uci_get_str("gnss_baud")       { cfg.gnss_baud       = v.parse().unwrap_or(9600); }
+    if let Some(v) = uci_get_str("update_interval") { cfg.update_interval = v.parse().unwrap_or(UPDATE_INTERVAL); }
+    if let Some(v) = uci_get_str("status_interval") { cfg.status_interval = v.parse().unwrap_or(STATUS_INTERVAL); }
+    if let Some(v) = uci_get_str("cam_interval")    { cfg.cam_interval    = v.parse().unwrap_or(CAM_INTERVAL); }
+    if let Some(v) = uci_get_str("fw_dir")          { cfg.fw_dir          = PathBuf::from(v); }
+    if let Some(v) = uci_get_str("img_dir")         { cfg.img_dir         = PathBuf::from(v); }
+    if let Some(v) = uci_get_str("pid_file")        { cfg.pid_file        = PathBuf::from(v); }
+    if let Some(v) = uci_get_str("log_syslog")      { cfg.log_syslog      = v == "1" || v == "true" || v == "yes"; }
+    if let Some(v) = uci_get_str("usp_endpoint_id") { cfg.usp_endpoint_id = v; }
+    if let Some(v) = uci_get_str("controller_id")   { cfg.controller_id   = v; }
+    if let Some(v) = uci_get_str("ws_url")          { cfg.ws_url          = Some(v); }
+    if let Some(v) = uci_get_str("mqtt_url")        { cfg.mqtt_url        = Some(v); }
+    if let Some(v) = uci_get_str("mtp") {
+        cfg.mtp = match v.to_ascii_lowercase().as_str() {
+            "mqtt" => MtpType::Mqtt,
+            "both" => MtpType::Both,
+            _      => MtpType::WebSocket,
+        };
+    }
+
+    Ok(cfg)
+}
+
 /// Validate that required fields are populated.
 pub fn validate_config(cfg: &ClientConfig) -> Result<()> {
     if cfg.mac_addr.is_empty() && cfg.usp_endpoint_id.is_empty() {
