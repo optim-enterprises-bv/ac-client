@@ -1,6 +1,6 @@
 # ac-client — USP Agent for OpenWrt Access Points
 
-`ac-client` is a Rust daemon implementing the **TR-369 / USP 1.3 Agent** (User Services Platform, Broadband Forum) for OpenWrt-based access-point devices managed by an [OptimACS](https://github.com/optim-enterprises-bv/APConfig) controller (`ac-server`).
+`ac-client` is a Rust daemon implementing the **TR-369 / USP 1.3 Agent** (User Services Platform, Broadband Forum) for OpenWrt-based access-point devices managed by an [OptimACS](https://acs.optimcloud.com) controller (`ac-server`).
 
 ---
 
