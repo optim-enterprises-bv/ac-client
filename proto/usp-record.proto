@@ -1,0 +1,154 @@
+// USP Record — TR-369 Amendment 3 (BBF TR-369 1.3)
+//
+// Derived from the Broadband Forum USP specification.
+// https://usp.technology/
+//
+// USP Records are the outer envelope that carries USP Messages over any MTP.
+// The Record contains routing (to_id / from_id), optional security metadata,
+// and exactly one record_type variant.
+
+syntax = "proto3";
+
+package usp_record;
+
+option java_package        = "com.broadbandforum.usp.proto";
+option java_outer_classname = "UspRecord";
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Top-level envelope
+// ─────────────────────────────────────────────────────────────────────────────
+
+message Record {
+  // USP specification version string implemented by the originating endpoint.
+  // For TR-369 1.3, use "1.3".
+  string version = 1;
+
+  // Endpoint ID of the intended recipient of this USP Record.
+  string to_id = 2;
+
+  // Endpoint ID of the originating endpoint of this USP Record.
+  string from_id = 3;
+
+  // Security applied to the payload field of the record_type.
+  PayloadSecurity payload_security = 4;
+
+  // HMAC or ECDSA signature over the serialized Record (optional).
+  bytes mac_signature = 5;
+
+  // DER-encoded X.509 sender certificate chain (optional).
+  bytes sender_cert = 6;
+
+  // Exactly one record type is present.
+  oneof record_type {
+    NoSessionContextRecord no_session_context = 7;
+    SessionContextRecord   session_context    = 8;
+    WebSocketConnectRecord websocket_connect  = 9;
+    MQTTConnectRecord      mqtt_connect       = 10;
+    STOMPConnectRecord     stomp_connect      = 11;
+    DisconnectRecord       disconnect         = 12;
+  }
+
+  enum PayloadSecurity {
+    // Payload is not encrypted or authenticated at the USP layer.
+    PLAINTEXT = 0;
+    // Payload is a TLS 1.2 (or later) session record.
+    TLS12 = 1;
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Record types
+// ─────────────────────────────────────────────────────────────────────────────
+
+// A USP Message (usp_msg.Msg, serialised with prost) carried outside of a
+// session context. WebSocket uses this type after the initial connect record.
+message NoSessionContextRecord {
+  // Serialised usp_msg.Msg protobuf bytes.
+  bytes payload = 2;
+}
+
+// A USP Message carried inside a session context that provides reliable,
+// ordered delivery with segmentation/reassembly (SAR) for large payloads.
+// Used by MQTT and other MTPs that lack native ordering guarantees.
+message SessionContextRecord {
+  // Opaque session identifier, unique per endpoint pair.
+  uint64 session_id = 1;
+
+  // Monotonically increasing sequence counter for each Record sent.
+  uint64 sequence_id = 2;
+
+  // Indicates the next sequence_id the sender expects to receive; all
+  // records up to (expected_id - 1) have been successfully received.
+  uint64 expected_id = 3;
+
+  // When non-zero, the sender is requesting retransmission of all records
+  // from retransmit_id to the current expected_id - 1.
+  uint64 retransmit_id = 4;
+
+  // Segmentation / reassembly state of the *outgoing* payload.
+  PayloadSARState payload_sar_state = 5;
+
+  // SAR state the originator expects for the *incoming* response payload.
+  PayloadSARState payloadrec_sar_state = 6;
+
+  // One or more segments of a serialised usp_msg.Msg protobuf.
+  // The receiver concatenates segments in sequence_id order before
+  // deserialising.
+  repeated bytes payload = 7;
+
+  enum PayloadSARState {
+    // Payload is not segmented (or this is the only segment).
+    NONE = 0;
+    // First segment of a multi-segment payload.
+    BEGIN = 1;
+    // Intermediate segment.
+    INPROCESS = 2;
+    // Final segment; receiver may now reassemble and process.
+    COMPLETE = 3;
+  }
+}
+
+// Sent once by a USP Agent immediately after upgrading an HTTP connection to
+// WebSocket. The receiving USP Controller registers the agent's endpoint ID
+// and transitions to NoSessionContextRecord exchange.
+message WebSocketConnectRecord {
+  // No fields — routing information is in the enclosing Record header.
+}
+
+// Sent once by a USP Agent or Controller on connecting to an MQTT broker.
+// Informs the other endpoint of the MQTT topic on which this endpoint listens.
+message MQTTConnectRecord {
+  // MQTT version negotiated with the broker.
+  MQTTVersion version = 1;
+
+  // The MQTT topic to which this endpoint has subscribed and on which it
+  // expects to receive USP Records from the other endpoint.
+  string subscribed_topic = 2;
+
+  enum MQTTVersion {
+    V3_1_1 = 0;
+    V5 = 1;
+  }
+}
+
+// Sent once by a USP Agent or Controller on connecting to a STOMP broker.
+message STOMPConnectRecord {
+  // STOMP version negotiated with the broker.
+  STOMPVersion version = 1;
+
+  // The STOMP destination to which this endpoint has subscribed.
+  string subscribed_destination = 2;
+
+  enum STOMPVersion {
+    V1_2 = 0;
+  }
+}
+
+// Sent to cleanly terminate a USP session or MTP connection.
+message DisconnectRecord {
+  // Human-readable reason string (informational only).
+  string reason = 1;
+
+  // Numeric reason code.  0 = normal closure.
+  fixed32 reason_code = 2;
+}

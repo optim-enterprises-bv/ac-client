@@ -1,0 +1,510 @@
+// USP Message — TR-369 Amendment 3 (BBF TR-369 1.3)
+//
+// Derived from the Broadband Forum USP specification.
+// https://usp.technology/
+//
+// USP Messages are the payload carried inside a USP Record.  Every message
+// has a header (msg_id + msg_type) and a body (request, response, or error).
+
+syntax = "proto3";
+
+package usp_msg;
+
+option java_package         = "com.broadbandforum.usp.proto";
+option java_outer_classname = "UspMsg";
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Top-level message
+// ─────────────────────────────────────────────────────────────────────────────
+
+message Msg {
+  Header header = 1;
+  Body   body   = 2;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Header
+// ─────────────────────────────────────────────────────────────────────────────
+
+message Header {
+  // Unique message identifier within the endpoint pair.  Responses and Errors
+  // carry the same msg_id as the originating Request.
+  string msg_id = 1;
+
+  // Identifies the message type so the receiver knows how to parse the body.
+  MessageType msg_type = 2;
+
+  enum MessageType {
+    ERROR                    = 0;
+    GET                      = 1;
+    GET_RESP                 = 2;
+    NOTIFY                   = 3;
+    SET                      = 4;
+    SET_RESP                 = 5;
+    OPERATE                  = 6;
+    OPERATE_RESP             = 7;
+    ADD                      = 8;
+    ADD_RESP                 = 9;
+    DELETE                   = 10;
+    DELETE_RESP              = 11;
+    GET_SUPPORTED_DM         = 12;
+    GET_SUPPORTED_DM_RESP    = 13;
+    GET_INSTANCES            = 14;
+    GET_INSTANCES_RESP       = 15;
+    NOTIFY_RESP              = 16;
+    GET_SUPPORTED_PROTO      = 17;
+    GET_SUPPORTED_PROTO_RESP = 18;
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Body
+// ─────────────────────────────────────────────────────────────────────────────
+
+message Body {
+  oneof msg_body {
+    Request  request  = 1;
+    Response response = 2;
+    Error    error    = 3;
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Request messages (Controller → Agent or Agent → Controller for Notify/Sub)
+// ─────────────────────────────────────────────────────────────────────────────
+
+message Request {
+  oneof req_type {
+    Get                get                = 1;
+    GetSupportedDm     get_supported_dm   = 2;
+    GetInstances       get_instances      = 3;
+    Set                set                = 4;
+    Add                add                = 5;
+    Delete             delete             = 6;
+    Operate            operate            = 7;
+    Notify             notify             = 8;
+    GetSupportedProto  get_supported_proto = 9;
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Response messages
+// ─────────────────────────────────────────────────────────────────────────────
+
+message Response {
+  oneof resp_type {
+    GetResp               get_resp                = 1;
+    GetSupportedDmResp    get_supported_dm_resp   = 2;
+    GetInstancesResp      get_instances_resp      = 3;
+    SetResp               set_resp                = 4;
+    AddResp               add_resp                = 5;
+    DeleteResp            delete_resp             = 6;
+    OperateResp           operate_resp            = 7;
+    NotifyResp            notify_resp             = 8;
+    GetSupportedProtoResp get_supported_proto_resp = 9;
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Error
+// ─────────────────────────────────────────────────────────────────────────────
+
+message Error {
+  // USP error code (7000–7999).  7000 = MESSAGE_NOT_UNDERSTOOD.
+  fixed32 err_code = 1;
+
+  // Human-readable error description.
+  string err_msg = 2;
+
+  // Per-parameter errors for SET or ADD responses.
+  repeated ParamError param_errs = 3;
+
+  message ParamError {
+    string  param_path = 1;
+    fixed32 err_code   = 2;
+    string  err_msg    = 3;
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GET / GET_RESP
+// ─────────────────────────────────────────────────────────────────────────────
+
+message Get {
+  // List of TR-181 parameter/object paths to retrieve.
+  // Wildcards (*) and partial paths are supported.
+  repeated string param_paths = 1;
+
+  // Maximum depth to recurse into object instances (0 = unlimited).
+  uint32 max_depth = 2;
+}
+
+message GetResp {
+  repeated RequestedPathResult req_path_results = 1;
+
+  message RequestedPathResult {
+    string requested_path = 1;
+    fixed32 err_code      = 2;
+    string  err_msg       = 3;
+    repeated ResolvedPathResult resolved_path_results = 4;
+  }
+
+  message ResolvedPathResult {
+    string resolved_path = 1;
+    // param name → value (all as strings per TR-181 convention)
+    map<string, string> result_params = 2;
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SET / SET_RESP
+// ─────────────────────────────────────────────────────────────────────────────
+
+message Set {
+  // When true, apply as many updates as possible; when false, all-or-nothing.
+  bool allow_partial = 1;
+
+  repeated UpdateObject update_objs = 2;
+
+  message UpdateObject {
+    string obj_path = 1;
+    repeated UpdateParamSetting param_settings = 2;
+  }
+
+  message UpdateParamSetting {
+    string param = 1;
+    string value = 2;
+    // When true, failure to set this param fails the whole UpdateObject.
+    bool required = 3;
+  }
+}
+
+message SetResp {
+  repeated UpdatedObjectResult updated_obj_results = 1;
+
+  message UpdatedObjectResult {
+    string requested_path = 1;
+    oneof oper_status {
+      OperSuccess oper_success = 2;
+      OperFailure oper_failure = 3;
+    }
+    message OperSuccess {
+      repeated UpdatedInstanceResult updated_inst_results = 1;
+    }
+    message OperFailure {
+      fixed32 err_code = 1;
+      string  err_msg  = 2;
+      repeated UpdatedInstanceFailure updated_inst_failures = 3;
+    }
+  }
+
+  message UpdatedInstanceResult {
+    string affected_path = 1;
+    repeated ParameterError errors = 2;
+    map<string, string> updated_params = 3;
+  }
+
+  message UpdatedInstanceFailure {
+    string  affected_path = 1;
+    fixed32 err_code      = 2;
+    string  err_msg       = 3;
+  }
+
+  message ParameterError {
+    string  param    = 1;
+    fixed32 err_code = 2;
+    string  err_msg  = 3;
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ADD / ADD_RESP
+// ─────────────────────────────────────────────────────────────────────────────
+
+message Add {
+  bool allow_partial = 1;
+  repeated CreateObject create_objs = 2;
+
+  message CreateObject {
+    string obj_path = 1;
+    repeated CreateParamSetting param_settings = 2;
+  }
+
+  message CreateParamSetting {
+    string param    = 1;
+    string value    = 2;
+    bool   required = 3;
+  }
+}
+
+message AddResp {
+  repeated CreatedObjectResult created_obj_results = 1;
+
+  message CreatedObjectResult {
+    string requested_path = 1;
+    oneof oper_status {
+      OperSuccess oper_success = 2;
+      OperFailure oper_failure = 3;
+    }
+    message OperSuccess {
+      string instantiated_path = 1;
+      repeated ParameterError  param_errs    = 2;
+      map<string, string>      unique_keys   = 3;
+    }
+    message OperFailure {
+      fixed32 err_code = 1;
+      string  err_msg  = 2;
+    }
+  }
+
+  message ParameterError {
+    string  param    = 1;
+    fixed32 err_code = 2;
+    string  err_msg  = 3;
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DELETE / DELETE_RESP
+// ─────────────────────────────────────────────────────────────────────────────
+
+message Delete {
+  bool allow_partial = 1;
+  repeated string obj_paths = 2;
+}
+
+message DeleteResp {
+  repeated DeletedObjectResult deleted_obj_results = 1;
+
+  message DeletedObjectResult {
+    string requested_path = 1;
+    oneof oper_status {
+      OperSuccess oper_success = 2;
+      OperFailure oper_failure = 3;
+    }
+    message OperSuccess {
+      repeated string affected_paths = 1;
+    }
+    message OperFailure {
+      fixed32 err_code = 1;
+      string  err_msg  = 2;
+      repeated UnaffectedPathError unaffected_path_errs = 3;
+    }
+  }
+
+  message UnaffectedPathError {
+    string  unaffected_path = 1;
+    fixed32 err_code        = 2;
+    string  err_msg         = 3;
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// OPERATE / OPERATE_RESP
+// ─────────────────────────────────────────────────────────────────────────────
+
+message Operate {
+  // Full path to the command, e.g. "Device.X_OptimACS_Firmware.Download()".
+  string command      = 1;
+  // Opaque string returned unchanged in the response.
+  string command_key  = 2;
+  // When true, the Agent sends an OperateResp immediately and then an
+  // asynchronous Notify when the operation completes.
+  bool   send_resp    = 3;
+  // Input arguments as name → value pairs.
+  map<string, string> input_args = 4;
+}
+
+message OperateResp {
+  string command_key = 1;
+  repeated OperationResult operation_results = 2;
+
+  message OperationResult {
+    string executed_command = 1;
+    oneof operate_resp_type {
+      OutputArgs  req_output_args = 2;
+      CommandFailure cmd_failure  = 3;
+      string req_obj_path         = 4;
+    }
+  }
+
+  message OutputArgs {
+    map<string, string> output_args = 1;
+  }
+
+  message CommandFailure {
+    fixed32 err_code = 1;
+    string  err_msg  = 2;
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// NOTIFY / NOTIFY_RESP
+// ─────────────────────────────────────────────────────────────────────────────
+
+message Notify {
+  string subscription_id = 1;
+  // When true, the Agent expects a NotifyResp.
+  bool send_resp = 2;
+
+  oneof notification {
+    Event          event           = 3;
+    ValueChange    value_change    = 4;
+    ObjectCreation obj_creation    = 5;
+    ObjectDeletion obj_deletion    = 6;
+    OperComplete   oper_complete   = 7;
+    OnBoardRequest on_board_request = 8;
+  }
+
+  // ── Event ──────────────────────────────────────────────────────────────────
+  // Sent for a USP Event defined in the data model (e.g. Boot!).
+  message Event {
+    string obj_path   = 1;
+    string event_name = 2;
+    string command_key = 3;
+    map<string, string> params = 4;
+  }
+
+  // ── ValueChange ────────────────────────────────────────────────────────────
+  // Sent when a parameter matching a ValueChange subscription changes.
+  message ValueChange {
+    string param_path   = 1;
+    string param_value  = 2;
+  }
+
+  // ── ObjectCreation ─────────────────────────────────────────────────────────
+  message ObjectCreation {
+    string obj_path = 1;
+    map<string, string> unique_keys = 2;
+  }
+
+  // ── ObjectDeletion ─────────────────────────────────────────────────────────
+  message ObjectDeletion {
+    string obj_path = 1;
+  }
+
+  // ── OperComplete ───────────────────────────────────────────────────────────
+  // Asynchronous notification that a previously-issued OPERATE has completed.
+  message OperComplete {
+    string obj_path         = 1;
+    string command_name     = 2;
+    string command_key      = 3;
+    oneof operate_resp_type {
+      OutputArgs         req_output_args = 4;
+      CommandFailure     cmd_failure     = 5;
+    }
+    message OutputArgs     { map<string, string> output_args = 1; }
+    message CommandFailure { fixed32 err_code = 1; string err_msg = 2; }
+  }
+
+  // ── OnBoardRequest ─────────────────────────────────────────────────────────
+  // Sent by an Agent that has not yet been provisioned, requesting a
+  // Controller to initiate on-boarding.  Carries basic identity parameters.
+  message OnBoardRequest {
+    string oui          = 1;
+    string product_class = 2;
+    string serial_number = 3;
+    string agent_supported_protocol_versions = 4;
+  }
+}
+
+message NotifyResp {
+  string subscription_id = 1;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GET_SUPPORTED_DM / GET_SUPPORTED_DM_RESP
+// ─────────────────────────────────────────────────────────────────────────────
+
+message GetSupportedDm {
+  repeated string obj_paths = 1;
+  bool first_level_only       = 2;
+  bool return_commands        = 3;
+  bool return_events          = 4;
+  bool return_params          = 5;
+  bool return_unique_key_sets = 6;
+}
+
+message GetSupportedDmResp {
+  repeated RequestedObjectResult req_obj_results = 1;
+
+  message RequestedObjectResult {
+    string  req_obj_path = 1;
+    fixed32 err_code     = 2;
+    string  err_msg      = 3;
+    string  data_model_inst_uri = 4;
+    repeated SupportedObject supported_objs = 5;
+  }
+
+  message SupportedObject {
+    string obj_path = 1;
+    Access access   = 2;
+    bool   is_multi_instance = 3;
+    repeated SupportedParam    supported_params   = 4;
+    repeated SupportedCommand  supported_commands = 5;
+    repeated SupportedEvent    supported_events   = 6;
+    repeated SupportedUniqueKeySet unique_key_sets = 7;
+    enum Access { OBJ_READ_ONLY = 0; OBJ_ADD_DELETE = 1; OBJ_ADD_ONLY = 2; OBJ_DELETE_ONLY = 3; }
+  }
+
+  message SupportedParam {
+    string param_name = 1;
+    Access access     = 2;
+    bool   value_change = 3;
+    enum Access { PARAM_READ_ONLY = 0; PARAM_READ_WRITE = 1; PARAM_WRITE_ONLY = 2; }
+  }
+
+  message SupportedCommand {
+    string command_name = 1;
+    repeated string input_arg_names  = 2;
+    repeated string output_arg_names = 3;
+  }
+
+  message SupportedEvent {
+    string event_name = 1;
+    repeated string arg_names = 2;
+  }
+
+  message SupportedUniqueKeySet {
+    repeated string unique_keys = 1;
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GET_INSTANCES / GET_INSTANCES_RESP
+// ─────────────────────────────────────────────────────────────────────────────
+
+message GetInstances {
+  repeated string obj_paths = 1;
+  bool first_level_only     = 2;
+}
+
+message GetInstancesResp {
+  repeated RequestedPathResult req_path_results = 1;
+
+  message RequestedPathResult {
+    string  requested_path = 1;
+    fixed32 err_code       = 2;
+    string  err_msg        = 3;
+    repeated CurrInstance curr_insts = 4;
+  }
+
+  message CurrInstance {
+    string obj_path = 1;
+    map<string, string> unique_keys = 2;
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GET_SUPPORTED_PROTO / GET_SUPPORTED_PROTO_RESP
+// ─────────────────────────────────────────────────────────────────────────────
+
+message GetSupportedProto {
+  // Comma-separated list of USP versions the sender supports, e.g. "1.3".
+  string controller_supported_versions = 1;
+}
+
+message GetSupportedProtoResp {
+  // USP version(s) the agent supports that overlap with the controller's list.
+  string agent_supported_versions = 1;
+}

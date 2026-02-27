@@ -1,0 +1,162 @@
+syntax = "proto3";
+package acp;
+
+// ── Incoming request bodies ───────────────────────────────────────────────────
+
+/// Body of an ACP_INIT message — device registration / identification.
+message InitRequest {
+  string mac       = 1;
+  string arch      = 2;
+  string sys_model = 3;
+  string ip        = 4;
+}
+
+/// Body of an ACP_STATUS heartbeat message.
+message StatusRequest {
+  string uptime          = 1;
+  string load_avg        = 2;
+  string free_mem        = 3;
+  string gw              = 4;
+  string ip              = 5;
+  string mac             = 6;
+  string ssid            = 7;
+  string orion_ver       = 8;
+  string nbs             = 9;
+  string rank            = 10;
+  string tot_kb_up       = 11;
+  string tot_kb_down     = 12;
+  string users           = 13;
+  string latitude        = 14;
+  string longitude       = 15;
+  int32  modem_status    = 16;
+  int32  wireless_status = 17;
+}
+
+/// Single camera entry within an ACP_CAM_INFO message.
+message CameraInfo {
+  uint32 idx = 1;
+  string ip  = 2;
+  string mac = 3;
+}
+
+/// Body of an ACP_CAM_INFO message — list of cameras reported by the AP.
+message CamInfoRequest {
+  repeated CameraInfo cameras = 1;
+}
+
+/// Header body of an ACP_CAM_IMG message — metadata for the image to follow.
+message CamImgRequest {
+  string mac           = 1;
+  string checksum      = 2;
+  int64  size          = 3;
+  string sdcard_status = 4;
+}
+
+// ── Outgoing response bodies ──────────────────────────────────────────────────
+
+/// Sent as the body of an ACP_CERT response to a newly-provisioned device.
+message CertsResponse {
+  string ca_cert = 1;
+  string cert    = 2;
+  string key     = 3;
+}
+
+/// Firmware metadata within a SystemConfig.
+message FirmwareConfig {
+  string name     = 1;
+  string size     = 2;
+  string checksum = 3;
+  string version  = 4;
+}
+
+/// Hotspot/captive-portal settings embedded inside a WirelessConfig.
+message HotspotConfig {
+  string          name      = 1;
+  string          net       = 2;
+  string          radius1   = 3;
+  string          radius2   = 4;
+  string          radsecret = 5;
+  string          w_url     = 6;
+  string          l_url     = 7;
+  string          uamsecret = 8;
+  repeated string vip_macs  = 9;
+  repeated string vip_sites = 10;
+}
+
+/// Wireless interface configuration embedded inside an InterfaceConfig.
+message WirelessConfig {
+  string          dev_name        = 1;
+  string          status          = 2;
+  string          essid           = 3;
+  string          essid_broadcast = 4;
+  string          mode            = 5;
+  string          enc_type        = 6;
+  optional string enc_key         = 7;
+  optional HotspotConfig hotspot  = 8;
+}
+
+/// WiFi radio/device entry within a SystemConfig.
+message WifiDeviceConfig {
+  string          name        = 1;
+  string          device_type = 2;
+  int32           channel     = 3;
+  optional string antenna     = 4;
+  repeated string mac_filters = 5;
+}
+
+/// Network interface entry within a SystemConfig.
+message InterfaceConfig {
+  string          name             = 1;
+  optional string network_name     = 2;
+  string          con_type         = 3;
+  string          ip               = 4;
+  string          netmask          = 5;
+  string          gateway          = 6;
+  string          dns              = 7;
+  optional WirelessConfig wireless = 8;
+}
+
+/// Static hostname → IP mapping.
+message HostEntry {
+  string hostname = 1;
+  string ip       = 2;
+}
+
+/// DHCP reservation (MAC → IP).
+message DhcpHostEntry {
+  string mac = 1;
+  string ip  = 2;
+}
+
+/// Camera configuration entry within a SystemConfig.
+message CameraConfig {
+  string          mac          = 1;
+  string          ip           = 2;
+  int32           idx          = 3;
+  optional string username     = 4;
+  optional string password     = 5;
+  optional string resolution   = 6;
+  int32           cam_interval = 7;
+  optional string image_url    = 8;
+  optional string stream_url   = 9;
+}
+
+/// Full AP configuration — body of an ACP_ACK response to GET_CONFIG.
+message SystemConfig {
+  string                    hostname        = 1;
+  string                    password        = 2;
+  repeated string           access_networks = 3;
+  optional FirmwareConfig   firmware        = 4;
+  repeated InterfaceConfig  interfaces      = 5;
+  repeated WifiDeviceConfig wifi_devices    = 6;
+  repeated HostEntry        hosts           = 7;
+  repeated DhcpHostEntry    dhcp_hosts      = 8;
+  repeated CameraConfig     cameras         = 9;
+}
+
+/// Minimal identity-only config for the meshconnect schema.
+message MeshConnectConfig {
+  int32  id  = 1;
+  string mac = 2;
+  string ip  = 3;
+}
