@@ -389,11 +389,11 @@ scp <server>:/etc/optimacs/CA/rootCA.crt \
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `server_host` | `0.0.0.0` | ac-server hostname or IP |
-| `server_cn` | `ac-server` | Expected CN in the server TLS certificate (SNI) |
+| `server_host` | `acs.optimcloud.com` | ac-server hostname or IP |
+| `server_cn` | `acs.optimcloud.com` | Expected CN in the server TLS certificate (SNI) |
 | `mtp` | `websocket` | MTP selection: `websocket` \| `mqtt` \| `both` |
-| `ws_url` | `wss://0.0.0.0:3491/usp` | WebSocket MTP URL |
-| `mqtt_url` | `mqtt://0.0.0.0:1883` | MQTT broker URL |
+| `ws_url` | `wss://acs.optimcloud.com:3491/usp` | WebSocket MTP URL |
+| `mqtt_url` | `mqtt://acs.optimcloud.com:1883` | MQTT broker URL |
 | `mqtt_client_id` | *(auto)* | MQTT client identifier |
 
 ### Device Identity
