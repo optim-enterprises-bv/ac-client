@@ -33,7 +33,6 @@ The Broadband Forum's **TR-369 User Services Platform** (USP) defines a vendor-n
 | Camera management | Axis IP-camera discovery (ARP scan + CGI), periodic JPEG capture, image upload to server |
 | Multi-tenant RBAC | Isolate fleets per tenant; role hierarchy from stats_viewer to super_admin |
 | Post-quantum PKI | Smallstep step-ca issues all certs; CA private key never touches the controller |
-| Kubernetes-ready | Official Helm chart at [optim-enterprises-bv/helm-charts](https://github.com/optim-enterprises-bv/helm-charts) |
 
 ---
 
