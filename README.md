@@ -458,4 +458,4 @@ oui:{vendor-oui}:{mac-address-without-colons}
 
 ## License
 
-See [APConfig](https://github.com/optim-enterprises-bv/APConfig) for license information.
+Copyright (c) 2026 Optim Enterprises BV. Released under the [BSD 3-Clause License](LICENSE).
