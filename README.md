@@ -39,7 +39,7 @@ The Broadband Forum's **TR-369 User Services Platform** (USP) defines a vendor-n
 
 ## Architecture
 
-![OptimACS System Architecture](https://raw.githubusercontent.com/optim-enterprises-bv/APConfig/main/docs/images/architecture.png)
+![OptimACS System Architecture](docs/images/architecture.png)
 
 **ac-client** runs on each OpenWrt AP as a USP Agent. On first boot it connects using a shared bootstrap certificate, sends a Boot! Notify, and waits for the controller to issue it a unique per-device mTLS certificate. Thereafter it runs a continuous loop: handling incoming GET/SET/OPERATE messages, sending periodic ValueChange telemetry, and responding to firmware-upgrade and camera-capture operations.
 
