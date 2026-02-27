@@ -75,6 +75,7 @@ endef
 # with certificates issued by your own step-ca CA for production deployments.
 define Package/ac-client/conffiles
 /etc/apclient/ac_client.conf
+/etc/config/optimacs
 /etc/apclient/init/ca.crt
 /etc/apclient/init/client.crt
 /etc/apclient/init/client.key
@@ -92,9 +93,13 @@ define Package/ac-client/install
 		$(PKG_INSTALL_DIR)/usr/bin/ac-client \
 		$(1)/usr/sbin/ac-client
 
-	# Default configuration (not installed if already present on device)
+	# Flat key=value config (legacy; not installed if already present on device)
 	$(INSTALL_DIR) $(1)/etc/apclient
 	$(INSTALL_CONF) ./files/ac_client.conf $(1)/etc/apclient/ac_client.conf
+
+	# UCI config (preferred; not installed if already present on device)
+	$(INSTALL_DIR) $(1)/etc/config
+	$(INSTALL_CONF) ./files/etc/config/optimacs $(1)/etc/config/optimacs
 
 	# Default bootstrap init certificates (CN=00:00:00:00:00:00).
 	# These allow the daemon to start and attempt provisioning immediately
@@ -137,7 +142,17 @@ echo "    scp <server>:<client_dir>/00:00:00:00:00:00/client.crt /etc/apclient/i
 echo "    scp <server>:<client_dir>/00:00:00:00:00:00/client.key /etc/apclient/init/"
 echo "    scp <server>:<ssl.ca_file>                             /etc/apclient/init/ca.crt"
 echo ""
-echo "Edit /etc/apclient/ac_client.conf (set server_host / server_cn), then:"
+echo "Configure via UCI (recommended):"
+echo "   uci set optimacs.agent.server_host='<controller>'"
+echo "   uci set optimacs.agent.ws_url='wss://<controller>:3491/usp'"
+echo "   uci commit optimacs"
+echo ""
+echo "   Or edit the flat config file:"
+echo "   vi /etc/apclient/ac_client.conf"
+echo ""
+echo "View current config:  uci show optimacs.agent"
+echo ""
+echo "Then enable and start:"
 echo "  /etc/init.d/ac-client enable"
 echo "  /etc/init.d/ac-client start"
 echo ""

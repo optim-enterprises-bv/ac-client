@@ -1,6 +1,19 @@
 #!/bin/sh /etc/rc.common
-# ACP/1.0 access-point client daemon — procd init script
-# Manages the ac-client Rust daemon that communicates with an APConfig server.
+# OptimACS ac-client daemon — procd init script
+#
+# Configuration priority:
+#   1. UCI  (/etc/config/optimacs)  — preferred; managed with uci(1) / LuCI
+#   2. Flat file (/etc/apclient/ac_client.conf) — legacy fallback
+#
+# Quick UCI setup:
+#   uci set optimacs.agent.server_host='controller.example.com'
+#   uci set optimacs.agent.ws_url='wss://controller.example.com:3491/usp'
+#   uci commit optimacs
+#   /etc/init.d/ac-client restart
+#
+# Quick flat-file setup:
+#   vi /etc/apclient/ac_client.conf
+#   /etc/init.d/ac-client restart
 
 USE_PROCD=1
 
@@ -9,29 +22,49 @@ START=95
 STOP=05
 
 PROG=/usr/sbin/ac-client
+UCI_PKG=/etc/config/optimacs
 CONF=/etc/apclient/ac_client.conf
 PIDFILE=/var/run/apclient.pid
 
-start_service() {
-	# Validate that the config file is present before starting.
-	if [ ! -f "$CONF" ]; then
-		echo "ac-client: config file $CONF not found, not starting" >&2
-		return 1
-	fi
+# Return 0 if the UCI config has a non-empty server_host or ws_url option.
+_uci_configured() {
+	local v
+	v=$(uci -q get optimacs.agent.server_host 2>/dev/null)
+	[ -n "$v" ] && return 0
+	v=$(uci -q get optimacs.agent.ws_url 2>/dev/null)
+	[ -n "$v" ] && return 0
+	return 1
+}
 
+start_service() {
 	# Require at least the init certificate to be present.
 	if [ ! -f /etc/apclient/init/client.crt ] || \
 	   [ ! -f /etc/apclient/init/client.key ]; then
 		echo "ac-client: init certificate not found in /etc/apclient/init/, not starting" >&2
-		echo "  Deploy from the APConfig server's client_dir/00:00:00:00:00:00/ directory." >&2
+		echo "  Deploy from the OptimACS server's client_dir/00:00:00:00:00:00/ directory." >&2
+		return 1
+	fi
+
+	# Choose UCI vs flat-file config source.
+	if [ -f "$UCI_PKG" ] && _uci_configured; then
+		echo "ac-client: using UCI config ($UCI_PKG)" >&2
+		CONFIG_ARGS="--uci"
+	elif [ -f "$CONF" ]; then
+		echo "ac-client: using flat config ($CONF)" >&2
+		CONFIG_ARGS="-c $CONF"
+	else
+		echo "ac-client: no config found (neither $UCI_PKG nor $CONF), not starting" >&2
+		echo "  Set server_host via:  uci set optimacs.agent.server_host='<host>'" >&2
+		echo "  Then:                 uci commit optimacs && /etc/init.d/ac-client start" >&2
 		return 1
 	fi
 
 	procd_open_instance
 
-	procd_set_param command "$PROG" -c "$CONF"
+	# shellcheck disable=SC2086
+	procd_set_param command "$PROG" $CONFIG_ARGS
 
-	# PID file — used by the client's own --daemonize logic as well
+	# PID file
 	procd_set_param pidfile "$PIDFILE"
 
 	# Restart automatically: respawn after 3600 s uptime threshold,
