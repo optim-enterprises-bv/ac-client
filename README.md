@@ -4,6 +4,224 @@
 
 ---
 
+## Why ac-client? Why OptimACS?
+
+### The problem with managing fleets of access points
+
+Running dozens — or thousands — of Wi-Fi access points across sites, campuses, or multi-tenant deployments is hard. Traditional approaches require vendor-specific NMS software, custom SSH scripting, or fragile SNMP polling. Devices drift from their intended configuration, firmware updates are manual and error-prone, and there is no standard way to query live device state from a remote controller.
+
+### TR-369 / USP: the open standard
+
+The Broadband Forum's **TR-369 User Services Platform** (USP) defines a vendor-neutral, standards-based protocol for device management. A **Controller** (ac-server) pushes configuration, queries state, and triggers operations over a reliable, authenticated channel. An **Agent** (ac-client) on each device implements a structured **TR-181 data model** — a machine-readable, hierarchical representation of every configurable parameter on the device. Any controller that speaks USP can manage any agent that speaks USP, regardless of vendor.
+
+### Why Rust? Why open source?
+
+- **Memory safety**: no buffer overflows, no use-after-free, no null-pointer crashes. The daemon runs on constrained MIPS/ARM hardware with limited RAM and no fault recovery — correct code matters.
+- **Minimal binary**: the release build strips to a small self-contained binary with no runtime dependencies beyond musl libc. No Python, no JRE, no heavyweight runtime on the AP.
+- **Post-quantum TLS**: ac-client uses `rustls-post-quantum` to negotiate **X25519 + ML-KEM-768** hybrid key exchange — a NIST PQC standard — on every connection. Device deployments live for years; their communications should be safe against harvest-now/decrypt-later attacks.
+- **Standards compliance**: the implementation is audited against the TR-369 v1.3 conformance requirements — Boot! event parameters, Record routing, WebSocket subprotocol enforcement, version negotiation, and error codes.
+- **Open source**: the full protocol stack, data model, and OpenWrt packaging are available for inspection, extension, and contribution. No binary blobs, no vendor lock-in.
+
+### What OptimACS gives you out of the box
+
+| Capability | Detail |
+|------------|--------|
+| Zero-touch provisioning | APs boot with a shared init cert; controller issues a unique per-device mTLS cert on approval |
+| Live configuration push | SET any TR-181 parameter from the UI; agent applies via UCI and responds with `SET_RESP` |
+| Firmware management | Upload firmware to the server; push via `OPERATE Device.X_OptimACS_Firmware.Download()` → sysupgrade |
+| Real-time telemetry | ValueChange Notify every N seconds: uptime, load, free memory, GPS coords, wireless status |
+| Camera management | Axis IP-camera discovery (ARP scan + CGI), periodic JPEG capture, image upload to server |
+| Multi-tenant RBAC | Isolate fleets per tenant; role hierarchy from stats_viewer to super_admin |
+| Post-quantum PKI | Smallstep step-ca issues all certs; CA private key never touches the controller |
+| Kubernetes-ready | Official Helm chart at [optim-enterprises-bv/helm-charts](https://github.com/optim-enterprises-bv/helm-charts) |
+
+---
+
+## Architecture
+
+![OptimACS System Architecture](https://raw.githubusercontent.com/optim-enterprises-bv/APConfig/main/docs/images/architecture.png)
+
+**ac-client** runs on each OpenWrt AP as a USP Agent. On first boot it connects using a shared bootstrap certificate, sends a Boot! Notify, and waits for the controller to issue it a unique per-device mTLS certificate. Thereafter it runs a continuous loop: handling incoming GET/SET/OPERATE messages, sending periodic ValueChange telemetry, and responding to firmware-upgrade and camera-capture operations.
+
+**ac-server** is the Rust USP Controller. It listens on `:3491` for incoming WebSocket connections and subscribes to EMQX for MQTT connections. It dispatches USP messages to the TR-181 data model, manages the device database, and delegates all X.509 certificate signing to step-ca via the JWK provisioner REST API.
+
+**step-ca** (Smallstep) is the PKI. It issues the server TLS cert, per-device client certs, and the init bootstrap cert. The CA private key never leaves the step-ca container — ac-server holds only an EC P-256 JWK provisioner key to sign one-time tokens (OTTs) used to authenticate CSR signing requests.
+
+**optimacs-ui** is the FastAPI + Jinja2 management console with Strawberry GraphQL. Real-time subscriptions update the dashboard, AP list, and USP event log automatically.
+
+**EMQX** provides the MQTT 5 broker for the MQTT Message Transport Protocol (MTP). Agents and the controller exchange USP Records via MQTT topics:
+
+```
+usp/v1/{agent_endpoint_id}       ← agent subscribes (receives Controller messages)
+usp/v1/{controller_endpoint_id}  ← controller subscribes (receives Agent messages)
+```
+
+### System Components
+
+| Component | Role | Port(s) |
+|-----------|------|---------|
+| ac-server | USP Controller, provisioning, TR-181 dispatch | 3491 (WSS) |
+| step-ca | PKI / Certificate Authority | 9000 (HTTPS) |
+| optimacs-ui | Management web console (FastAPI + GraphQL) | 8080 |
+| EMQX | MQTT broker (USP MQTT MTP) | 1883, 8883, 8083, 8084, 18083 |
+| MariaDB / MySQL | Device and configuration database | 3306 |
+| Redis | Config-proto cache, rate-limit store (optional) | 6379 |
+| **ac-client** | **USP Agent on each OpenWrt AP** | *(outbound only)* |
+
+---
+
+## TR-369 / USP Protocol
+
+> **Conformance**: ac-client implements **TR-369 USP 1.3** (Broadband Forum, November 2023). The implementation passes all mandatory requirements for the WebSocket and MQTT MTPs.
+
+### Wire Format
+
+USP uses Protocol Buffers (proto3). Two proto files are vendored in `proto/`:
+
+| File | Purpose |
+|------|---------|
+| `proto/usp-record.proto` | USP Record envelope — version, `to_id`/`from_id` endpoint IDs, MTP connect records |
+| `proto/usp-msg.proto` | USP Message body — GET/SET/OPERATE/NOTIFY and their responses |
+
+### Message Types
+
+| Message | Direction | Purpose |
+|---------|-----------|---------|
+| `GET` | Controller → Agent | Read TR-181 parameter values (respects `max_depth`) |
+| `GET_RESP` | Agent → Controller | Parameter values |
+| `SET` | Controller → Agent | Write TR-181 parameter values |
+| `SET_RESP` | Agent → Controller | Acknowledgement with populated `updated_obj_results` |
+| `OPERATE` | Controller → Agent | Execute a command |
+| `OPERATE_RESP` | Agent → Controller | Command output args |
+| `NOTIFY` (Boot!) | Agent → Controller | Device boot event; `obj_path="Device."`, includes `Cause` + `FirmwareUpdated` |
+| `NOTIFY` (ValueChange) | Agent → Controller | Periodic telemetry (UpTime, LoadAvg, GPS, etc.) |
+| `NOTIFY_RESP` | Controller → Agent | Acknowledge notify |
+| `GET_SUPPORTED_PROTO` | Agent → Controller | Negotiate USP version; result stored and applied to Records |
+| `Error 7004` | Agent → Controller | Returned for unsupported message types (NOT_SUPPORTED) |
+
+### TR-369 Conformance Notes
+
+| Requirement | Implementation |
+|-------------|----------------|
+| §10.2.1 WebSocket subprotocol | Server enforces and echoes `Sec-WebSocket-Protocol: v1.usp`; client verifies echo |
+| §5.1 Record routing | Records with `to_id` ≠ own endpoint ID are logged and discarded |
+| §6.2.1 Version negotiation | `GetSupportedProtoResp` version stored and used in subsequent Records |
+| §9.3.6 Boot! event | `obj_path="Device."`, required `Cause` and `FirmwareUpdated` params included |
+| §6.2.4 SET_RESP | `updated_obj_results` populated with one entry per updated object path |
+| §6.1.2 GET max_depth | `max_depth` extracted and applied to DM path depth filtering |
+| §6.4 Error codes | Error 7004 (`NOT_SUPPORTED`) returned for known-unsupported message types |
+
+### Provisioning Flow
+
+```
+Agent (new device)                    Controller (ac-server)
+    │                                       │
+    │── WebSocketConnectRecord ─────────────▶│
+    │── Notify { Boot!, DeviceInfo.* } ─────▶│  → new_systems table
+    │                                       │  (admin approves in UI)
+    │◀─ OPERATE IssueCert() ────────────────│
+    │── OPERATE_RESP { csr: "..." } ─────────▶│  → sign cert via step-ca
+    │◀─ SET Security.{CaCert,Cert,Key} ─────│
+    │   apply::save_certs()                 │
+    │── [reconnect with device cert] ────────▶│  → provisioned
+    │                                       │
+    │── Notify { ValueChange, UpTime=... } ──▶│  periodic telemetry
+```
+
+### TR-181 Data Model
+
+The TR-181 Device:2 subset exposed by ac-client:
+
+| TR-181 Path | RW | Source |
+|-------------|:--:|--------|
+| `Device.DeviceInfo.HostName` | RW | UCI / hostname |
+| `Device.DeviceInfo.SoftwareVersion` | RO | `/etc/openwrt_release` |
+| `Device.DeviceInfo.HardwareVersion` | RO | arch string |
+| `Device.DeviceInfo.SerialNumber` | RO | MAC address |
+| `Device.DeviceInfo.UpTime` | RO | `/proc/uptime` |
+| `Device.DeviceInfo.X_OptimACS_LoadAvg` | RO | `/proc/loadavg` |
+| `Device.DeviceInfo.X_OptimACS_FreeMem` | RO | `/proc/meminfo` |
+| `Device.DeviceInfo.X_OptimACS_Latitude` | RO | GNSS reader |
+| `Device.DeviceInfo.X_OptimACS_Longitude` | RO | GNSS reader |
+| `Device.WiFi.Radio.{i}.Channel` | RW | UCI wireless |
+| `Device.WiFi.Radio.{i}.Enable` | RW | UCI wireless |
+| `Device.WiFi.SSID.{i}.SSID` | RW | UCI wireless |
+| `Device.WiFi.AccessPoint.{i}.Security.KeyPassphrase` | RW | UCI wireless |
+| `Device.WiFi.AccessPoint.{i}.Security.ModeEnabled` | RW | UCI wireless |
+| `Device.IP.Interface.{i}.IPv4Address.{i}.IPAddress` | RW | UCI network |
+| `Device.IP.Interface.{i}.IPv4Address.{i}.SubnetMask` | RW | UCI network |
+| `Device.IP.Interface.{i}.IPv4Address.{i}.AddressingType` | RW | UCI network |
+| `Device.DHCPv4.Server.Pool.{i}.StaticAddress.{i}.*` | RW | UCI dhcp |
+| `Device.Hosts.Host.{i}.*` | RW | UCI hosts |
+| `Device.X_OptimACS_Camera.{i}.*` | RO | Axis CGI discovery |
+| `Device.X_OptimACS_Camera.{i}.Capture()` | OP | JPEG capture + upload |
+| `Device.X_OptimACS_Firmware.AvailableVersion` | RO | server firmware table |
+| `Device.X_OptimACS_Firmware.Download()` | OP | sysupgrade |
+| `Device.X_OptimACS_Security.IssueCert()` | OP | PKI cert issuance |
+
+---
+
+## Security Architecture
+
+### Transport Security
+
+- **TLS 1.3** with mutual authentication on all connections to ac-server
+- **Post-quantum hybrid key exchange**: X25519 + ML-KEM-768 (NIST FIPS 203, ML-KEM). Deployed in every ac-client binary — device traffic is safe against harvest-now/decrypt-later attacks
+- **Mutual TLS**: both client and server present X.509 certificates; the server rejects any connection without a valid client certificate signed by the trusted CA
+- **No hostname verification on client cert**: ac-client uses a custom `AcpServerVerifier` that validates the full certificate chain but matches the server by CA trust rather than CN — consistent with how OpenSSL `SSL_VERIFY_PEER` worked in the original C client
+
+### Certificate Lifecycle
+
+```
+Bootstrap (every new device):
+  ac-client ships with a shared init certificate (00:00:00:00:00:00)
+  This cert allows it to connect and register — but nothing else.
+
+Provisioning (one-time, admin-triggered):
+  1. AP connects → sends Boot! Notify with DeviceInfo parameters
+  2. Appears in controller's New Systems queue
+  3. Admin approves in the OptimACS UI
+  4. Controller sends  OPERATE Device.X_OptimACS_Security.IssueCert()
+  5. Agent generates an RSA key pair + CSR; returns CSR in OPERATE_RESP
+  6. Controller signs a JWT one-time token (OTT) with its EC P-256 JWK provisioner key
+  7. Controller forwards CSR + OTT to step-ca  (POST /1.0/sign)
+     step-ca verifies OTT, issues a unique per-device certificate
+  8. Controller sends  SET {CaCert, Cert, Key}  to the agent
+  9. Agent writes certs to /etc/apclient/certs/ and reconnects
+
+Post-provisioning:
+  Every connection uses the device's unique mTLS cert.
+  The init cert is no longer accepted for this device's endpoint ID.
+
+Revocation:
+  Removing a device from the UI prevents future connections.
+  The cert is not added to a CRL — access is controlled at the
+  application layer by endpoint ID lookup in the database.
+```
+
+### Why step-ca?
+
+The CA private key **never touches ac-server**. ac-server holds only the EC P-256 JWK provisioner key — a narrow credential that can only sign one-time tokens used to authenticate CSR requests. This means:
+
+- A compromised ac-server cannot forge device certificates
+- The CA can be rotated independently of the controller
+- step-ca's audit log provides a full record of every certificate issued
+- In Kubernetes deployments, the step-ca pod can be isolated in its own namespace with network policies that allow only ac-server to reach the signing API
+
+### Security Posture Summary
+
+| Property | Value |
+|----------|-------|
+| TLS version | 1.3 (minimum enforced by rustls) |
+| Key exchange | X25519 + ML-KEM-768 (post-quantum hybrid) |
+| Client authentication | Mutual TLS — X.509 cert signed by step-ca root CA |
+| CA key isolation | step-ca holds root key; ac-server holds only JWK provisioner key |
+| Certificate issuance | OTT-authenticated CSR signing via step-ca REST API |
+| Binary memory safety | Rust — no buffer overflows, no use-after-free |
+| Credential storage | Certs written to `/etc/apclient/certs/` (mode 0600) |
+
+---
+
 ## Features
 
 - **TR-369 / USP 1.3** conformant Agent (Boot! Notify, GET, SET, OPERATE)
@@ -223,13 +441,9 @@ Phase 1 — Provisioning
 Phase 2 — Operation
   Boot! Notify → GET/SET/OPERATE dispatch loop
   → ValueChange Notify every status_interval seconds
-  → Firmware upgrade via OPERATE Device.X_OptimACS_Firmware.Update()
+  → Firmware upgrade via OPERATE Device.X_OptimACS_Firmware.Download()
   → Camera cycle every cam_interval seconds
 ```
-
-### TLS
-
-All connections use **TLS 1.3** with the `rustls-post-quantum` provider, which negotiates an **X25519 + ML-KEM-768 hybrid key exchange** matching the ac-server configuration.
 
 ### USP Endpoint ID
 
