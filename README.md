@@ -456,15 +456,6 @@ oui:{vendor-oui}:{mac-address-without-colons}
 
 ---
 
-## Related Repositories
-
-| Repository | Description |
-|------------|-------------|
-| [optim-enterprises-bv/APConfig](https://github.com/optim-enterprises-bv/APConfig) | Full OptimACS stack — ac-server, management UI, Docker Compose, docs |
-| [optim-enterprises-bv/helm-charts](https://github.com/optim-enterprises-bv/helm-charts) | Helm chart for Kubernetes deployment |
-
----
-
 ## License
 
 See [APConfig](https://github.com/optim-enterprises-bv/APConfig) for license information.
