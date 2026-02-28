@@ -59,6 +59,10 @@ start_service() {
 		return 1
 	fi
 
+	# /var is a symlink to /tmp (tmpfs) on OpenWrt — create runtime dirs here
+	# rather than in the package Makefile to avoid cp -fpR EISDIR errors.
+	mkdir -p /var/apclient/images /var/apclient/firmware
+
 	procd_open_instance
 
 	# shellcheck disable=SC2086

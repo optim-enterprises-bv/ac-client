@@ -117,10 +117,12 @@ define Package/ac-client/install
 	# procd init script
 	$(INSTALL_DIR) $(1)/etc/init.d
 	$(INSTALL_BIN) ./files/ac-client.init $(1)/etc/init.d/ac-client
-
-	# Image and firmware scratch directories
-	$(INSTALL_DIR) $(1)/var/apclient/images
-	$(INSTALL_DIR) $(1)/var/apclient/firmware
+	#
+	# NOTE: /var on OpenWrt is a symlink to /tmp (tmpfs).  Do NOT install
+	# directories under /var here — the build system copies the package tree
+	# into the staging root with `cp -fpR` and hits the symlink with EISDIR.
+	# The init script creates /var/apclient/{images,firmware} at runtime
+	# with `mkdir -p` before handing control to procd.
 endef
 
 define Package/ac-client/postinst
@@ -132,7 +134,7 @@ echo "ac-client installed."
 echo ""
 echo "Default bootstrap certificates (CN=00:00:00:00:00:00) have been"
 echo "installed to /etc/apclient/init/.  These allow the daemon to start"
-echo "and connect to acs.optimcloud.com for initial provisioning."
+echo "and connect to usp.optimcloud.com for initial provisioning."
 echo ""
 echo "  WARNING: The default certificates are public (shipped in the package)."
 echo "  For production deployments, replace them with certificates issued"
@@ -142,9 +144,11 @@ echo "    scp <server>:<client_dir>/00:00:00:00:00:00/client.crt /etc/apclient/i
 echo "    scp <server>:<client_dir>/00:00:00:00:00:00/client.key /etc/apclient/init/"
 echo "    scp <server>:<ssl.ca_file>                             /etc/apclient/init/ca.crt"
 echo ""
-echo "Configure via UCI (recommended):"
+echo "Default controller: usp.optimcloud.com:3491 (already set in UCI config)."
+echo "To override via UCI:"
 echo "   uci set optimacs.agent.server_host='<controller>'"
 echo "   uci set optimacs.agent.ws_url='wss://<controller>:3491/usp'"
+echo "   uci set optimacs.agent.server_cn='<controller>'"
 echo "   uci commit optimacs"
 echo ""
 echo "   Or edit the flat config file:"
