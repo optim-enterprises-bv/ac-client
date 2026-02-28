@@ -4,9 +4,6 @@
     "order": 60,
     "action": {
       "type": "firstchild"
-    },
-    "depends": {
-      "acl": [ "luci-app-aclient" ]
     }
   },
   "admin/services/optimacs/overview": {
@@ -15,9 +12,6 @@
     "action": {
       "type": "view",
       "path": "aclient/overview"
-    },
-    "depends": {
-      "acl": [ "luci-app-aclient" ]
     }
   },
   "admin/services/optimacs/config": {
@@ -26,9 +20,6 @@
     "action": {
       "type": "view",
       "path": "aclient/config"
-    },
-    "depends": {
-      "acl": [ "luci-app-aclient" ]
     }
   }
 }

@@ -7,11 +7,16 @@
         "/etc/apclient/init/ca.crt":      [ "read" ],
         "/etc/apclient/certs/client.crt": [ "read" ]
       },
-      "rpcd": [ "service", "rc" ]
+      "ubus": {
+        "service": [ "list" ],
+        "rc":      [ "list" ]
+      }
     },
     "write": {
       "uci": [ "optimacs" ],
-      "rpcd": [ "rc" ]
+      "ubus": {
+        "rc": [ "call" ]
+      }
     }
   }
 }
