@@ -2,30 +2,33 @@
   "admin/services/optimacs": {
     "title": "OptimACS",
     "order": 60,
-    "icon": "wifi",
-    "children": {
-      "overview": {
-        "title": "Overview",
-        "order": 10,
-        "action": {
-          "type": "view",
-          "path": "aclient/overview"
-        },
-        "depends": {
-          "acl": [ "luci-app-aclient" ]
-        }
-      },
-      "config": {
-        "title": "Configuration",
-        "order": 20,
-        "action": {
-          "type": "view",
-          "path": "aclient/config"
-        },
-        "depends": {
-          "acl": [ "luci-app-aclient" ]
-        }
-      }
+    "action": {
+      "type": "firstchild"
+    },
+    "depends": {
+      "acl": [ "luci-app-aclient" ]
+    }
+  },
+  "admin/services/optimacs/overview": {
+    "title": "Overview",
+    "order": 10,
+    "action": {
+      "type": "view",
+      "path": "aclient/overview"
+    },
+    "depends": {
+      "acl": [ "luci-app-aclient" ]
+    }
+  },
+  "admin/services/optimacs/config": {
+    "title": "Configuration",
+    "order": 20,
+    "action": {
+      "type": "view",
+      "path": "aclient/config"
+    },
+    "depends": {
+      "acl": [ "luci-app-aclient" ]
     }
   }
 }
