@@ -26,14 +26,14 @@ config optimacs 'agent'
 	# ── Server / MTP ──────────────────────────────────────────────────────
 	# Hostname or IP of the OptimACS server (used to build ws_url when
 	# ws_url is left empty).
-	option server_host   ''
+	option server_host   'usp.optimcloud.com'
 
 	# TCP port for the legacy ACP/TLS connection (default: 3490).
 	# Also used as the fallback WS port when ws_url is not set.
-	option server_port   '3490'
+	option server_port   '3491'
 
 	# TLS SNI name — must match the CN in the server's certificate.
-	option server_cn     'ac-server'
+	option server_cn     'usp.optimcloud.com'
 
 	# ── USP Message Transport Protocol (MTP) ──────────────────────────────
 	# Which MTP(s) to use: websocket | mqtt | both
@@ -41,8 +41,7 @@ config optimacs 'agent'
 
 	# WebSocket MTP: direct WSS URL to ac-server.
 	# When left empty, built automatically from server_host + server_port.
-	# Example: wss://controller.example.com:3491/usp
-	option ws_url        ''
+	option ws_url        'wss://usp.optimcloud.com:3491/usp'
 
 	# MQTT MTP: URL of the EMQX (or other) broker.
 	# Required only when mtp = mqtt or mtp = both.
