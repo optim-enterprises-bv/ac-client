@@ -38,11 +38,15 @@ _uci_configured() {
 
 start_service() {
 	# Require at least the init certificate to be present.
+	# Return 0 (not 1) on missing certs so procd does not enter a crash loop —
+	# returning 1 before procd_open_instance confuses some procd versions into
+	# repeatedly re-invoking start_service.  We simply log the problem and
+	# register no instance; the service stays stopped until the operator acts.
 	if [ ! -f /etc/apclient/init/client.crt ] || \
 	   [ ! -f /etc/apclient/init/client.key ]; then
-		echo "ac-client: init certificate not found in /etc/apclient/init/, not starting" >&2
-		echo "  Deploy from the OptimACS server's client_dir/00:00:00:00:00:00/ directory." >&2
-		return 1
+		echo "ac-client: init certificate not found in /etc/apclient/init/ — not starting." >&2
+		echo "  Copy the bootstrap certs from the server's client_dir/00:00:00:00:00:00/." >&2
+		return 0
 	fi
 
 	# Choose UCI vs flat-file config source.
@@ -71,9 +75,13 @@ start_service() {
 	# PID file
 	procd_set_param pidfile "$PIDFILE"
 
-	# Restart automatically: respawn after 3600 s uptime threshold,
-	# 5 s delay between attempts, give up after 5 consecutive failures.
-	procd_set_param respawn 3600 5 5
+	# Restart automatically on crash.
+	# threshold=3600 : reset crash counter if uptime exceeds 1 hour
+	# timeout=15     : wait 15 s before each restart attempt (back-off)
+	# retry=0        : never give up — keep retrying across the whole session
+	#                  (was 5, but that caused the service to stay dead after
+	#                   a burst of crashes at boot)
+	procd_set_param respawn 3600 15 0
 
 	# Forward stdout and stderr to the system log (logd/logread).
 	procd_set_param stdout 1
