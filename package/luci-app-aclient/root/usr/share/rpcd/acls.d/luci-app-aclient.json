@@ -1,0 +1,17 @@
+{
+  "luci-app-aclient": {
+    "description": "Grant LuCI access to manage the ac-client USP Agent",
+    "read": {
+      "uci": [ "optimacs" ],
+      "file": {
+        "/etc/apclient/init/ca.crt":      [ "read" ],
+        "/etc/apclient/certs/client.crt": [ "read" ]
+      },
+      "rpcd": [ "service", "rc" ]
+    },
+    "write": {
+      "uci": [ "optimacs" ],
+      "rpcd": [ "rc" ]
+    }
+  }
+}
