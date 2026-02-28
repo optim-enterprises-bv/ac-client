@@ -72,27 +72,43 @@ async fn main() {
         process::exit(1);
     }
 
+    // Set up logging — prefer syslog, fall back to stderr if the socket is not
+    // yet available (can happen early in the boot sequence before logd is ready).
     let use_syslog = cfg.log_syslog && !cli.stderr;
-    setup_logging(use_syslog).expect("failed to set up logging");
+    if use_syslog {
+        if let Err(e) = setup_logging(true) {
+            eprintln!("ac-client: syslog unavailable ({e}), falling back to stderr");
+            setup_logging(false).ok();
+        }
+    } else {
+        setup_logging(false).ok();
+    }
 
     // Install the post-quantum TLS provider (must happen before any TLS use).
-    rustls_post_quantum::provider()
-        .install_default()
-        .expect("failed to install post-quantum TLS provider");
+    if let Err(e) = rustls_post_quantum::provider().install_default() {
+        error!("FATAL: post-quantum TLS provider failed to initialise: {e}");
+        error!("Ensure the binary was compiled for the correct CPU architecture.");
+        process::exit(1);
+    }
 
     // Write PID file
     if let Err(e) = util::write_pid_file(&cfg.pid_file) {
         error!("cannot write PID file {}: {e}", cfg.pid_file.display());
     }
 
-    // Auto-detect MAC if not configured
+    // Auto-detect MAC if not configured.
+    // detect_mac() tries a broad set of interface names; if none are found
+    // the operator must set mac_addr explicitly in UCI or the flat config.
     let cfg = if cfg.mac_addr.is_empty() {
         let mac = util::detect_mac();
         if mac.is_empty() {
-            error!("mac_addr not configured and auto-detection failed");
+            error!("mac_addr not configured and auto-detection failed.");
+            error!("Set it explicitly:  uci set optimacs.agent.mac_addr='<mac>'");
+            error!("                    uci commit optimacs");
+            error!("                    /etc/init.d/ac-client restart");
             process::exit(1);
         }
-        info!("detected MAC address: {mac}");
+        info!("auto-detected MAC address: {mac}");
         config::ClientConfig { mac_addr: mac, ..cfg }
     } else {
         cfg

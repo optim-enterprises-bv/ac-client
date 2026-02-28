@@ -17,12 +17,30 @@ pub fn read_mac_from_sysfs(iface: &str) -> io::Result<String> {
 }
 
 /// Try to detect the device MAC address.
-/// Checks `br-lan`, then `eth0`, then `wlan0` in order.
-/// Returns an empty string if none could be read.
+///
+/// Tries a broad set of interface names commonly found on OpenWrt devices:
+///   br-lan        — LAN bridge (most home routers)
+///   eth0 / eth1   — single-port or secondary Ethernet
+///   eth0.1        — VLAN-tagged LAN port
+///   phy0-ap0      — Wi-Fi AP interface (OpenWrt 21.02+ mac80211 naming)
+///   phy1-ap0      — second radio AP interface
+///   wlan0 / wlan1 — older or alternative Wi-Fi interface names
+///   ra0           — Ralink/MediaTek Wi-Fi driver interface name
+///
+/// Returns an empty string if none of the above could be read from sysfs.
+/// In that case the caller should require `mac_addr` to be set explicitly
+/// in the UCI config or flat config file.
 pub fn detect_mac() -> String {
-    for iface in &["br-lan", "eth0", "wlan0"] {
+    for iface in &[
+        "br-lan",
+        "eth0", "eth1",
+        "eth0.1",
+        "phy0-ap0", "phy1-ap0",
+        "wlan0", "wlan1",
+        "ra0",
+    ] {
         if let Ok(mac) = read_mac_from_sysfs(iface) {
-            if !mac.is_empty() {
+            if !mac.is_empty() && mac != "00:00:00:00:00:00" {
                 return mac;
             }
         }
