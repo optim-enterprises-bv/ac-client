@@ -117,10 +117,12 @@ define Package/ac-client/install
 	# procd init script
 	$(INSTALL_DIR) $(1)/etc/init.d
 	$(INSTALL_BIN) ./files/ac-client.init $(1)/etc/init.d/ac-client
-
-	# Image and firmware scratch directories
-	$(INSTALL_DIR) $(1)/var/apclient/images
-	$(INSTALL_DIR) $(1)/var/apclient/firmware
+	#
+	# NOTE: /var on OpenWrt is a symlink to /tmp (tmpfs).  Do NOT install
+	# directories under /var here — the build system copies the package tree
+	# into the staging root with `cp -fpR` and hits the symlink with EISDIR.
+	# The init script creates /var/apclient/{images,firmware} at runtime
+	# with `mkdir -p` before handing control to procd.
 endef
 
 define Package/ac-client/postinst
