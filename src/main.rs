@@ -19,7 +19,6 @@ use std::path::PathBuf;
 use std::process;
 use std::sync::Arc;
 
-use anyhow::Context;
 use clap::Parser;
 use log::{error, info};
 
@@ -86,7 +85,7 @@ async fn main() {
 
     // Install the post-quantum TLS provider (must happen before any TLS use).
     if let Err(e) = rustls_post_quantum::provider().install_default() {
-        error!("FATAL: post-quantum TLS provider failed to initialise: {e}");
+        error!("FATAL: post-quantum TLS provider failed to initialise: {:?}", e);
         error!("Ensure the binary was compiled for the correct CPU architecture.");
         process::exit(1);
     }

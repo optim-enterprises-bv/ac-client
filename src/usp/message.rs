@@ -1,13 +1,12 @@
 //! USP Message encode / decode and builder helpers for the Agent side.
 
+#![allow(clippy::all)]
+
 use prost::Message;
 use uuid::Uuid;
 
 use super::usp_msg::{
-    body::MsgBody,
-    header::MessageType,
-    notify,
-    Body, Error, Header, Msg, NotifyResp, OperateResp,
+    body::MsgBody, header::MessageType, notify, Body, Error, Header, Msg, NotifyResp, OperateResp,
 };
 use super::{Result, UspError};
 
@@ -25,10 +24,15 @@ pub fn encode_msg(msg: &Msg) -> Result<Vec<u8>> {
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
-pub fn new_msg_id() -> String { Uuid::new_v4().to_string() }
+pub fn new_msg_id() -> String {
+    Uuid::new_v4().to_string()
+}
 
 fn make_header(msg_type: MessageType) -> Header {
-    Header { msg_id: new_msg_id(), msg_type: msg_type as i32 }
+    Header {
+        msg_id: new_msg_id(),
+        msg_type: msg_type as i32,
+    }
 }
 
 // ── Builder: NOTIFY Boot! ────────────────────────────────────────────────────
@@ -37,8 +41,8 @@ fn make_header(msg_type: MessageType) -> Header {
 /// `parameter_map` contains Device.DeviceInfo.* key/value pairs.
 pub fn build_boot_notify(
     subscription_id: &str,
-    send_resp:       bool,
-    parameter_map:   std::collections::HashMap<String, String>,
+    send_resp: bool,
+    parameter_map: std::collections::HashMap<String, String>,
 ) -> Msg {
     Msg {
         header: Some(make_header(MessageType::Notify)),
@@ -49,10 +53,10 @@ pub fn build_boot_notify(
                         subscription_id: subscription_id.into(),
                         send_resp,
                         notification: Some(notify::Notification::Event(notify::Event {
-                            obj_path:    "Device.".into(),
-                            event_name:  "Boot!".into(),
+                            obj_path: "Device.".into(),
+                            event_name: "Boot!".into(),
                             command_key: String::new(),
-                            params:      parameter_map,
+                            params: parameter_map,
                         })),
                     },
                 )),
@@ -66,8 +70,8 @@ pub fn build_boot_notify(
 /// Build a ValueChange Notify message for periodic status heartbeats.
 pub fn build_value_change_notify(
     subscription_id: &str,
-    param_path:      &str,
-    param_value:     &str,
+    param_path: &str,
+    param_value: &str,
 ) -> Msg {
     Msg {
         header: Some(make_header(MessageType::Notify)),
@@ -77,10 +81,12 @@ pub fn build_value_change_notify(
                     super::usp_msg::Notify {
                         subscription_id: subscription_id.into(),
                         send_resp: false,
-                        notification: Some(notify::Notification::ValueChange(notify::ValueChange {
-                            param_path:  param_path.into(),
-                            param_value: param_value.into(),
-                        })),
+                        notification: Some(notify::Notification::ValueChange(
+                            notify::ValueChange {
+                                param_path: param_path.into(),
+                                param_value: param_value.into(),
+                            },
+                        )),
                     },
                 )),
             })),
@@ -110,7 +116,7 @@ pub fn build_get_supported_proto() -> Msg {
 pub fn build_notify_resp(msg_id: &str, subscription_id: &str) -> Msg {
     Msg {
         header: Some(Header {
-            msg_id:   msg_id.into(),
+            msg_id: msg_id.into(),
             msg_type: MessageType::NotifyResp as i32,
         }),
         body: Some(Body {
@@ -127,8 +133,8 @@ pub fn build_notify_resp(msg_id: &str, subscription_id: &str) -> Msg {
 
 /// Build an OPERATE_RESP with output arguments.
 pub fn build_operate_resp(
-    msg_id:      &str,
-    command:     &str,
+    msg_id: &str,
+    command: &str,
     command_key: &str,
     output_args: std::collections::HashMap<String, String>,
 ) -> Msg {
@@ -172,19 +178,23 @@ pub fn build_set_resp(msg_id: &str, updated_obj_paths: &[String]) -> Msg {
         .map(|path| UpdatedObjectResult {
             requested_path: path.clone(),
             oper_status: Some(updated_object_result::OperStatus::OperSuccess(
-                updated_object_result::OperSuccess { updated_inst_results: vec![] },
+                updated_object_result::OperSuccess {
+                    updated_inst_results: vec![],
+                },
             )),
         })
         .collect();
     Msg {
         header: Some(Header {
-            msg_id:   msg_id.into(),
+            msg_id: msg_id.into(),
             msg_type: MessageType::SetResp as i32,
         }),
         body: Some(Body {
             msg_body: Some(MsgBody::Response(super::usp_msg::Response {
                 resp_type: Some(super::usp_msg::response::RespType::SetResp(
-                    super::usp_msg::SetResp { updated_obj_results },
+                    super::usp_msg::SetResp {
+                        updated_obj_results,
+                    },
                 )),
             })),
         }),
@@ -196,13 +206,13 @@ pub fn build_set_resp(msg_id: &str, updated_obj_paths: &[String]) -> Msg {
 pub fn build_error(msg_id: &str, err_code: u32, err_msg: &str) -> Msg {
     Msg {
         header: Some(Header {
-            msg_id:   msg_id.into(),
+            msg_id: msg_id.into(),
             msg_type: MessageType::Error as i32,
         }),
         body: Some(Body {
             msg_body: Some(MsgBody::Error(Error {
                 err_code,
-                err_msg:    err_msg.into(),
+                err_msg: err_msg.into(),
                 param_errs: vec![],
             })),
         }),

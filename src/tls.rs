@@ -8,8 +8,8 @@
 //!     `SSL_VERIFY_PEER` without `SSL_set1_host`).  The server cert CN
 //!     ("ac-server") is sent as the SNI hint.
 //!
-//! The `rustls-post-quantum` provider must be installed as the global default
-//! before calling any function in this module.
+
+#![allow(dead_code)]
 
 use std::fs;
 use std::io::Cursor;

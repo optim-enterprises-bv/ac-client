@@ -3,6 +3,8 @@
 //! The agent handles incoming GET and SET requests from the Controller
 //! by dispatching to the appropriate sub-module based on the TR-181 path prefix.
 
+#![allow(dead_code)]
+
 pub mod cameras;
 pub mod device_info;
 pub mod dhcp;

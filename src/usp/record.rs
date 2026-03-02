@@ -3,11 +3,13 @@
 //! USP Records are the binary envelope framing USP Messages over any MTP.
 //! They are serialised with prost (protobuf 3).
 
+#![allow(dead_code, clippy::all)]
+
 use prost::Message;
 
 use super::usp_record::{
-    record::RecordType, NoSessionContextRecord, Record, WebSocketConnectRecord,
-    MqttConnectRecord, DisconnectRecord,
+    record::RecordType, DisconnectRecord, MqttConnectRecord, NoSessionContextRecord, Record,
+    WebSocketConnectRecord,
 };
 use super::{Result, UspError};
 
@@ -48,9 +50,9 @@ pub fn no_session_record(
         payload_security: 0, // PLAINTEXT
         mac_signature: vec![],
         sender_cert: vec![],
-        record_type: Some(RecordType::NoSessionContext(
-            NoSessionContextRecord { payload: msg_bytes },
-        )),
+        record_type: Some(RecordType::NoSessionContext(NoSessionContextRecord {
+            payload: msg_bytes,
+        })),
     }
 }
 
@@ -69,11 +71,7 @@ pub fn websocket_connect_record(from_id: &str, to_id: &str) -> Record {
 }
 
 /// Build an `MqttConnectRecord`.
-pub fn mqtt_connect_record(
-    from_id: &str,
-    to_id: &str,
-    subscribed_topic: &str,
-) -> Record {
+pub fn mqtt_connect_record(from_id: &str, to_id: &str, subscribed_topic: &str) -> Record {
     Record {
         version: "1.3".into(),
         to_id: to_id.into(),

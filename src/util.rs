@@ -1,5 +1,7 @@
 //! Miscellaneous utilities: MAC detection, IP retrieval, MD5, PID file, etc.
 
+#![allow(dead_code)]
+
 use std::fs;
 use std::io::{self, Write};
 use std::net::{IpAddr, Ipv4Addr, UdpSocket};
@@ -32,12 +34,7 @@ pub fn read_mac_from_sysfs(iface: &str) -> io::Result<String> {
 /// in the UCI config or flat config file.
 pub fn detect_mac() -> String {
     for iface in &[
-        "br-lan",
-        "eth0", "eth1",
-        "eth0.1",
-        "phy0-ap0", "phy1-ap0",
-        "wlan0", "wlan1",
-        "ra0",
+        "br-lan", "eth0", "eth1", "eth0.1", "phy0-ap0", "phy1-ap0", "wlan0", "wlan1", "ra0",
     ] {
         if let Ok(mac) = read_mac_from_sysfs(iface) {
             if !mac.is_empty() && mac != "00:00:00:00:00:00" {
@@ -169,9 +166,7 @@ pub fn read_free_mem() -> String {
 /// Read the SSID of the first wireless interface via `iw`.
 /// Returns an empty string on failure (e.g. no wireless iface, or `iw` absent).
 pub fn read_ssid() -> String {
-    let output = std::process::Command::new("iw")
-        .args(["dev"])
-        .output();
+    let output = std::process::Command::new("iw").args(["dev"]).output();
     let output = match output {
         Ok(o) => o,
         Err(_) => return String::new(),
@@ -210,7 +205,7 @@ pub fn remove_pid_file(path: &Path) {
 /// An entry from `/proc/net/arp`.
 #[derive(Debug, Clone)]
 pub struct ArpEntry {
-    pub ip:  String,
+    pub ip: String,
     pub mac: String,
 }
 
@@ -225,7 +220,7 @@ pub fn read_arp_table() -> Vec<ArpEntry> {
         let fields: Vec<&str> = line.split_whitespace().collect();
         // IP address | HW type | Flags | HW address | Mask | Device
         if fields.len() >= 4 {
-            let ip  = fields[0].to_string();
+            let ip = fields[0].to_string();
             let mac = fields[3].to_string();
             // Skip incomplete entries (00:00:00:00:00:00)
             if mac != "00:00:00:00:00:00" {

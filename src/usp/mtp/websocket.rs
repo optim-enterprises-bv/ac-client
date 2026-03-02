@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
-use log::{debug, error, info, warn};
+use log::{error, info, warn};
 use tokio_tungstenite::{
     connect_async_tls_with_config,
     tungstenite::{Message, handshake::client::Request},
@@ -14,10 +14,8 @@ use tokio_tungstenite::{
 use crate::config::ClientConfig;
 use super::super::{
     endpoint::EndpointId,
-    message::{build_get_supported_proto, decode_msg, encode_msg},
+    message::{build_get_supported_proto, encode_msg},
     record::{decode_record, encode_record, extract_msg_payload, no_session_record, websocket_connect_record},
-    usp_record::record::RecordType,
-    RecordType as RT,
 };
 
 const RECONNECT_DELAY: Duration = Duration::from_secs(10);
@@ -45,13 +43,11 @@ async fn connect_and_serve(
     ws_url:         &str,
     negotiated_ver: Arc<Mutex<String>>,
 ) -> anyhow::Result<()> {
-    use tokio_rustls::rustls::ClientConfig as RustlsClientConfig;
-
     // Build mTLS config using the agent's cert
     let tls_cfg = crate::tls::build_tls_config(&cfg)?;
     let connector = Connector::Rustls(tls_cfg);
 
-    let url = url::Url::parse(ws_url)?;
+    let _url = url::Url::parse(ws_url)?;
     let req = Request::builder()
         .uri(ws_url)
         .header("Sec-WebSocket-Protocol", "v1.usp")

@@ -5,6 +5,8 @@
 //! monotonically increasing `sequence_id` and the receiver's acknowledged
 //! up-to value is tracked in `expected_id`.
 
+#![allow(dead_code)]
+
 use std::collections::VecDeque;
 
 /// Per-endpoint session state.
