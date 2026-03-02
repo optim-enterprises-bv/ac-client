@@ -6,11 +6,13 @@
 //!   3. Loop: handle incoming Controller messages (GET, SET, OPERATE, NOTIFY_RESP)
 //!   4. Periodic ValueChange Notify for status (UpTime, LoadAvg, etc.)
 
+#![allow(clippy::all)]
+
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use log::{error, info, warn};
+use log::{info, warn};
 
 use crate::config::{ClientConfig, MtpType};
 use crate::gnss::GnssPosition;
@@ -20,15 +22,14 @@ use super::{
     dm,
     endpoint::EndpointId,
     message::{
-        build_boot_notify, build_error, build_notify_resp, build_operate_resp,
-        build_set_resp, build_value_change_notify, decode_msg, encode_msg,
+        build_boot_notify, build_error, build_operate_resp,
+        build_set_resp, decode_msg, encode_msg,
     },
     mtp,
     usp_msg::{body::MsgBody, header::MessageType},
-    Result,
 };
 
-const STATUS_SUBSCRIPTION_ID: &str = "status";
+const _STATUS_SUBSCRIPTION_ID: &str = "status";
 
 /// Run the USP agent.  Called from main after config is loaded.
 pub async fn run(
@@ -74,7 +75,7 @@ pub async fn run(
 /// (TR-369 §6.2.1 version negotiation).
 pub async fn handle_incoming(
     cfg:            Arc<ClientConfig>,
-    agent_id:       EndpointId,
+    _agent_id:       EndpointId,
     msg_bytes:      &[u8],
     negotiated_ver: Arc<Mutex<String>>,
 ) -> Option<Vec<u8>> {
@@ -175,8 +176,8 @@ fn collect_boot_params(cfg: &ClientConfig) -> HashMap<String, String> {
 
 async fn status_loop(
     cfg:      Arc<ClientConfig>,
-    agent_id: EndpointId,
-    gnss:     Arc<std::sync::Mutex<Option<GnssPosition>>>,
+    _agent_id: EndpointId,
+    _gnss:     Arc<std::sync::Mutex<Option<GnssPosition>>>,
 ) {
     let interval = Duration::from_secs(cfg.status_interval);
     loop {

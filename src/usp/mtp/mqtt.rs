@@ -3,15 +3,13 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use log::{debug, error, info, warn};
+use log::{error, info, warn};
 use rumqttc::{AsyncClient, Event, MqttOptions, Packet, QoS};
 
 use crate::config::ClientConfig;
 use super::super::{
     endpoint::EndpointId,
-    message::decode_msg,
     record::{decode_record, encode_record, extract_msg_payload, mqtt_connect_record, no_session_record},
-    usp_record::record::RecordType,
 };
 
 const RECONNECT_DELAY: Duration = Duration::from_secs(10);

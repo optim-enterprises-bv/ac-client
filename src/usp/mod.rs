@@ -1,6 +1,8 @@
 //! TR-369 / USP (User Services Platform) support for ac-client.
 //! ac-client acts as a USP Agent.
 
+#![allow(dead_code)]
+
 pub mod agent;
 pub mod dm;
 pub mod endpoint;
@@ -40,6 +42,3 @@ pub mod usp_msg {
     #![allow(dead_code, clippy::all)]
     include!(concat!(env!("OUT_DIR"), "/usp_msg.rs"));
 }
-
-pub use usp_msg::header::MessageType;
-pub use usp_record::record::RecordType;

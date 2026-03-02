@@ -8,8 +8,8 @@
 //!     `SSL_VERIFY_PEER` without `SSL_set1_host`).  The server cert CN
 //!     ("ac-server") is sent as the SNI hint.
 //!
-//! The `rustls-post-quantum` provider must be installed as the global default
-//! before calling any function in this module.
+
+#![allow(dead_code)]
 
 use std::fs;
 use std::io::Cursor;
@@ -196,6 +196,9 @@ pub fn build_connector(
 
 /// Build and return a `rustls::ClientConfig` suitable for use with
 /// tokio-tungstenite's `Connector::Rustls` (USP WebSocket MTP).
+///
+/// If the provisioned certificate/key don't exist, falls back to the init cert/key
+/// for unprovisioned devices.
 pub fn build_tls_config(cfg: &crate::config::ClientConfig) -> Result<Arc<ClientConfig>> {
     let provider = CryptoProvider::get_default()
         .expect("call rustls_post_quantum::provider().install_default() first")
@@ -207,13 +210,21 @@ pub fn build_tls_config(cfg: &crate::config::ClientConfig) -> Result<Arc<ClientC
         root_store.add(cert?)?;
     }
 
-    let cert_pem = fs::read(&cfg.cert_file)?;
+    // Use provisioned certs if they exist, otherwise fall back to init certs
+    let (cert_file, key_file) = if cfg.cert_file.exists() && cfg.key_file.exists() {
+        (&cfg.cert_file, &cfg.key_file)
+    } else {
+        log::info!("provisioned certs not found, using init certs");
+        (&cfg.init_cert, &cfg.init_key)
+    };
+
+    let cert_pem = fs::read(cert_file)?;
     let cert_chain: Vec<CertificateDer<'static>> = certs(&mut Cursor::new(cert_pem))
         .collect::<std::io::Result<Vec<_>>>()?;
 
-    let key_pem = fs::read(&cfg.key_file)?;
+    let key_pem = fs::read(key_file)?;
     let private_key = private_key(&mut Cursor::new(key_pem))?
-        .ok_or_else(|| AcError::Config("no private key found".into()))?;
+        .ok_or_else(|| AcError::Config(format!("no private key found in {}", key_file.display())))?;
 
     let verifier = AcpServerVerifier::new(root_store, Arc::clone(&provider))?;
 
