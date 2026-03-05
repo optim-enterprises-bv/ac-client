@@ -20,6 +20,14 @@ use super::super::{
 
 const RECONNECT_DELAY: Duration = Duration::from_secs(10);
 
+/// Generate a Sec-WebSocket-Key header value (base64-encoded 16-byte nonce)
+fn generate_websocket_key() -> String {
+    use rand::Rng;
+    let mut nonce = [0u8; 16];
+    rand::thread_rng().fill(&mut nonce);
+    base64::encode(nonce)
+}
+
 /// Run the WebSocket MTP agent loop.  Reconnects automatically.
 pub async fn run(cfg: Arc<ClientConfig>, agent_id: EndpointId) {
     let negotiated_ver: Arc<Mutex<String>> = Arc::new(Mutex::new("1.3".into()));
@@ -33,7 +41,7 @@ pub async fn run(cfg: Arc<ClientConfig>, agent_id: EndpointId) {
             Ok(()) => { info!("USP WS: disconnected gracefully"); }
             Err(e) => { error!("USP WS error: {e}"); }
         }
-        tokio::time::sleep(RECONNECT_DELAY).await;
+    tokio::time::sleep(RECONNECT_DELAY).await;
     }
 }
 
@@ -47,9 +55,21 @@ async fn connect_and_serve(
     let tls_cfg = crate::tls::build_tls_config(&cfg)?;
     let connector = Connector::Rustls(tls_cfg);
 
-    let _url = url::Url::parse(ws_url)?;
+    let parsed_url = url::Url::parse(ws_url)?;
+    let host = parsed_url.host_str().unwrap_or("localhost");
+    let port = parsed_url.port().unwrap_or(443);
+    
+    // Build WebSocket request with all required headers
+    // When using Request::builder, we must add ALL WebSocket headers manually
+    let ws_key = generate_websocket_key();
     let req = Request::builder()
+        .method("GET")
         .uri(ws_url)
+        .header("Host", format!("{}:{}", host, port))
+        .header("Connection", "Upgrade")
+        .header("Upgrade", "websocket")
+        .header("Sec-WebSocket-Version", "13")
+        .header("Sec-WebSocket-Key", &ws_key)
         .header("Sec-WebSocket-Protocol", "v1.usp")
         .body(())?;
 

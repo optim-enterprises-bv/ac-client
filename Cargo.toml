@@ -65,5 +65,9 @@ rumqttc = "0.24"
 uuid    = { version = "1", features = ["v4"] }
 url     = "2"
 
+# WebSocket key generation
+rand = "0.8"
+base64 = "0.22"
+
 [build-dependencies]
 prost-build = "0.13"
