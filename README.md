@@ -154,6 +154,8 @@ The Broadband Forum's **TR-369 User Services Platform** (USP) defines a vendor-n
 
 ![OptimACS System Architecture](docs/images/architecture.png)
 
+> **Note:** The architecture diagram above shows the high-level components. For the complete data flow with TP-469/USMP and UCI backend integration, see the [Mermaid diagram](#system-architecture-mermaid) below.
+
 **ac-client** runs on each OpenWrt AP as a USP Agent with full **TP-469/USMP** compliance and **UCI backend** integration. On first boot it connects using a shared bootstrap certificate, sends a Boot! Notify, and waits for the controller to issue it a unique per-device mTLS certificate. Thereafter it runs a continuous loop: handling incoming GET/SET/ADD/DELETE/OPERATE messages, applying configuration changes via OpenWrt UCI, sending periodic ValueChange telemetry, and responding to firmware-upgrade and camera-capture operations.
 
 **ac-server** is the Rust USP Controller with complete **TP-469/USMP** message support. It listens on `:3491` for incoming WebSocket connections and subscribes to EMQX for MQTT connections. It dispatches USP messages to the TR-181 data model, manages the device database with full UCI parameter storage, delegates X.509 certificate signing to step-ca, and maintains the USP command queue for reliable configuration delivery.
@@ -187,6 +189,42 @@ usp/v1/{controller_endpoint_id}  ← controller subscribes (receives Agent messa
 | EMQX | MQTT broker (USP MQTT MTP) | 1883, 8883, 8083, 8084, 18083 |
 | MariaDB / MySQL | Device and UCI configuration database | 3306 |
 | Redis | Config-proto cache, rate-limit store (optional) | 6379 |
+
+### System Architecture (Mermaid)
+
+```mermaid
+flowchart TB
+    subgraph "Cloud / Data Center"
+        UI[optimacs-ui<br/>FastAPI + GraphQL<br/>Port 8080]
+        Server[ac-server<br/>USP Controller<br/>Port 3491]
+        CA[step-ca<br/>PKI / CA<br/>Port 9000]
+        MQTT[EMQX<br/>MQTT Broker<br/>Ports 1883/8883]
+        DB[(MariaDB/MySQL<br/>UCI Config Database)]
+        Redis[(Redis<br/>Cache)]
+    end
+    
+    subgraph "OpenWrt Access Point"
+        Agent[ac-client<br/>USP Agent + UCI Backend]
+        UCI[OpenWrt UCI<br/>Config Files]
+        Services[dnsmasq<br/>network<br/>wifi]
+    end
+    
+    UI -->|GraphQL| Server
+    Server -->|REST API| CA
+    Server -->|MQTT| MQTT
+    Server <-->|SQL| DB
+    Server -->|Cache| Redis
+    
+    MQTT <-->|USP Records| Agent
+    Server <-->|WebSocket WSS| Agent
+    
+    Agent -->|uci commands| UCI
+    UCI -->|service restart| Services
+    
+    style Server fill:#f9f,stroke:#333,stroke-width:2px
+    style Agent fill:#bbf,stroke:#333,stroke-width:2px
+    style DB fill:#bfb,stroke:#333,stroke-width:2px
+```
 
 ### Data Flow: Controller to Device Configuration
 
