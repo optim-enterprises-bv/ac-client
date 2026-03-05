@@ -154,15 +154,22 @@ The Broadband Forum's **TR-369 User Services Platform** (USP) defines a vendor-n
 
 ![OptimACS System Architecture](docs/images/architecture.png)
 
-**ac-client** runs on each OpenWrt AP as a USP Agent. On first boot it connects using a shared bootstrap certificate, sends a Boot! Notify, and waits for the controller to issue it a unique per-device mTLS certificate. Thereafter it runs a continuous loop: handling incoming GET/SET/OPERATE messages, sending periodic ValueChange telemetry, and responding to firmware-upgrade and camera-capture operations.
+**ac-client** runs on each OpenWrt AP as a USP Agent with full **TP-469/USMP** compliance and **UCI backend** integration. On first boot it connects using a shared bootstrap certificate, sends a Boot! Notify, and waits for the controller to issue it a unique per-device mTLS certificate. Thereafter it runs a continuous loop: handling incoming GET/SET/ADD/DELETE/OPERATE messages, applying configuration changes via OpenWrt UCI, sending periodic ValueChange telemetry, and responding to firmware-upgrade and camera-capture operations.
 
-**ac-server** is the Rust USP Controller. It listens on `:3491` for incoming WebSocket connections and subscribes to EMQX for MQTT connections. It dispatches USP messages to the TR-181 data model, manages the device database, and delegates all X.509 certificate signing to step-ca via the JWK provisioner REST API.
+**ac-server** is the Rust USP Controller with complete **TP-469/USMP** message support. It listens on `:3491` for incoming WebSocket connections and subscribes to EMQX for MQTT connections. It dispatches USP messages to the TR-181 data model, manages the device database with full UCI parameter storage, delegates X.509 certificate signing to step-ca, and maintains the USP command queue for reliable configuration delivery.
+
+**Database (MariaDB/MySQL)** stores all device configurations including the complete UCI parameter set:
+- WiFi radios with EHT (WiFi 7) modes, cell density, country codes
+- Network interfaces with bridge ports, IPv6 prefixes, MAC addresses
+- DHCP pools and static leases with hostnames
+- System configuration: timezone, zonename, TTY login, log size
+- LED configurations and service states
 
 **step-ca** (Smallstep) is the PKI. It issues the server TLS cert, per-device client certs, and the init bootstrap cert. The CA private key never leaves the step-ca container — ac-server holds only an EC P-256 JWK provisioner key to sign one-time tokens (OTTs) used to authenticate CSR signing requests.
 
-**optimacs-ui** is the FastAPI + Jinja2 management console with Strawberry GraphQL. Real-time subscriptions update the dashboard, AP list, and USP event log automatically.
+**optimacs-ui** is the FastAPI + Jinja2 management console with Strawberry GraphQL. Real-time subscriptions update the dashboard, AP list, USP event log, and TR-369 data model browser automatically.
 
-**EMQX** provides the MQTT 5 broker for the MQTT Message Transport Protocol (MTP). Agents and the controller exchange USP Records via MQTT topics:
+**EMQX** provides the MQTT 5 broker for the MQTT Message Transfer Protocol (MTP). Agents and the controller exchange USP Records via MQTT topics:
 
 ```
 usp/v1/{agent_endpoint_id}       ← agent subscribes (receives Controller messages)
@@ -173,13 +180,45 @@ usp/v1/{controller_endpoint_id}  ← controller subscribes (receives Agent messa
 
 | Component | Role | Port(s) |
 |-----------|------|---------|
-| ac-server | USP Controller, provisioning, TR-181 dispatch | 3491 (WSS) |
+| ac-server | USP Controller with TP-469/USMP support, UCI parameter storage | 3491 (WSS) |
+| ac-client | USP Agent with UCI backend (47 operations) | *(outbound only)* |
 | step-ca | PKI / Certificate Authority | 9000 (HTTPS) |
 | optimacs-ui | Management web console (FastAPI + GraphQL) | 8080 |
 | EMQX | MQTT broker (USP MQTT MTP) | 1883, 8883, 8083, 8084, 18083 |
-| MariaDB / MySQL | Device and configuration database | 3306 |
+| MariaDB / MySQL | Device and UCI configuration database | 3306 |
 | Redis | Config-proto cache, rate-limit store (optional) | 6379 |
-| **ac-client** | **USP Agent on each OpenWrt AP** | *(outbound only)* |
+
+### Data Flow: Controller to Device Configuration
+
+```
+┌─────────────┐     USP/TR-369      ┌─────────────┐     UCI Commands     ┌─────────────┐
+│   optimacs  │ ───────────────────>│   ac-server │ ───────────────────> │   ac-client │
+│     UI      │    SET/ADD/DELETE   │  (Database) │   (MySQL → Agent)   │  (OpenWrt)  │
+└─────────────┘                     └─────────────┘                     └─────────────┘
+                                                                          │
+                                                                          ▼
+                                                                   ┌─────────────┐
+                                                                   │  UCI Config │
+                                                                   │  (/etc/config)│
+                                                                   └─────────────┘
+                                                                          │
+                                                                          ▼
+                                                                   ┌─────────────┐
+                                                                   │   Services  │
+                                                                   │dnsmasq/wifi/│
+                                                                   │   network   │
+                                                                   └─────────────┘
+```
+
+**Configuration Management Flow:**
+1. **Admin** sets parameter via optimacs-ui (e.g., WiFi channel)
+2. **ac-server** stores in MySQL and queues USP SET command
+3. **ac-server** sends USP SET message to ac-client via WebSocket/MQTT
+4. **ac-client** receives message, converts to UCI commands
+5. **UCI backend** executes `uci set wireless.radio0.channel=36`
+6. **Service restart** triggered: `wifi reload`
+7. **ac-client** sends SET_RESP back to controller
+8. **ac-server** marks command as acknowledged in database
 
 ---
 
