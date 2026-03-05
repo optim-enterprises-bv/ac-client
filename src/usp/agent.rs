@@ -20,6 +20,7 @@ use crate::util;
 
 use super::{
     dm,
+    tp469,
     endpoint::EndpointId,
     message::{
         build_boot_notify, build_error, build_operate_resp,
@@ -137,13 +138,48 @@ pub async fn handle_incoming(
             Some(boot_msg)
         }
 
-        // TR-369 §6.4: known-but-unsupported message types must return Error 7004
-        MessageType::GetSupportedDm
-        | MessageType::GetInstances
-        | MessageType::Add
-        | MessageType::Delete => {
-            warn!("USP Agent: unsupported message type {:?}", msg_type);
-            Some(build_error(&msg_id, 7004, "NOT_SUPPORTED"))
+        // TR-369 §6.1.5: GetSupportedDM - return supported data model
+        MessageType::GetSupportedDm => {
+            let (obj_paths, first_level_only, include_commands, include_events) = 
+                extract_get_supported_dm_args(&body);
+            
+            tp469::handle_get_supported_dm(
+                &msg_id,
+                &obj_paths,
+                first_level_only,
+                include_commands,
+                include_events,
+            )
+        }
+        
+        // TR-369 §6.1.6: GetInstances - enumerate object instances
+        MessageType::GetInstances => {
+            let (obj_paths, first_level_only) = extract_get_instances_args(&body);
+            
+            tp469::handle_get_instances(
+                &cfg,
+                &msg_id,
+                &obj_paths,
+                first_level_only,
+            ).await
+        }
+        
+        // TR-369 §6.1.3: Add - create new object instances
+        MessageType::Add => {
+            let (create_objs, allow_partial) = extract_add_args(&body);
+            let results = tp469::handle_add(&cfg, &create_objs, allow_partial).await;
+            
+            // Build ADD_RESP
+            Some(build_add_resp(&msg_id, results))
+        }
+        
+        // TR-369 §6.1.4: Delete - remove object instances
+        MessageType::Delete => {
+            let (obj_paths, allow_partial) = extract_delete_args(&body);
+            let results = tp469::handle_delete(&cfg, &obj_paths, allow_partial).await;
+            
+            // Build DELETE_RESP
+            Some(build_delete_resp(&msg_id, results))
         }
 
         _ => {
@@ -276,4 +312,126 @@ fn extract_supported_versions(body: &super::usp_msg::Body) -> Vec<String> {
         }
     }
     vec![]
+}
+
+// ── TP-469 Helper Functions ───────────────────────────────────────────────────
+
+fn extract_get_supported_dm_args(body: &super::usp_msg::Body) -> (Vec<String>, bool, bool, bool) {
+    use super::usp_msg::body::MsgBody;
+    if let Some(MsgBody::Request(req)) = &body.msg_body {
+        if let Some(super::usp_msg::request::ReqType::GetSupportedDm(r)) = &req.req_type {
+            return (
+                r.obj_paths.clone(),
+                r.first_level_only,
+                r.return_commands,
+                r.return_events,
+            );
+        }
+    }
+    (vec![], true, false, false)
+}
+
+fn extract_get_instances_args(body: &super::usp_msg::Body) -> (Vec<String>, bool) {
+    use super::usp_msg::body::MsgBody;
+    if let Some(MsgBody::Request(req)) = &body.msg_body {
+        if let Some(super::usp_msg::request::ReqType::GetInstances(r)) = &req.req_type {
+            return (r.obj_paths.clone(), r.first_level_only);
+        }
+    }
+    (vec![], true)
+}
+
+fn extract_add_args(body: &super::usp_msg::Body) -> (Vec<super::usp_msg::add::CreateObject>, bool) {
+    use super::usp_msg::body::MsgBody;
+    if let Some(MsgBody::Request(req)) = &body.msg_body {
+        if let Some(super::usp_msg::request::ReqType::Add(r)) = &req.req_type {
+            return (r.create_objs.clone(), r.allow_partial);
+        }
+    }
+    (vec![], false)
+}
+
+fn extract_delete_args(body: &super::usp_msg::Body) -> (Vec<String>, bool) {
+    use super::usp_msg::body::MsgBody;
+    if let Some(MsgBody::Request(req)) = &body.msg_body {
+        if let Some(super::usp_msg::request::ReqType::Delete(r)) = &req.req_type {
+            return (r.obj_paths.clone(), r.allow_partial);
+        }
+    }
+    (vec![], false)
+}
+
+fn build_add_resp(msg_id: &str, results: Vec<tp469::AddResult>) -> super::usp_msg::Msg {
+    use super::usp_msg::{add_resp::*, *};
+    
+    let created_obj_results = results.into_iter().map(|r| {
+        let oper_status = if r.success {
+            Some(created_object_result::OperStatus::OperSuccess(created_object_result::OperSuccess {
+                instantiated_path: format!("{}.{}", r.obj_path.trim_end_matches('.'), r.instance),
+                param_errs: vec![],
+                unique_keys: std::collections::HashMap::new(),
+            }))
+        } else {
+            Some(created_object_result::OperStatus::OperFailure(created_object_result::OperFailure {
+                err_code: r.err_code.map(|e| e.as_u32()).unwrap_or(7200),
+                err_msg: r.err_msg.unwrap_or_default(),
+            }))
+        };
+        
+        CreatedObjectResult {
+            requested_path: r.obj_path,
+            oper_status,
+        }
+    }).collect();
+    
+    super::usp_msg::Msg {
+        header: Some(Header {
+            msg_id: msg_id.into(),
+            msg_type: MessageType::AddResp as i32,
+        }),
+        body: Some(Body {
+            msg_body: Some(MsgBody::Response(Response {
+                resp_type: Some(response::RespType::AddResp(AddResp {
+                    created_obj_results,
+                })),
+            })),
+        }),
+    }
+}
+
+fn build_delete_resp(msg_id: &str, results: Vec<tp469::DeleteResult>) -> super::usp_msg::Msg {
+    use super::usp_msg::{delete_resp::*, *};
+    
+    let deleted_obj_results = results.into_iter().map(|r| {
+        let oper_status = if r.success {
+            Some(deleted_object_result::OperStatus::OperSuccess(deleted_object_result::OperSuccess {
+                affected_paths: vec![],
+            }))
+        } else {
+            Some(deleted_object_result::OperStatus::OperFailure(deleted_object_result::OperFailure {
+                err_code: r.err_code.map(|e| e.as_u32()).unwrap_or(7200),
+                err_msg: r.err_msg.unwrap_or_default(),
+                unaffected_path_errs: vec![],
+            }))
+        };
+        
+        DeletedObjectResult {
+            requested_path: r.obj_path,
+            oper_status,
+        }
+    }).collect();
+    
+    super::usp_msg::Msg {
+        header: Some(Header {
+            msg_id: msg_id.into(),
+            msg_type: MessageType::DeleteResp as i32,
+        }),
+        body: Some(Body {
+            msg_body: Some(MsgBody::Response(Response {
+                resp_type: Some(response::RespType::DeleteResp(DeleteResp {
+                    deleted_obj_results,
+                })),
+            })),
+        }),
+    }
 }

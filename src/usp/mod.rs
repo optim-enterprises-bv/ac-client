@@ -10,6 +10,7 @@ pub mod message;
 pub mod mtp;
 pub mod record;
 pub mod session;
+pub mod tp469;
 
 use thiserror::Error;
 
