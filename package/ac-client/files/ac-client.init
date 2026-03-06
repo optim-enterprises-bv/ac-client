@@ -21,7 +21,7 @@ USE_PROCD=1
 START=95
 STOP=05
 
-PROG=/usr/sbin/ac-client
+PROG=/bin/ac-client
 UCI_PKG=/etc/config/optimacs
 CONF=/etc/apclient/ac_client.conf
 PIDFILE=/var/run/apclient.pid
