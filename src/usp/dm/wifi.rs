@@ -3,18 +3,7 @@
 use std::collections::HashMap;
 use log::{info, warn};
 use crate::config::ClientConfig;
-
-/// Run a UCI command and return stdout.
-fn uci_get(path: &str) -> String {
-    std::process::Command::new("uci")
-        .args(["get", path])
-        .output()
-        .ok()
-        .and_then(|o| String::from_utf8(o.stdout).ok())
-        .unwrap_or_default()
-        .trim()
-        .to_string()
-}
+use crate::usp::tp469::uci_backend::{uci_get, uci_set, uci_commit};
 
 /// Get all wireless sections from UCI
 fn uci_show_wireless() -> HashMap<String, HashMap<String, String>> {
@@ -94,22 +83,6 @@ fn get_wifi_devices() -> Vec<String> {
     }
     
     devices
-}
-
-fn uci_set(path: &str, value: &str) -> Result<(), String> {
-    let status = std::process::Command::new("uci")
-        .args(["set", &format!("{path}={value}")])
-        .status()
-        .map_err(|e| e.to_string())?;
-    if status.success() { Ok(()) } else { Err(format!("uci set {path} failed")) }
-}
-
-fn uci_commit(pkg: &str) -> Result<(), String> {
-    std::process::Command::new("uci")
-        .args(["commit", pkg])
-        .status()
-        .map_err(|e| e.to_string())?;
-    Ok(())
 }
 
 /// Parse SSID index from path like "Device.WiFi.SSID.2.SSID"

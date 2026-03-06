@@ -3,33 +3,7 @@
 use std::collections::HashMap;
 use log::{info, warn};
 use crate::config::ClientConfig;
-
-fn uci_get(path: &str) -> String {
-    std::process::Command::new("uci")
-        .args(["get", path])
-        .output()
-        .ok()
-        .and_then(|o| String::from_utf8(o.stdout).ok())
-        .unwrap_or_default()
-        .trim()
-        .to_string()
-}
-
-fn uci_set(path: &str, value: &str) -> Result<(), String> {
-    let status = std::process::Command::new("uci")
-        .args(["set", &format!("{path}={value}")])
-        .status()
-        .map_err(|e| e.to_string())?;
-    if status.success() { Ok(()) } else { Err(format!("uci set {path} failed")) }
-}
-
-fn uci_commit(pkg: &str) -> Result<(), String> {
-    std::process::Command::new("uci")
-        .args(["commit", pkg])
-        .status()
-        .map_err(|e| e.to_string())?;
-    Ok(())
-}
+use crate::usp::tp469::uci_backend::{uci_get, uci_set, uci_commit};
 
 fn uci_add_list(path: &str, value: &str) -> Result<(), String> {
     let status = std::process::Command::new("uci")
