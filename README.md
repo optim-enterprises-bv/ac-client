@@ -3,6 +3,7 @@
 `ac-client` is a Rust daemon implementing the **TR-369 / USP 1.3 Agent** (User Services Platform, Broadband Forum) for OpenWrt-based access-point devices managed by an [OptimACS](https://acs.optimcloud.com) controller (`ac-server`).
 
 **Key Features:**
+- ✅ **Post-Quantum Cryptography** - Hybrid X25519Kyber768 (ML-KEM-768) key exchange for quantum-resistant TLS
 - ✅ **Full TP-469/USMP compliance** - ADD, DELETE, GetSupportedDM, GetInstances
 - ✅ **Complete UCI backend** - 47 operations for all OpenWrt configurations
 - ✅ **WiFi 7 (EHT) support** - EHT20, EHT80, EHT160, EHT320 modes
@@ -102,6 +103,34 @@ Permanently delete your account and all associated data, or export a GDPR-compli
 ![Account — Danger Zone](docs/images/screens/account-danger.png)
 
 > Deleting your account removes all access points, users, PII records, and billing data permanently. You must type `DELETE` to confirm. This action cannot be undone.
+
+---
+
+## Post-Quantum Cryptography
+
+ac-client includes **post-quantum cryptography by default** to protect against future quantum computer attacks. No configuration required — it's automatically enabled on every TLS 1.3 connection.
+
+**Technical Details:**
+- **Algorithm**: X25519Kyber768 (hybrid)
+  - Combines classical X25519 ECDH with ML-KEM-768 (Kyber) post-quantum KEM
+- **Library**: rustls-post-quantum v0.2
+- **Protocol**: TLS 1.3 with TLS13_AES_256_GCM_SHA384
+- **Status**: Always enabled, no toggle required
+
+**Verification:**
+When ac-client starts, it installs the post-quantum TLS provider. If successful, you'll see:
+```
+[INFO ac_client] ac-client starting (MTP=WebSocket)
+```
+
+If post-quantum initialization fails, the client exits with:
+```
+[ERROR ac_client] FATAL: post-quantum TLS provider failed to initialise
+```
+
+The absence of error messages indicates successful post-quantum operation.
+
+See [POST_QUANTUM_CRYPTO.md](POST_QUANTUM_CRYPTO.md) for complete documentation.
 
 ---
 

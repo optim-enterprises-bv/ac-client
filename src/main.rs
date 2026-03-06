@@ -20,7 +20,7 @@ use std::process;
 use std::sync::Arc;
 
 use clap::Parser;
-use log::{error, info};
+use log::{debug, error, info, trace, LevelFilter};
 
 // ── CLI ───────────────────────────────────────────────────────────────────────
 
@@ -41,6 +41,10 @@ struct Cli {
     /// Log to stderr instead of syslog (useful for debugging).
     #[arg(long)]
     stderr: bool,
+
+    /// Increase verbosity (use -v for Debug, -vv for Trace)
+    #[arg(short = 'v', long, action = clap::ArgAction::Count)]
+    verbose: u8,
 }
 
 // ── Entry point ───────────────────────────────────────────────────────────────
@@ -75,20 +79,22 @@ async fn main() {
     // yet available (can happen early in the boot sequence before logd is ready).
     let use_syslog = cfg.log_syslog && !cli.stderr;
     if use_syslog {
-        if let Err(e) = setup_logging(true) {
+        if let Err(e) = setup_logging(true, cli.verbose) {
             eprintln!("ac-client: syslog unavailable ({e}), falling back to stderr");
-            setup_logging(false).ok();
+            setup_logging(false, cli.verbose).ok();
         }
     } else {
-        setup_logging(false).ok();
+        setup_logging(false, cli.verbose).ok();
     }
 
     // Install the post-quantum TLS provider (must happen before any TLS use).
+    debug!("Installing post-quantum TLS provider...");
     if let Err(e) = rustls_post_quantum::provider().install_default() {
         error!("FATAL: post-quantum TLS provider failed to initialise: {:?}", e);
         error!("Ensure the binary was compiled for the correct CPU architecture.");
         process::exit(1);
     }
+    info!("Post-quantum TLS provider installed successfully");
 
     // Write PID file
     if let Err(e) = util::write_pid_file(&cfg.pid_file) {
@@ -99,6 +105,7 @@ async fn main() {
     // detect_mac() tries a broad set of interface names; if none are found
     // the operator must set mac_addr explicitly in UCI or the flat config.
     let cfg = if cfg.mac_addr.is_empty() {
+        debug!("MAC address not configured, attempting auto-detection...");
         let mac = util::detect_mac();
         if mac.is_empty() {
             error!("mac_addr not configured and auto-detection failed.");
@@ -110,16 +117,22 @@ async fn main() {
         info!("auto-detected MAC address: {mac}");
         config::ClientConfig { mac_addr: mac, ..cfg }
     } else {
+        debug!("Using configured MAC address: {}", cfg.mac_addr);
         cfg
     };
 
     // Derive ws_url from server_host if not set explicitly
     let cfg = if cfg.ws_url.is_none() && !cfg.server_host.is_empty() {
+        let ws_url = format!("wss://{}:{}/usp", cfg.server_host, cfg.server_port);
+        debug!("Derived WebSocket URL from server_host: {}", ws_url);
         config::ClientConfig {
-            ws_url: Some(format!("wss://{}:{}/usp", cfg.server_host, cfg.server_port)),
+            ws_url: Some(ws_url),
             ..cfg
         }
     } else {
+        if let Some(ref url) = cfg.ws_url {
+            debug!("Using configured WebSocket URL: {}", url);
+        }
         cfg
     };
 
@@ -144,7 +157,14 @@ async fn main() {
 
 // ── Logging setup ─────────────────────────────────────────────────────────────
 
-fn setup_logging(use_syslog: bool) -> anyhow::Result<()> {
+fn setup_logging(use_syslog: bool, verbose: u8) -> anyhow::Result<()> {
+    // Determine log level from verbose flag
+    let level = match verbose {
+        0 => LevelFilter::Info,
+        1 => LevelFilter::Debug,
+        _ => LevelFilter::Trace,
+    };
+
     if use_syslog {
         let formatter = syslog::Formatter3164 {
             facility: syslog::Facility::LOG_DAEMON,
@@ -155,12 +175,14 @@ fn setup_logging(use_syslog: bool) -> anyhow::Result<()> {
         let logger = syslog::unix(formatter)
             .map_err(|e| anyhow::anyhow!("syslog connect failed: {e}"))?;
         log::set_boxed_logger(Box::new(syslog::BasicLogger::new(logger)))
-            .map(|()| log::set_max_level(log::LevelFilter::Info))
+            .map(|()| log::set_max_level(level))
             .map_err(|e| anyhow::anyhow!("set_logger: {e}"))?;
     } else {
         env_logger::Builder::from_default_env()
-            .filter_level(log::LevelFilter::Debug)
+            .filter_level(level)
             .init();
     }
+    
+    info!("Logging initialized at level: {:?}", level);
     Ok(())
 }
