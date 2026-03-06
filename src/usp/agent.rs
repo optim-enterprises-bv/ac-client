@@ -301,22 +301,28 @@ async fn status_loop(
             
             // Build ValueChange Notify message
             let msg = build_value_change_notify("status", path, val);
+            debug!("Built ValueChange Notify for {path}");
             
             // Encode to USP record
             match encode_msg(&msg) {
                 Ok(msg_bytes) => {
+                    debug!("Encoded USP message ({} bytes)", msg_bytes.len());
                     let record = super::record::no_session_record(
                         agent_id.as_str(),
                         &controller_id,
                         msg_bytes,
                         "1.3"
                     );
+                    debug!("Created USP record: from_id={}, to_id={}", record.from_id, record.to_id);
                     
                     match super::record::encode_record(&record) {
                         Ok(record_bytes) => {
+                            info!("Sending status heartbeat to MTP ({} bytes): {path} = {val}", record_bytes.len());
                             // Send to MTP loop via channel
                             if let Err(e) = tx.send(record_bytes).await {
                                 warn!("Failed to send status update to MTP: {e}");
+                            } else {
+                                debug!("Status update queued for MTP successfully");
                             }
                         }
                         Err(e) => warn!("Failed to encode status record: {e}"),

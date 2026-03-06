@@ -240,12 +240,17 @@ async fn connect_and_serve(
                 rx.recv().await
             } => {
                 if let Some(record_bytes) = status_msg {
-                    debug!("Sending status heartbeat ({} bytes)", record_bytes.len());
-                    if let Err(e) = ws.send(Message::Binary(record_bytes)).await {
-                        warn!("Failed to send status heartbeat: {e}");
-                    } else {
-                        debug!("Status heartbeat sent successfully");
+                    info!("WebSocket: Sending status heartbeat ({} bytes)", record_bytes.len());
+                    trace!("Status record bytes (first 64): {:?}", &record_bytes[..record_bytes.len().min(64)]);
+                    match ws.send(Message::Binary(record_bytes)).await {
+                        Ok(()) => info!("WebSocket: Status heartbeat sent successfully"),
+                        Err(e) => {
+                            warn!("WebSocket: Failed to send status heartbeat: {e}");
+                            // Don't break here - let the connection error handling deal with it
+                        }
                     }
+                } else {
+                    debug!("Status channel closed");
                 }
             }
         }
