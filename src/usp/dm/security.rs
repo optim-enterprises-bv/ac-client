@@ -3,8 +3,58 @@
 use std::collections::HashMap;
 use crate::config::ClientConfig;
 
-pub async fn set(_cfg: &ClientConfig, _path: &str, _value: &str) -> Result<(), String> {
-    // cert SET is handled via apply::save_certs called from the agent
+pub async fn set(_cfg: &ClientConfig, path: &str, value: &str) -> Result<(), String> {
+    match path {
+        "Device.X_OptimACS_Security.DevicePassword" => {
+            // Set device root password via OpenWrt UCI/chpasswd
+            apply_device_password(value).await
+        }
+        _ => {
+            // cert SET is handled via apply::save_certs called from the agent
+            Ok(())
+        }
+    }
+}
+
+/// Apply device root password using OpenWrt chpasswd
+async fn apply_device_password(password: &str) -> Result<(), String> {
+    use tokio::process::Command;
+    
+    // Hash the password using openssl (OpenWrt compatible)
+    let output = Command::new("openssl")
+        .args(["passwd", "-1", password])
+        .output()
+        .await
+        .map_err(|e| format!("Failed to run openssl: {}", e))?;
+    
+    if !output.status.success() {
+        return Err(format!(
+            "openssl passwd failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    
+    let hash = String::from_utf8(output.stdout)
+        .map_err(|e| format!("Invalid utf8 from openssl: {}", e))?
+        .trim()
+        .to_string();
+    
+    // Update /etc/shadow using chpasswd
+    let output = Command::new("sh")
+        .arg("-c")
+        .arg(format!("echo 'root:{}' | chpasswd -e", hash))
+        .output()
+        .await
+        .map_err(|e| format!("Failed to run chpasswd: {}", e))?;
+    
+    if !output.status.success() {
+        return Err(format!(
+            "chpasswd failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    
+    log::info!("Device root password updated successfully");
     Ok(())
 }
 
