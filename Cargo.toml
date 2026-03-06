@@ -30,9 +30,6 @@ rustls-pemfile      = "2"
 # Protobuf (same version as ac-server)
 prost = "0.13"
 
-# MD5 checksums (firmware validation, camera image verification)
-md5 = "0.7"
-
 # Serialization
 serde = { version = "1", features = ["derive"] }
 

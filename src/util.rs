@@ -1,13 +1,9 @@
-//! Miscellaneous utilities: MAC detection, IP retrieval, MD5, PID file, etc.
-
-#![allow(dead_code)]
+//! Miscellaneous utilities: MAC detection, IP retrieval, PID file, etc.
 
 use std::fs;
 use std::io::{self, Write};
 use std::net::{IpAddr, Ipv4Addr, UdpSocket};
 use std::path::Path;
-
-use log::warn;
 
 // ── MAC address ───────────────────────────────────────────────────────────────
 
@@ -83,19 +79,6 @@ pub fn get_default_gateway() -> String {
         }
     }
     String::new()
-}
-
-// ── MD5 ───────────────────────────────────────────────────────────────────────
-
-/// Return the lowercase hex MD5 digest of `data`.
-pub fn md5_hex(data: &[u8]) -> String {
-    format!("{:x}", md5::compute(data))
-}
-
-/// Return the MD5 digest of the file at `path`.
-pub fn md5_file(path: &Path) -> io::Result<String> {
-    let data = fs::read(path)?;
-    Ok(md5_hex(&data))
 }
 
 // ── Firmware version ──────────────────────────────────────────────────────────
@@ -190,14 +173,6 @@ pub fn write_pid_file(path: &Path) -> io::Result<()> {
     let mut f = fs::File::create(path)?;
     writeln!(f, "{}", std::process::id())?;
     Ok(())
-}
-
-/// Remove the PID file (best-effort, logs a warning on failure).
-#[allow(dead_code)]
-pub fn remove_pid_file(path: &Path) {
-    if let Err(e) = fs::remove_file(path) {
-        warn!("failed to remove PID file {}: {e}", path.display());
-    }
 }
 
 // ── ARP table parsing ─────────────────────────────────────────────────────────
