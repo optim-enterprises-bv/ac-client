@@ -3,6 +3,8 @@
 //! Configuration is applied via OpenWrt's UCI batch command mechanism.
 //! Firmware is applied via `/sbin/sysupgrade` (preserves config).
 
+#![allow(dead_code, clippy::all)]
+
 use std::fs;
 use std::path::PathBuf;
 

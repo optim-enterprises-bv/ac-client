@@ -8,8 +8,10 @@
 //! runtime.  If the device is absent the reader exits silently and position
 //! stays `None`.
 
-use std::io::{self, BufRead, BufReader};
+#![allow(clippy::all)]
+
 use std::fs;
+use std::io::{self, BufRead, BufReader};
 use std::sync::{Arc, Mutex};
 
 use log::{debug, warn};
@@ -20,7 +22,7 @@ use nix::sys::termios::{
 /// Latest GNSS position fix.
 #[derive(Debug, Clone)]
 pub struct GnssPosition {
-    pub latitude:  String,
+    pub latitude: String,
     pub longitude: String,
 }
 
@@ -41,8 +43,8 @@ pub fn spawn_gnss_reader(device: &str, baud: u32) -> Arc<Mutex<Option<GnssPositi
 }
 
 fn gnss_reader_loop(
-    device:   &str,
-    baud:     u32,
+    device: &str,
+    baud: u32,
     position: Arc<Mutex<Option<GnssPosition>>>,
 ) -> io::Result<()> {
     let file = fs::OpenOptions::new().read(true).open(device)?;
@@ -52,7 +54,10 @@ fn gnss_reader_loop(
     for line in reader.lines() {
         let line = match line {
             Ok(l) => l,
-            Err(e) => { warn!("GNSS read error: {e}"); break; }
+            Err(e) => {
+                warn!("GNSS read error: {e}");
+                break;
+            }
         };
         if let Some(pos) = parse_nmea(&line) {
             debug!("GNSS fix: lat={} lon={}", pos.latitude, pos.longitude);
@@ -71,22 +76,16 @@ fn configure_serial(file: &fs::File, baud: u32) -> io::Result<()> {
         .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
 
     // Raw input: no canonical mode, no echo, no signals
-    t.local_flags &= !(
-        LocalFlags::ICANON |
-        LocalFlags::ECHO   |
-        LocalFlags::ECHOE  |
-        LocalFlags::ISIG
-    );
+    t.local_flags &=
+        !(LocalFlags::ICANON | LocalFlags::ECHO | LocalFlags::ECHOE | LocalFlags::ISIG);
     // No output processing
     t.output_flags &= !OutputFlags::OPOST;
     // Disable software flow control and strip/parity
-    t.input_flags &= !(
-        InputFlags::IXON   |
-        InputFlags::IXOFF  |
-        InputFlags::IXANY  |
-        InputFlags::ISTRIP |
-        InputFlags::INPCK
-    );
+    t.input_flags &= !(InputFlags::IXON
+        | InputFlags::IXOFF
+        | InputFlags::IXANY
+        | InputFlags::ISTRIP
+        | InputFlags::INPCK);
     // 8 data bits, no parity, 1 stop bit, enable receiver, ignore modem ctrl
     t.control_flags |= ControlFlags::CS8 | ControlFlags::CREAD | ControlFlags::CLOCAL;
     t.control_flags &= !(ControlFlags::CSIZE | ControlFlags::CSTOPB | ControlFlags::PARENB);
@@ -96,15 +95,15 @@ fn configure_serial(file: &fs::File, baud: u32) -> io::Result<()> {
     t.control_chars[nix::sys::termios::SpecialCharacterIndices::VTIME as usize] = 0;
 
     let baud_rate = match baud {
-        1200   => BaudRate::B1200,
-        2400   => BaudRate::B2400,
-        4800   => BaudRate::B4800,
-        9600   => BaudRate::B9600,
-        19200  => BaudRate::B19200,
-        38400  => BaudRate::B38400,
-        57600  => BaudRate::B57600,
+        1200 => BaudRate::B1200,
+        2400 => BaudRate::B2400,
+        4800 => BaudRate::B4800,
+        9600 => BaudRate::B9600,
+        19200 => BaudRate::B19200,
+        38400 => BaudRate::B38400,
+        57600 => BaudRate::B57600,
         115200 => BaudRate::B115200,
-        _      => BaudRate::B9600,
+        _ => BaudRate::B9600,
     };
 
     termios::cfsetospeed(&mut t, baud_rate)
@@ -158,7 +157,7 @@ fn parse_rmc(f: &[&str]) -> Option<GnssPosition> {
     let lat = nmea_to_decimal(f[3], f[4])?;
     let lon = nmea_to_decimal(f[5], f[6])?;
     Some(GnssPosition {
-        latitude:  format!("{lat:.6}"),
+        latitude: format!("{lat:.6}"),
         longitude: format!("{lon:.6}"),
     })
 }
@@ -175,7 +174,7 @@ fn parse_gga(f: &[&str]) -> Option<GnssPosition> {
     let lat = nmea_to_decimal(f[2], f[3])?;
     let lon = nmea_to_decimal(f[4], f[5])?;
     Some(GnssPosition {
-        latitude:  format!("{lat:.6}"),
+        latitude: format!("{lat:.6}"),
         longitude: format!("{lon:.6}"),
     })
 }

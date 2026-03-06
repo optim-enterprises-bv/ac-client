@@ -30,9 +30,6 @@ rustls-pemfile      = "2"
 # Protobuf (same version as ac-server)
 prost = "0.13"
 
-# MD5 checksums (firmware validation, camera image verification)
-md5 = "0.7"
-
 # Serialization
 serde = { version = "1", features = ["derive"] }
 
@@ -64,6 +61,10 @@ futures-util = "0.3"
 rumqttc = "0.24"
 uuid    = { version = "1", features = ["v4"] }
 url     = "2"
+
+# WebSocket key generation
+rand = "0.8"
+base64 = "0.22"
 
 [build-dependencies]
 prost-build = "0.13"

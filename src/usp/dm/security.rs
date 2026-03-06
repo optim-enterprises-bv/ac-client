@@ -11,10 +11,44 @@ pub async fn set(_cfg: &ClientConfig, _path: &str, _value: &str) -> Result<(), S
 pub async fn operate_issue_cert(
     cfg:        &ClientConfig,
     _command:    &str,
-    _input_args: &HashMap<String, String>,
+    input_args: &HashMap<String, String>,
 ) -> Result<HashMap<String, String>, String> {
-    // Generate a CSR and return it to the controller
-    // For now, read the existing init cert and return its CN as proof
+    // Check if controller sent certificates (ca_cert, cert, key)
+    if let (Some(ca_cert), Some(cert), Some(key)) = (
+        input_args.get("ca_cert"),
+        input_args.get("cert"),
+        input_args.get("key")
+    ) {
+        // Save the provisioned certificates
+        tokio::fs::write(&cfg.ca_file, ca_cert)
+            .await
+            .map_err(|e| format!("Failed to write CA cert: {}", e))?;
+        tokio::fs::write(&cfg.cert_file, cert)
+            .await
+            .map_err(|e| format!("Failed to write client cert: {}", e))?;
+        tokio::fs::write(&cfg.key_file, key)
+            .await
+            .map_err(|e| format!("Failed to write client key: {}", e))?;
+        
+        log::info!("Installed provisioned certificates from controller");
+        log::info!("Restarting agent to use new certificates...");
+        
+        // Return success response before restarting
+        let mut out = HashMap::new();
+        out.insert("status".into(), "success".into());
+        out.insert("message".into(), "Certificates installed".into());
+        
+        // Exit the process to trigger restart by init system
+        // Give a moment for the response to be sent
+        tokio::spawn(async {
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            std::process::exit(0);
+        });
+        
+        return Ok(out);
+    }
+    
+    // No certificates provided - return CSR request (legacy behavior)
     let cert_pem = tokio::fs::read_to_string(&cfg.init_cert)
         .await
         .map_err(|e| e.to_string())?;

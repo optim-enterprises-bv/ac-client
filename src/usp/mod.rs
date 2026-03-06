@@ -7,7 +7,7 @@ pub mod endpoint;
 pub mod message;
 pub mod mtp;
 pub mod record;
-pub mod session;
+pub mod tp469;
 
 use thiserror::Error;
 
@@ -40,6 +40,3 @@ pub mod usp_msg {
     #![allow(dead_code, clippy::all)]
     include!(concat!(env!("OUT_DIR"), "/usp_msg.rs"));
 }
-
-pub use usp_msg::header::MessageType;
-pub use usp_record::record::RecordType;

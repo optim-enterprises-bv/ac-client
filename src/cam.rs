@@ -7,6 +7,8 @@
 //! Camera HTTP calls use a permissive TLS client (all cert errors accepted) to
 //! match the C client's `CURLOPT_SSL_VERIFYPEER = 0` behaviour.
 
+#![allow(dead_code, clippy::all)]
+
 use std::path::PathBuf;
 use std::time::Duration;
 
