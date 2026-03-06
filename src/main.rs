@@ -20,7 +20,7 @@ use std::process;
 use std::sync::Arc;
 
 use clap::Parser;
-use log::{debug, error, info, trace, LevelFilter};
+use log::{debug, error, info, LevelFilter};
 
 // ── CLI ───────────────────────────────────────────────────────────────────────
 

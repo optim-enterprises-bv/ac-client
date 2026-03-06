@@ -208,7 +208,7 @@ async fn update_hosts_file(idx: usize, new_ip: &str, new_hostname: &str) -> Resu
     let mut hosts_idx = 0;
     let mut found = false;
     
-    for (i, line) in lines.iter_mut().enumerate() {
+    for (_i, line) in lines.iter_mut().enumerate() {
         let trimmed = line.trim();
         if trimmed.is_empty() || trimmed.starts_with('#') { continue; }
         

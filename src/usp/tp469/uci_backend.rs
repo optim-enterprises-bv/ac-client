@@ -3,9 +3,8 @@
 //! Implements actual UCI operations to create/delete objects in OpenWrt configuration.
 //! Handles instance number management, rollback on failure, and service restarts.
 
-use crate::config::ClientConfig;
 use super::error_codes::ErrorCode;
-use log::{info, warn, error};
+use log::{info, warn};
 use std::process::Command;
 
 /// Result of a UCI backend operation
@@ -725,7 +724,7 @@ fn wifi_reload() -> Result<(), String> {
 
 /// Get WiFi radio device configuration
 pub fn get_wifi_device(radio_name: &str) -> Result<WifiDeviceConfig, String> {
-    let section = format!("wireless.{}", radio_name);
+    let _section = format!("wireless.{}", radio_name);
     
     Ok(WifiDeviceConfig {
         name: radio_name.to_string(),

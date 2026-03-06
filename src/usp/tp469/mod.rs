@@ -21,17 +21,5 @@ pub mod tests;
 
 // Re-export commonly used items
 pub use add_delete::{AddResult, DeleteResult, handle_add, handle_delete};
-pub use error_codes::ErrorCode;
 pub use get_instances::handle_get_instances;
 pub use get_supported_dm::handle_get_supported_dm;
-pub use notifications::{NotificationManager, NotificationType};
-pub use search::{matches_wildcard, matches_search_expression, resolve_search_path};
-pub use subscriptions::{Subscription, SubscriptionManager};
-pub use uci_backend::{UciResult, 
-    add_dhcp_lease, delete_dhcp_lease, 
-    add_wifi_interface, delete_wifi_interface, 
-    add_static_host, delete_static_host,
-    set_system_hostname, get_system_hostname,
-    add_network_interface, delete_network_interface, update_network_interface_param,
-    set_system_timezone, set_system_log_size
-};

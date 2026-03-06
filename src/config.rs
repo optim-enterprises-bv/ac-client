@@ -8,7 +8,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::error::{AcError, Result};
-use log::{debug, error, info, trace, warn};
+use log::{debug, error, info, trace};
 
 // Default interval constants (seconds)
 const PORT: u16 = 3490;

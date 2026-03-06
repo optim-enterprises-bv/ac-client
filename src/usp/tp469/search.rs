@@ -4,7 +4,6 @@
 
 use crate::usp::dm;
 use crate::config::ClientConfig;
-use std::collections::HashMap;
 
 /// Match a path against a wildcard pattern
 /// Supports: * (single level), ** (multi-level), {i} (instance numbers)

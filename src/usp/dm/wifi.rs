@@ -27,7 +27,7 @@ fn uci_show_wireless() -> HashMap<String, HashMap<String, String>> {
         .and_then(|o| String::from_utf8(o.stdout).ok())
         .unwrap_or_default();
     
-    let mut current_section = String::new();
+    let _current_section = String::new();
     
     for line in out.lines() {
         if line.starts_with("wireless.") {

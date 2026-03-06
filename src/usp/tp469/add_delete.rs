@@ -7,7 +7,7 @@ use super::error_codes::ErrorCode;
 use super::uci_backend::{self, UciResult};
 use crate::config::ClientConfig;
 use crate::usp::usp_msg;
-use log::{info, warn};
+use log::info;
 
 /// Result of an ADD operation
 #[derive(Debug)]
