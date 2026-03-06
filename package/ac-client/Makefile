@@ -90,7 +90,7 @@ define Package/ac-client/install
 	# Binary
 	$(INSTALL_DIR) $(1)/bin
 	$(INSTALL_BIN) \
-		$(PKG_INSTALL_DIR)/usr/bin/ac-client \
+		$(PKG_INSTALL_DIR)/bin/ac-client \
 		$(1)/bin/ac-client
 
 	# Flat key=value config (legacy; not installed if already present on device)
