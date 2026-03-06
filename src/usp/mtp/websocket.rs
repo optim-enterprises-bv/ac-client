@@ -17,6 +17,7 @@ use super::super::{
     message::{build_get_supported_proto, encode_msg},
     record::{decode_record, encode_record, extract_msg_payload, no_session_record, websocket_connect_record},
 };
+use tokio::sync::mpsc::Receiver;
 
 const RECONNECT_DELAY: Duration = Duration::from_secs(10);
 
@@ -29,7 +30,7 @@ fn generate_websocket_key() -> String {
 }
 
 /// Run the WebSocket MTP agent loop.  Reconnects automatically.
-pub async fn run(cfg: Arc<ClientConfig>, agent_id: EndpointId) {
+pub async fn run(cfg: Arc<ClientConfig>, agent_id: EndpointId, status_rx: Arc<Mutex<Receiver<Vec<u8>>>>) {
     debug!("Starting WebSocket MTP run loop for agent: {}", agent_id.as_str());
     let negotiated_ver: Arc<Mutex<String>> = Arc::new(Mutex::new("1.3".into()));
     
@@ -48,7 +49,7 @@ pub async fn run(cfg: Arc<ClientConfig>, agent_id: EndpointId) {
         info!("USP WS: connecting to {ws_url}");
         debug!("Starting connect_and_serve with agent_id={}", agent_id.as_str());
         
-        match connect_and_serve(cfg.clone(), agent_id.clone(), &ws_url, Arc::clone(&negotiated_ver)).await {
+        match connect_and_serve(cfg.clone(), agent_id.clone(), &ws_url, Arc::clone(&negotiated_ver), Arc::clone(&status_rx)).await {
             Ok(()) => { 
                 info!("USP WS: disconnected gracefully");
                 debug!("WebSocket connection closed normally, reconnecting...");
@@ -69,6 +70,7 @@ async fn connect_and_serve(
     agent_id:       EndpointId,
     ws_url:         &str,
     negotiated_ver: Arc<Mutex<String>>,
+    status_rx:      Arc<Mutex<Receiver<Vec<u8>>>>,
 ) -> anyhow::Result<()> {
     debug!("Building TLS configuration for WebSocket connection");
     // Build mTLS config using the agent's cert
@@ -138,83 +140,114 @@ async fn connect_and_serve(
     info!("USP WS: version negotiation initiated (GetSupportedProto sent)");
 
     debug!("Entering message receive loop...");
-    while let Some(frame) = ws.next().await {
-        let frame = frame?;
-        trace!("Received WebSocket frame: {:?}", frame);
-        
-        let data = match frame {
-            Message::Binary(b) => {
-                debug!("Received binary frame ({} bytes)", b.len());
-                trace!("Binary data (first 64 bytes): {:?}", &b[..b.len().min(64)]);
-                b
+    loop {
+        tokio::select! {
+            // Handle incoming WebSocket messages
+            frame = ws.next() => {
+                let frame = match frame {
+                    Some(Ok(f)) => f,
+                    Some(Err(e)) => {
+                        error!("WebSocket error: {e}");
+                        break;
+                    }
+                    None => {
+                        debug!("WebSocket stream ended");
+                        break;
+                    }
+                };
+                
+                trace!("Received WebSocket frame: {:?}", frame);
+                
+                let data = match frame {
+                    Message::Binary(b) => {
+                        debug!("Received binary frame ({} bytes)", b.len());
+                        trace!("Binary data (first 64 bytes): {:?}", &b[..b.len().min(64)]);
+                        b
+                    }
+                    Message::Close(reason)  => {
+                        debug!("Received close frame: {:?}", reason);
+                        break;
+                    }
+                    Message::Ping(p)   => { 
+                        debug!("Received ping, sending pong");
+                        ws.send(Message::Pong(p)).await?; 
+                        continue; 
+                    }
+                    Message::Pong(_)   => {
+                        trace!("Received pong");
+                        continue;
+                    }
+                    Message::Text(t)   => {
+                        warn!("Received unexpected text frame: {}", t);
+                        continue;
+                    }
+                    _                  => {
+                        trace!("Received other frame type, ignoring");
+                        continue;
+                    }
+                };
+                
+                let record = match decode_record(&data) {
+                    Ok(r)  => {
+                        debug!("Successfully decoded USP record");
+                        trace!("Record: from_id={}, to_id={}, version={}", r.from_id, r.to_id, r.version);
+                        r
+                    }
+                    Err(e) => { 
+                        error!("USP WS: failed to decode record: {e}");
+                        trace!("Raw record data (first 128 bytes): {:?}", &data[..data.len().min(128)]);
+                        continue; 
+                    }
+                };
+                
+                // TR-369 §5.1: discard records not addressed to this endpoint
+                if !record.to_id.is_empty() && record.to_id != agent_id.as_str() {
+                    warn!("USP WS: to_id={} mismatch (expected {}), discarding",
+                          record.to_id, agent_id.as_str());
+                    continue;
+                }
+                
+                let msg_bytes = match extract_msg_payload(&record) {
+                    Some(b) => {
+                        debug!("Extracted {} bytes USP message payload", b.len());
+                        b.to_vec()
+                    }
+                    None    => {
+                        warn!("No USP message payload found in record");
+                        continue;
+                    }
+                };
+                
+                debug!("Calling handle_incoming for message from {}", record.from_id);
+                if let Some(resp) = super::super::agent::handle_incoming(
+                    cfg.clone(), agent_id.clone(), &msg_bytes, Arc::clone(&negotiated_ver)
+                ).await {
+                    let ver = negotiated_ver.lock().unwrap().clone();
+                    debug!("Sending response (version={})", ver);
+                    let resp_rec = no_session_record(agent_id.as_str(), &record.from_id, resp, &ver);
+                    let resp_bytes = encode_record(&resp_rec)?;
+                    debug!("Response encoded ({} bytes), sending...", resp_bytes.len());
+                    ws.send(Message::Binary(resp_bytes)).await?;
+                    debug!("Response sent successfully");
+                } else {
+                    debug!("No response needed for this message");
+                }
             }
-            Message::Close(reason)  => {
-                debug!("Received close frame: {:?}", reason);
-                break;
+            
+            // Handle outgoing status messages from heartbeat loop
+            status_msg = async {
+                let mut rx = status_rx.lock().unwrap();
+                rx.recv().await
+            } => {
+                if let Some(record_bytes) = status_msg {
+                    debug!("Sending status heartbeat ({} bytes)", record_bytes.len());
+                    if let Err(e) = ws.send(Message::Binary(record_bytes)).await {
+                        warn!("Failed to send status heartbeat: {e}");
+                    } else {
+                        debug!("Status heartbeat sent successfully");
+                    }
+                }
             }
-            Message::Ping(p)   => { 
-                debug!("Received ping, sending pong");
-                ws.send(Message::Pong(p)).await?; 
-                continue; 
-            }
-            Message::Pong(_)   => {
-                trace!("Received pong");
-                continue;
-            }
-            Message::Text(t)   => {
-                warn!("Received unexpected text frame: {}", t);
-                continue;
-            }
-            _                  => {
-                trace!("Received other frame type, ignoring");
-                continue;
-            }
-        };
-        
-        let record = match decode_record(&data) {
-            Ok(r)  => {
-                debug!("Successfully decoded USP record");
-                trace!("Record: from_id={}, to_id={}, version={}", r.from_id, r.to_id, r.version);
-                r
-            }
-            Err(e) => { 
-                error!("USP WS: failed to decode record: {e}");
-                trace!("Raw record data (first 128 bytes): {:?}", &data[..data.len().min(128)]);
-                continue; 
-            }
-        };
-        
-        // TR-369 §5.1: discard records not addressed to this endpoint
-        if !record.to_id.is_empty() && record.to_id != agent_id.as_str() {
-            warn!("USP WS: to_id={} mismatch (expected {}), discarding",
-                  record.to_id, agent_id.as_str());
-            continue;
-        }
-        
-        let msg_bytes = match extract_msg_payload(&record) {
-            Some(b) => {
-                debug!("Extracted {} bytes USP message payload", b.len());
-                b.to_vec()
-            }
-            None    => {
-                warn!("No USP message payload found in record");
-                continue;
-            }
-        };
-        
-        debug!("Calling handle_incoming for message from {}", record.from_id);
-        if let Some(resp) = super::super::agent::handle_incoming(
-            cfg.clone(), agent_id.clone(), &msg_bytes, Arc::clone(&negotiated_ver)
-        ).await {
-            let ver = negotiated_ver.lock().unwrap().clone();
-            debug!("Sending response (version={})", ver);
-            let resp_rec = no_session_record(agent_id.as_str(), &record.from_id, resp, &ver);
-            let resp_bytes = encode_record(&resp_rec)?;
-            debug!("Response encoded ({} bytes), sending...", resp_bytes.len());
-            ws.send(Message::Binary(resp_bytes)).await?;
-            debug!("Response sent successfully");
-        } else {
-            debug!("No response needed for this message");
         }
     }
     

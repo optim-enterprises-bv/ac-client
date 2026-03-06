@@ -11,6 +11,7 @@ use super::super::{
     endpoint::EndpointId,
     record::{decode_record, encode_record, extract_msg_payload, mqtt_connect_record, no_session_record},
 };
+use tokio::sync::mpsc::Receiver;
 
 const RECONNECT_DELAY: Duration = Duration::from_secs(10);
 const MAX_PACKET_SIZE: usize = 4 * 1024 * 1024;
@@ -19,7 +20,7 @@ fn sanitise_topic(s: &str) -> String {
     s.replace(':', "%3A").replace('#', "%23").replace('+', "%2B")
 }
 
-pub async fn run(cfg: Arc<ClientConfig>, agent_id: EndpointId) {
+pub async fn run(cfg: Arc<ClientConfig>, agent_id: EndpointId, status_rx: Arc<Mutex<Receiver<Vec<u8>>>>) {
     debug!("Starting MQTT MTP run loop for agent: {}", agent_id.as_str());
     let negotiated_ver: Arc<Mutex<String>> = Arc::new(Mutex::new("1.3".into()));
     
@@ -38,7 +39,7 @@ pub async fn run(cfg: Arc<ClientConfig>, agent_id: EndpointId) {
         info!("USP MQTT: connecting to {mqtt_url}");
         debug!("Starting mqtt_loop with agent_id={}", agent_id.as_str());
         
-        match mqtt_loop(cfg.clone(), agent_id.clone(), &mqtt_url, Arc::clone(&negotiated_ver)).await {
+        match mqtt_loop(cfg.clone(), agent_id.clone(), &mqtt_url, Arc::clone(&negotiated_ver), Arc::clone(&status_rx)).await {
             Ok(()) => {
                 debug!("MQTT loop ended normally");
             }
@@ -58,6 +59,7 @@ async fn mqtt_loop(
     agent_id:       EndpointId,
     mqtt_url:       &str,
     negotiated_ver: Arc<Mutex<String>>,
+    status_rx:      Arc<Mutex<Receiver<Vec<u8>>>>,
 ) -> anyhow::Result<()> {
     debug!("Parsing MQTT URL: {}", mqtt_url);
     let url = mqtt_url
@@ -102,6 +104,32 @@ async fn mqtt_loop(
     debug!("MQTTConnectRecord published successfully");
 
     info!("USP MQTT: connected; subscribed to {agent_topic}");
+
+    // Spawn status heartbeat sender task
+    let client2 = client.clone();
+    let status_controller_topic = controller_topic.clone();
+    tokio::spawn(async move {
+        debug!("Starting MQTT status heartbeat sender");
+        loop {
+            // Receive status message without holding lock across await
+            let status_msg = {
+                let mut rx = status_rx.lock().unwrap();
+                // Try_recv is not async, so we can use it without Send issues
+                rx.try_recv().ok()
+            };
+            
+            if let Some(record_bytes) = status_msg {
+                debug!("Sending status heartbeat via MQTT ({} bytes)", record_bytes.len());
+                match client2.publish(&status_controller_topic, QoS::AtLeastOnce, false, record_bytes).await {
+                    Ok(()) => debug!("Status heartbeat sent via MQTT successfully"),
+                    Err(e) => warn!("Failed to send status heartbeat via MQTT: {e}"),
+                }
+            } else {
+                // No message available, sleep briefly
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        }
+    });
 
     debug!("Entering MQTT event loop...");
     loop {

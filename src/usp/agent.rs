@@ -24,11 +24,13 @@ use super::{
     endpoint::EndpointId,
     message::{
         build_boot_notify, build_error, build_operate_resp,
-        build_set_resp, decode_msg, encode_msg,
+        build_set_resp, decode_msg, encode_msg, build_value_change_notify,
     },
     mtp,
     usp_msg::{body::MsgBody, header::MessageType},
 };
+
+use tokio::sync::mpsc;
 
 const _STATUS_SUBSCRIPTION_ID: &str = "status";
 
@@ -51,15 +53,20 @@ pub async fn run(
     info!("USP Agent endpoint ID: {agent_id}");
     debug!("MTP type: {:?}", cfg.mtp);
 
+    // Create channel for status heartbeat messages (sends encoded USP records)
+    let (status_tx, status_rx) = mpsc::channel::<Vec<u8>>(10);
+    let status_rx = Arc::new(Mutex::new(status_rx));
+    
     // Spawn status heartbeat task
     {
         debug!("Spawning status heartbeat task");
         let cfg2 = Arc::clone(&cfg);
         let agent2 = agent_id.clone();
         let gnss2  = Arc::clone(&gnss);
+        let status_tx2 = status_tx.clone();
         tokio::spawn(async move {
             debug!("Status heartbeat task started");
-            status_loop(cfg2, agent2, gnss2).await;
+            status_loop(cfg2, agent2, gnss2, status_tx2).await;
         });
     }
 
@@ -68,21 +75,22 @@ pub async fn run(
     match cfg.mtp {
         MtpType::WebSocket => {
             debug!("Starting WebSocket MTP");
-            mtp::websocket::run(cfg, agent_id).await
+            mtp::websocket::run(cfg, agent_id, status_rx).await
         }
         MtpType::Mqtt      => {
             debug!("Starting MQTT MTP");
-            mtp::mqtt::run(cfg, agent_id).await
+            mtp::mqtt::run(cfg, agent_id, status_rx).await
         }
         MtpType::Both      => {
             debug!("Starting both WebSocket and MQTT MTP");
             let cfg2     = Arc::clone(&cfg);
             let agent2   = agent_id.clone();
+            let status_rx2 = Arc::clone(&status_rx);
             tokio::spawn(async move { 
                 debug!("Starting MQTT MTP in background task");
-                mtp::mqtt::run(cfg2, agent2).await; 
+                mtp::mqtt::run(cfg2, agent2, status_rx2).await; 
             });
-            mtp::websocket::run(cfg, agent_id).await;
+            mtp::websocket::run(cfg, agent_id, status_rx).await;
         }
     }
 }
@@ -265,23 +273,57 @@ fn collect_boot_params(cfg: &ClientConfig) -> HashMap<String, String> {
 
 // ── Status heartbeat ─────────────────────────────────────────────────────────
 
+/// Channel sender type for status updates
+pub type StatusSender = mpsc::Sender<Vec<u8>>;
+
 async fn status_loop(
     cfg:      Arc<ClientConfig>,
-    _agent_id: EndpointId,
+    agent_id: EndpointId,
     _gnss:     Arc<std::sync::Mutex<Option<GnssPosition>>>,
+    tx:       StatusSender,
 ) {
     let interval = Duration::from_secs(cfg.status_interval);
+    let controller_id = cfg.controller_id.clone();
+    
     loop {
         tokio::time::sleep(interval).await;
+        
+        // Collect status parameters
         let params: Vec<(&str, String)> = vec![
             ("Device.DeviceInfo.UpTime",             util::read_uptime()),
             ("Device.DeviceInfo.X_OptimACS_LoadAvg", util::read_load_avg()),
             ("Device.DeviceInfo.X_OptimACS_FreeMem",  util::read_free_mem()),
         ];
-        // We don't have direct access to the MTP sender here.
-        // Log the values; the MTP loop will pick up periodically.
+        
+        // Send each parameter as a ValueChange Notify
         for (path, val) in &params {
             info!("USP status: {path} = {val}");
+            
+            // Build ValueChange Notify message
+            let msg = build_value_change_notify("status", path, val);
+            
+            // Encode to USP record
+            match encode_msg(&msg) {
+                Ok(msg_bytes) => {
+                    let record = super::record::no_session_record(
+                        agent_id.as_str(),
+                        &controller_id,
+                        msg_bytes,
+                        "1.3"
+                    );
+                    
+                    match super::record::encode_record(&record) {
+                        Ok(record_bytes) => {
+                            // Send to MTP loop via channel
+                            if let Err(e) = tx.send(record_bytes).await {
+                                warn!("Failed to send status update to MTP: {e}");
+                            }
+                        }
+                        Err(e) => warn!("Failed to encode status record: {e}"),
+                    }
+                }
+                Err(e) => warn!("Failed to encode status message: {e}"),
+            }
         }
     }
 }
