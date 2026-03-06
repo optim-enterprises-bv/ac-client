@@ -8,6 +8,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::error::{AcError, Result};
+use log::{debug, error, info, trace, warn};
 
 // Default interval constants (seconds)
 const PORT: u16 = 3490;
@@ -121,9 +122,17 @@ impl Default for ClientConfig {
 
 /// Parse `path` as an `ac_client.conf` key=value configuration file.
 pub fn load_config(path: &Path) -> Result<ClientConfig> {
-    let content = fs::read_to_string(path)
-        .map_err(|e| AcError::Config(format!("cannot read {}: {e}", path.display())))?;
+    info!("Loading configuration from: {}", path.display());
+
+    let content = fs::read_to_string(path).map_err(|e| {
+        error!("Failed to read config file {}: {}", path.display(), e);
+        AcError::Config(format!("cannot read {}: {e}", path.display()))
+    })?;
+
+    debug!("Configuration file loaded ({} bytes)", content.len());
+
     let mut cfg = ClientConfig::default();
+    let mut key_count = 0;
 
     for line in content.lines() {
         let line = line.trim();
@@ -143,45 +152,141 @@ pub fn load_config(path: &Path) -> Result<ClientConfig> {
             continue;
         }
 
+        key_count += 1;
+        trace!("Config: {} = {}", key, val);
+
         match key.as_str() {
-            "server_host" => cfg.server_host = val,
-            "server_port" => cfg.server_port = val.parse().unwrap_or(PORT),
-            "server_cn" => cfg.server_cn = val,
-            "ca_file" => cfg.ca_file = PathBuf::from(&val),
-            "cert_file" => cfg.cert_file = PathBuf::from(&val),
-            "key_file" => cfg.key_file = PathBuf::from(&val),
-            "init_cert" => cfg.init_cert = PathBuf::from(&val),
-            "init_key" => cfg.init_key = PathBuf::from(&val),
-            "cert_dir" => cfg.cert_dir = PathBuf::from(&val),
-            "mac_addr" => cfg.mac_addr = val,
-            "arch" => cfg.arch = val,
-            "sys_model" => cfg.sys_model = val,
-            "gnss_dev" => cfg.gnss_dev = val,
-            "gnss_baud" => cfg.gnss_baud = val.parse().unwrap_or(9600),
-            "update_interval" => cfg.update_interval = val.parse().unwrap_or(UPDATE_INTERVAL),
-            "status_interval" => cfg.status_interval = val.parse().unwrap_or(STATUS_INTERVAL),
-            "cam_interval" => cfg.cam_interval = val.parse().unwrap_or(CAM_INTERVAL),
-            "fw_dir" => cfg.fw_dir = PathBuf::from(&val),
-            "img_dir" => cfg.img_dir = PathBuf::from(&val),
-            "pid_file" => cfg.pid_file = PathBuf::from(&val),
-            "daemonize" => cfg.daemonize = val == "true" || val == "1" || val == "yes",
-            "log_syslog" => cfg.log_syslog = val == "true" || val == "1" || val == "yes",
+            "server_host" => {
+                cfg.server_host = val.clone();
+                debug!("Config: server_host = {}", cfg.server_host);
+            }
+            "server_port" => {
+                cfg.server_port = val.parse().unwrap_or(PORT);
+                debug!("Config: server_port = {}", cfg.server_port);
+            }
+            "server_cn" => {
+                cfg.server_cn = val.clone();
+                debug!("Config: server_cn = {}", cfg.server_cn);
+            }
+            "ca_file" => {
+                cfg.ca_file = PathBuf::from(&val);
+                debug!("Config: ca_file = {}", cfg.ca_file.display());
+            }
+            "cert_file" => {
+                cfg.cert_file = PathBuf::from(&val);
+                debug!("Config: cert_file = {}", cfg.cert_file.display());
+            }
+            "key_file" => {
+                cfg.key_file = PathBuf::from(&val);
+                debug!("Config: key_file = {}", cfg.key_file.display());
+            }
+            "init_cert" => {
+                cfg.init_cert = PathBuf::from(&val);
+                debug!("Config: init_cert = {}", cfg.init_cert.display());
+            }
+            "init_key" => {
+                cfg.init_key = PathBuf::from(&val);
+                debug!("Config: init_key = {}", cfg.init_key.display());
+            }
+            "cert_dir" => {
+                cfg.cert_dir = PathBuf::from(&val);
+                debug!("Config: cert_dir = {}", cfg.cert_dir.display());
+            }
+            "mac_addr" => {
+                cfg.mac_addr = val.clone();
+                debug!("Config: mac_addr = {}", cfg.mac_addr);
+            }
+            "arch" => {
+                cfg.arch = val.clone();
+                debug!("Config: arch = {}", cfg.arch);
+            }
+            "sys_model" => {
+                cfg.sys_model = val.clone();
+                debug!("Config: sys_model = {}", cfg.sys_model);
+            }
+            "gnss_dev" => {
+                cfg.gnss_dev = val.clone();
+                debug!("Config: gnss_dev = {}", cfg.gnss_dev);
+            }
+            "gnss_baud" => {
+                cfg.gnss_baud = val.parse().unwrap_or(9600);
+                debug!("Config: gnss_baud = {}", cfg.gnss_baud);
+            }
+            "update_interval" => {
+                cfg.update_interval = val.parse().unwrap_or(UPDATE_INTERVAL);
+                debug!("Config: update_interval = {}", cfg.update_interval);
+            }
+            "status_interval" => {
+                cfg.status_interval = val.parse().unwrap_or(STATUS_INTERVAL);
+                debug!("Config: status_interval = {}", cfg.status_interval);
+            }
+            "cam_interval" => {
+                cfg.cam_interval = val.parse().unwrap_or(CAM_INTERVAL);
+                debug!("Config: cam_interval = {}", cfg.cam_interval);
+            }
+            "fw_dir" => {
+                cfg.fw_dir = PathBuf::from(&val);
+                debug!("Config: fw_dir = {}", cfg.fw_dir.display());
+            }
+            "img_dir" => {
+                cfg.img_dir = PathBuf::from(&val);
+                debug!("Config: img_dir = {}", cfg.img_dir.display());
+            }
+            "pid_file" => {
+                cfg.pid_file = PathBuf::from(&val);
+                debug!("Config: pid_file = {}", cfg.pid_file.display());
+            }
+            "daemonize" => {
+                cfg.daemonize = val == "true" || val == "1" || val == "yes";
+                debug!("Config: daemonize = {}", cfg.daemonize);
+            }
+            "log_syslog" => {
+                cfg.log_syslog = val == "true" || val == "1" || val == "yes";
+                debug!("Config: log_syslog = {}", cfg.log_syslog);
+            }
             // USP / TR-369
-            "usp_endpoint_id" => cfg.usp_endpoint_id = val,
-            "controller_id" => cfg.controller_id = val,
-            "ws_url" => cfg.ws_url = Some(val),
-            "mqtt_url" => cfg.mqtt_url = Some(val),
+            "usp_endpoint_id" => {
+                cfg.usp_endpoint_id = val.clone();
+                debug!("Config: usp_endpoint_id = {}", cfg.usp_endpoint_id);
+            }
+            "controller_id" => {
+                cfg.controller_id = val.clone();
+                debug!("Config: controller_id = {}", cfg.controller_id);
+            }
+            "ws_url" => {
+                cfg.ws_url = Some(val.clone());
+                debug!("Config: ws_url = {}", val);
+            }
+            "mqtt_url" => {
+                cfg.mqtt_url = Some(val.clone());
+                debug!("Config: mqtt_url = {}", val);
+            }
             "mtp" => {
                 cfg.mtp = match val.to_ascii_lowercase().as_str() {
-                    "mqtt" => MtpType::Mqtt,
-                    "both" => MtpType::Both,
-                    _ => MtpType::WebSocket,
+                    "mqtt" => {
+                        debug!("Config: mtp = mqtt");
+                        MtpType::Mqtt
+                    }
+                    "both" => {
+                        debug!("Config: mtp = both");
+                        MtpType::Both
+                    }
+                    _ => {
+                        debug!("Config: mtp = websocket (default)");
+                        MtpType::WebSocket
+                    }
                 };
             }
-            _ => {} // ignore unknown keys
+            _ => {
+                trace!("Config: ignoring unknown key '{}'", key);
+            }
         }
     }
 
+    info!(
+        "Configuration loaded successfully ({} keys processed)",
+        key_count
+    );
     Ok(cfg)
 }
 
