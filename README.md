@@ -865,7 +865,7 @@ scp <server>:/etc/optimacs/CA/rootCA.crt \
 |-----|---------|-------------|
 | `mac_addr` | *(auto)* | MAC address — auto-detected from `br-lan`/`eth0`/`wlan0` |
 | `usp_endpoint_id` | *(auto)* | USP Endpoint ID — auto-generated as `oui:{oui}:{mac}` |
-| `controller_id` | `oui:00005A:OptimACS-Controller-1` | Controller endpoint ID |
+| `controller_id` | *(required)* | Controller endpoint ID (e.g., `ac-server` or `OptimACS-Controller-1`) |
 
 ### Telemetry
 
@@ -908,6 +908,7 @@ server_cn     = 192.168.10.5        # Must match the server cert CN
 uci set optimacs.agent.server_host='192.168.10.5'
 uci set optimacs.agent.ws_url='wss://192.168.10.5:3491'
 uci set optimacs.agent.server_cn='192.168.10.5'
+uci set optimacs.agent.controller_id='ac-server'
 uci commit optimacs
 
 /etc/init.d/ac-client restart

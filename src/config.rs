@@ -112,7 +112,7 @@ impl Default for ClientConfig {
             daemonize: false,
             log_syslog: true,
             usp_endpoint_id: String::new(),
-            controller_id: "oui:00005A:OptimACS-Controller-1".to_string(),
+            controller_id: String::new(),
             ws_url: None,
             mqtt_url: None,
             mtp: MtpType::WebSocket,
@@ -328,6 +328,7 @@ fn uci_get_str(key: &str) -> Option<String> {
 /// uci set  optimacs.agent.server_host='controller.example.com'
 /// uci set  optimacs.agent.ws_url='wss://controller.example.com:3491/usp'
 /// uci set  optimacs.agent.mtp='websocket'
+/// uci set  optimacs.agent.controller_id='ac-server'
 /// uci commit optimacs
 /// /etc/init.d/ac-client restart
 ///
@@ -432,6 +433,12 @@ pub fn validate_config(cfg: &ClientConfig) -> Result<()> {
     }
     if cfg.ca_file.as_os_str().is_empty() {
         return Err(AcError::Config("ca_file is required".into()));
+    }
+    if cfg.controller_id.is_empty() {
+        return Err(AcError::Config(
+            "controller_id is required (set via UCI: uci set optimacs.agent.controller_id='<id>')"
+                .into(),
+        ));
     }
     // At least one MTP must be configured
     match cfg.mtp {
