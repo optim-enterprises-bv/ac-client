@@ -88,10 +88,10 @@ HOST_BUILD_DEPENDS += cmake/host
 # ── Install ───────────────────────────────────────────────────────────────────
 define Package/ac-client/install
 	# Binary
-	$(INSTALL_DIR) $(1)/usr/sbin
+	$(INSTALL_DIR) $(1)/bin
 	$(INSTALL_BIN) \
 		$(PKG_INSTALL_DIR)/usr/bin/ac-client \
-		$(1)/usr/sbin/ac-client
+		$(1)/bin/ac-client
 
 	# Flat key=value config (legacy; not installed if already present on device)
 	$(INSTALL_DIR) $(1)/etc/apclient
