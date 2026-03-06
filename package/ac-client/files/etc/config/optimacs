@@ -58,7 +58,8 @@ config optimacs 'agent'
 	# option usp_endpoint_id ''
 
 	# Controller endpoint ID that this agent will accept messages from.
-	option controller_id 'oui:00005A:OptimACS-Controller-1'
+	# This must match the USP_ENDPOINT_ID configured on ac-server.
+	option controller_id 'OptimACS-Controller-1'
 
 	# ── TLS / certificate paths ────────────────────────────────────────────
 	# CA certificate — used to verify the server's TLS certificate.
