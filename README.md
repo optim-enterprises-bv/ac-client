@@ -861,6 +861,37 @@ scp <server>:/etc/optimacs/CA/rootCA.crt \
 | `daemonize` | `false` | Background daemon mode (leave `false` under procd) |
 | `log_syslog` | `true` | Log to syslog (`true`) or stderr (`false`) |
 
+### Local Development / Testing
+
+To connect ac-client to a local ac-server instance for development or testing:
+
+```sh
+# Edit the flat configuration file
+vi /etc/apclient/ac_client.conf
+
+# Set these values to point to your local server:
+server_host   = 192.168.10.5        # Your local ac-server IP
+server_port   = 3491
+ws_url        = wss://192.168.10.5:3491
+server_cn     = 192.168.10.5        # Must match the server cert CN
+
+# Or use UCI commands (OpenWrt native):
+uci set optimacs.agent.server_host='192.168.10.5'
+uci set optimacs.agent.ws_url='wss://192.168.10.5:3491'
+uci set optimacs.agent.server_cn='192.168.10.5'
+uci commit optimacs
+
+/etc/init.d/ac-client restart
+```
+
+**Note:** When using a local server with a self-signed certificate, ensure the
+`ca_file` points to your local CA certificate, or use the `--stderr` flag to
+see detailed connection logs:
+
+```sh
+ac-client --stderr
+```
+
 ---
 
 ## Protocol Details
