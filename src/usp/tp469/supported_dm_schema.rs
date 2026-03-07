@@ -169,6 +169,57 @@ fn build_device_info_schema() -> ObjectSchema {
         },
     );
 
+    // Additional TR-181 DeviceInfo parameters
+    params.insert(
+        "ManufacturerOUI".into(),
+        ParameterSchema {
+            name: "ManufacturerOUI".into(),
+            param_type: ParamType::String,
+            access: Access::ReadOnly,
+            description: "Organizationally Unique Identifier (first 3 bytes of MAC address)".into(),
+        },
+    );
+
+    params.insert(
+        "Description".into(),
+        ParameterSchema {
+            name: "Description".into(),
+            param_type: ParamType::String,
+            access: Access::ReadOnly,
+            description: "Description of the device".into(),
+        },
+    );
+
+    params.insert(
+        "BaseMacAddress".into(),
+        ParameterSchema {
+            name: "BaseMacAddress".into(),
+            param_type: ParamType::String,
+            access: Access::ReadOnly,
+            description: "Base MAC address of the device".into(),
+        },
+    );
+
+    params.insert(
+        "DeviceStatus".into(),
+        ParameterSchema {
+            name: "DeviceStatus".into(),
+            param_type: ParamType::String,
+            access: Access::ReadOnly,
+            description: "Current device status (Up, Down, Error)".into(),
+        },
+    );
+
+    params.insert(
+        "AdditionalSoftwareVersion".into(),
+        ParameterSchema {
+            name: "AdditionalSoftwareVersion".into(),
+            param_type: ParamType::String,
+            access: Access::ReadOnly,
+            description: "Kernel version or additional software version info".into(),
+        },
+    );
+
     params.insert(
         "UpTime".into(),
         ParameterSchema {

@@ -277,25 +277,56 @@ pub fn read_device_model() -> String {
 
 /// Get OpenWrt architecture/target (like LuCI shows)
 pub fn read_device_arch() -> String {
-    // Try /tmp/sysinfo/target first
-    if let Ok(target) = fs::read_to_string("/tmp/sysinfo/target") {
-        let target = target.trim();
-        if !target.is_empty() {
-            return target.to_string();
+    // Read CPU architecture from /proc/cpuinfo (same as LuCI)
+    if let Ok(cpuinfo) = fs::read_to_string("/proc/cpuinfo") {
+        // Look for "model name" (ARM/x86) or "cpu model" (MIPS)
+        for line in cpuinfo.lines() {
+            if let Some(idx) = line.find("model name") {
+                if let Some(start) = line[idx..].find(':').map(|i| idx + i + 1) {
+                    let arch = line[start..].trim();
+                    if !arch.is_empty() {
+                        return arch.to_string();
+                    }
+                }
+            }
+            // MIPS uses "cpu model" instead
+            if let Some(idx) = line.find("cpu model") {
+                if let Some(start) = line[idx..].find(':').map(|i| idx + i + 1) {
+                    let arch = line[start..].trim();
+                    if !arch.is_empty() {
+                        return arch.to_string();
+                    }
+                }
+            }
+        }
+        // Fallback: look for "Processor" (older ARM format)
+        for line in cpuinfo.lines() {
+            if let Some(idx) = line.find("Processor") {
+                if let Some(start) = line[idx..].find(':').map(|i| idx + i + 1) {
+                    let arch = line[start..].trim();
+                    if !arch.is_empty() && arch != "ARMv7" && arch != "ARMv8" {
+                        return arch.to_string();
+                    }
+                }
+            }
         }
     }
 
-    // Fallback: try ubus call system board for target
+    // Try ubus call system board for target info
     if let Ok(output) = std::process::Command::new("ubus")
         .args(["call", "system", "board"])
         .output()
     {
         let text = String::from_utf8_lossy(&output.stdout);
         for line in text.lines() {
-            if let Some(idx) = line.find("\"target\":") {
+            // Look for "system" field which often contains CPU info
+            if let Some(idx) = line.find("\"system\":") {
                 if let Some(start) = line[idx..].find('"').map(|i| idx + i + 1) {
                     if let Some(end) = line[start..].find('"') {
-                        return line[start..start + end].to_string();
+                        let system = &line[start..start + end];
+                        if !system.is_empty() && system != "target" {
+                            return system.to_string();
+                        }
                     }
                 }
             }
@@ -308,4 +339,54 @@ pub fn read_device_arch() -> String {
     }
 
     String::new()
+}
+
+/// Get Manufacturer OUI from MAC address (first 3 bytes)
+pub fn read_manufacturer_oui(mac_addr: &str) -> String {
+    // Extract first 3 octets from MAC address
+    let clean_mac: String = mac_addr.chars().filter(|c| c.is_alphanumeric()).collect();
+    if clean_mac.len() >= 6 {
+        // Format as XX:XX:XX
+        format!(
+            "{}:{}:{}",
+            &clean_mac[0..2],
+            &clean_mac[2..4],
+            &clean_mac[4..6]
+        )
+    } else {
+        String::new()
+    }
+}
+
+/// Get device description (board name + model)
+pub fn read_device_description() -> String {
+    let board = fs::read_to_string("/tmp/sysinfo/board_name")
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+
+    let model = read_device_model();
+
+    if !board.is_empty() && !model.is_empty() {
+        format!("{} - {}", board, model)
+    } else if !model.is_empty() {
+        model
+    } else if !board.is_empty() {
+        board
+    } else {
+        "OpenWrt Device".to_string()
+    }
+}
+
+/// Get kernel version (AdditionalSoftwareVersion)
+pub fn read_kernel_version() -> String {
+    if let Ok(output) = std::process::Command::new("uname").arg("-r").output() {
+        return String::from_utf8_lossy(&output.stdout).trim().to_string();
+    }
+    String::new()
+}
+
+/// Get device status - always returns "Up" if agent is running
+pub fn read_device_status() -> String {
+    "Up".to_string()
 }

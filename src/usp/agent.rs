@@ -259,21 +259,34 @@ pub async fn handle_incoming(
 fn collect_boot_params(cfg: &ClientConfig) -> HashMap<String, String> {
     let mut m = HashMap::new();
     
-    // Device.DeviceInfo parameters (matching what LuCI shows)
+    // Device.DeviceInfo parameters - TR-181 compliant
     let device_model = util::read_device_model();
     let device_arch = util::read_device_arch();
     let hostname = crate::usp::tp469::uci_backend::get_system_hostname();
+    let oui = util::read_manufacturer_oui(&cfg.mac_addr);
+    let description = util::read_device_description();
+    let kernel_version = util::read_kernel_version();
     
-    m.insert("Device.DeviceInfo.HostName".into(),         hostname);
-    m.insert("Device.DeviceInfo.ModelName".into(),        device_model.clone());
-    m.insert("Device.DeviceInfo.SoftwareVersion".into(),  util::read_fw_version());
-    m.insert("Device.DeviceInfo.HardwareVersion".into(),  device_arch.clone()); // Architecture
-    m.insert("Device.DeviceInfo.SerialNumber".into(),     cfg.mac_addr.clone());
-    m.insert("Device.DeviceInfo.UpTime".into(),           util::read_uptime());
-    m.insert("Device.DeviceInfo.X_OptimACS_LoadAvg".into(), util::read_load_avg());
-    m.insert("Device.DeviceInfo.X_OptimACS_FreeMem".into(),  util::read_free_mem());
+    // Core DeviceInfo parameters
+    m.insert("Device.DeviceInfo.Manufacturer".into(),              "OpenWrt".into());
+    m.insert("Device.DeviceInfo.ManufacturerOUI".into(),           oui);
+    m.insert("Device.DeviceInfo.ModelName".into(),                 device_model.clone());
+    m.insert("Device.DeviceInfo.Description".into(),               description);
+    m.insert("Device.DeviceInfo.ProductClass".into(),              "Gateway".into());
+    m.insert("Device.DeviceInfo.SerialNumber".into(),              cfg.mac_addr.clone());
+    m.insert("Device.DeviceInfo.BaseMacAddress".into(),            cfg.mac_addr.clone());
+    m.insert("Device.DeviceInfo.HardwareVersion".into(),           device_arch.clone());
+    m.insert("Device.DeviceInfo.SoftwareVersion".into(),           util::read_fw_version());
+    m.insert("Device.DeviceInfo.AdditionalSoftwareVersion".into(), kernel_version);
+    m.insert("Device.DeviceInfo.DeviceStatus".into(),              util::read_device_status());
+    m.insert("Device.DeviceInfo.UpTime".into(),                    util::read_uptime());
+    m.insert("Device.DeviceInfo.HostName".into(),                  hostname);
     
-    // Add IP address to Boot! parameters
+    // Custom OptimACS extensions
+    m.insert("Device.DeviceInfo.X_OptimACS_LoadAvg".into(),        util::read_load_avg());
+    m.insert("Device.DeviceInfo.X_OptimACS_FreeMem".into(),         util::read_free_mem());
+    
+    // IP Address
     let local_ip = util::get_local_ip();
     if !local_ip.is_empty() {
         m.insert("Device.IP.Interface.1.IPAddress".into(), local_ip);
