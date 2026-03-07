@@ -5,6 +5,7 @@
 
 #![allow(dead_code)]
 
+pub mod bridge;
 pub mod cameras;
 pub mod device_info;
 pub mod dhcp;
@@ -60,6 +61,8 @@ pub async fn operate(
         firmware::operate_download(cfg, command, input_args).await
     } else if command.starts_with("Device.X_OptimACS_Security.") && command.ends_with(".IssueCert()") {
         security::operate_issue_cert(cfg, command, input_args).await
+    } else if command.starts_with("Device.X_OptimACS_Network.Bridge.") && command.ends_with(".Restart()") {
+        bridge::operate(cfg, command, input_args).await
     } else {
         Err(format!("unknown command: {command}"))
     }
@@ -76,6 +79,8 @@ async fn dispatch_get(cfg: &ClientConfig, path: &str) -> Params {
         dhcp::get(cfg, path).await
     } else if path.starts_with("Device.Hosts.") {
         hosts::get(cfg, path).await
+    } else if path.starts_with("Device.X_OptimACS_Network.Bridge.") || path.starts_with("Device.X_OptimACS_Network.Bridge") {
+        bridge::get(cfg, path).await
     } else if path.starts_with("Device.X_OptimACS_Camera.") {
         cameras::get(cfg, path).await
     } else if path.starts_with("Device.X_OptimACS_Firmware.") {
@@ -97,6 +102,8 @@ async fn dispatch_set(cfg: &ClientConfig, path: &str, value: &str) -> Result<(),
         dhcp::set(cfg, path, value).await
     } else if path.starts_with("Device.Hosts.") {
         hosts::set(cfg, path, value).await
+    } else if path.starts_with("Device.X_OptimACS_Network.Bridge.") || path.starts_with("Device.X_OptimACS_Network.Bridge") {
+        bridge::set(cfg, path, value).await
     } else if path.starts_with("Device.X_OptimACS_Security.") {
         security::set(cfg, path, value).await
     } else {
