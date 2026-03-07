@@ -312,51 +312,70 @@ async fn status_loop(
     let interval = Duration::from_secs(cfg.status_interval);
     let controller_id = cfg.controller_id.clone();
     
+    // Store previous values for delta tracking
+    let mut prev_uptime = String::new();
+    let mut prev_load = String::new();
+    let mut prev_mem = String::new();
+    
     loop {
         tokio::time::sleep(interval).await;
         
-        // Collect status parameters
-        let params: Vec<(&str, String)> = vec![
-            ("Device.DeviceInfo.UpTime",             util::read_uptime()),
-            ("Device.DeviceInfo.X_OptimACS_LoadAvg", util::read_load_avg()),
-            ("Device.DeviceInfo.X_OptimACS_FreeMem",  util::read_free_mem()),
-        ];
+        // Read current values
+        let uptime = util::read_uptime();
+        let load = util::read_load_avg();
+        let mem = util::read_free_mem();
         
-        // Send each parameter as a ValueChange Notify
-        for (path, val) in &params {
-            info!("USP status: {path} = {val}");
-            
-            // Build ValueChange Notify message
-            let msg = build_value_change_notify("status", path, val);
-            debug!("Built ValueChange Notify for {path}");
-            
-            // Encode to USP record
-            match encode_msg(&msg) {
-                Ok(msg_bytes) => {
-                    debug!("Encoded USP message ({} bytes)", msg_bytes.len());
-                    let record = super::record::no_session_record(
-                        agent_id.as_str(),
-                        &controller_id,
-                        msg_bytes,
-                        "1.3"
-                    );
-                    debug!("Created USP record: from_id={}, to_id={}", record.from_id, record.to_id);
-                    
-                    match super::record::encode_record(&record) {
-                        Ok(record_bytes) => {
-                            info!("Sending status heartbeat to MTP ({} bytes): {path} = {val}", record_bytes.len());
-                            // Send to MTP loop via channel
-                            if let Err(e) = tx.send(record_bytes).await {
-                                warn!("Failed to send status update to MTP: {e}");
-                            } else {
-                                debug!("Status update queued for MTP successfully");
+        // Only send changed values (delta updates)
+        let mut params_to_send: Vec<(&str, String)> = Vec::new();
+        
+        if uptime != prev_uptime {
+            params_to_send.push(("Device.DeviceInfo.UpTime", uptime.clone()));
+            prev_uptime = uptime;
+        }
+        
+        if load != prev_load {
+            params_to_send.push(("Device.DeviceInfo.X_OptimACS_LoadAvg", load.clone()));
+            prev_load = load;
+        }
+        
+        if mem != prev_mem {
+            params_to_send.push(("Device.DeviceInfo.X_OptimACS_FreeMem", mem.clone()));
+            prev_mem = mem;
+        }
+        
+        // Send only changed parameters
+        if !params_to_send.is_empty() {
+            for (path, val) in &params_to_send {
+                info!("USP status (delta): {path} = {val}");
+                
+                // Build ValueChange Notify message
+                let msg = build_value_change_notify("status", path, val);
+                
+                // Encode to USP record
+                match encode_msg(&msg) {
+                    Ok(msg_bytes) => {
+                        let record = super::record::no_session_record(
+                            agent_id.as_str(),
+                            &controller_id,
+                            msg_bytes,
+                            "1.3"
+                        );
+                        
+                        match super::record::encode_record(&record) {
+                            Ok(record_bytes) => {
+                                info!("Sending delta update ({} bytes): {path} = {val}", record_bytes.len());
+                                if let Err(e) = tx.send(record_bytes).await {
+                                    warn!("Failed to send status update: {e}");
+                                }
                             }
+                            Err(e) => warn!("Failed to encode record: {e}"),
                         }
-                        Err(e) => warn!("Failed to encode status record: {e}"),
                     }
+                    Err(e) => warn!("Failed to encode message: {e}"),
                 }
-                Err(e) => warn!("Failed to encode status message: {e}"),
             }
+        } else {
+            debug!("No status changes, skipping delta update");
         }
     }
 }
