@@ -17,15 +17,84 @@ pub mod security;
 pub mod wifi;
 
 use std::collections::HashMap;
-use log::{debug, warn};
+use std::sync::Mutex;
+use log::{debug, info, warn};
 use crate::config::ClientConfig;
 
 pub type Params = HashMap<String, String>;
+
+/// Cache for tracking previous parameter values (delta tracking)
+/// Key: parameter path, Value: previous value
+static PARAM_CACHE: Mutex<Option<HashMap<String, String>>> = Mutex::new(None);
+
+/// Initialize the parameter cache on first use
+fn get_cache() -> Option<HashMap<String, String>> {
+    PARAM_CACHE.lock().unwrap().clone()
+}
+
+fn update_cache(new_values: &HashMap<String, String>) {
+    let mut cache = PARAM_CACHE.lock().unwrap();
+    *cache = Some(new_values.clone());
+}
+
+/// Filter parameters to only return changed values (delta)
+fn filter_delta(params: Params, force_full: bool) -> Params {
+    if force_full {
+        // On first call or explicit request, return all values
+        update_cache(&params);
+        return params;
+    }
+    
+    let cache = match get_cache() {
+        Some(c) => c,
+        None => {
+            // First call, cache and return all
+            update_cache(&params);
+            return params;
+        }
+    };
+    
+    // Only return changed values
+    let mut delta = Params::new();
+    let mut changed_count = 0;
+    
+    for (path, value) in &params {
+        match cache.get(path) {
+            Some(prev_value) if prev_value == value => {
+                // Unchanged, skip
+                continue;
+            }
+            _ => {
+                // New or changed
+                delta.insert(path.clone(), value.clone());
+                changed_count += 1;
+            }
+        }
+    }
+    
+    // Update cache with new values
+    update_cache(&params);
+    
+    if changed_count > 0 {
+        info!("Delta update: {} of {} parameters changed", changed_count, params.len());
+    } else {
+        debug!("No parameter changes detected");
+    }
+    
+    delta
+}
+
+/// Counter for forcing periodic full updates (every N requests)
+static POLL_COUNTER: Mutex<u32> = Mutex::new(0);
+const FULL_UPDATE_INTERVAL: u32 = 10; // Force full update every 10 requests
 
 /// Handle a GET request for the given paths.
 ///
 /// `max_depth` limits how many levels below the requested path are returned.
 /// 0 means unlimited (TR-369 §6.1.2).
+/// 
+/// Now implements delta tracking - only returns changed parameters
+/// unless force_full is true or periodic full update interval reached.
 pub async fn get_params(cfg: &ClientConfig, paths: &[String], max_depth: u32) -> Params {
     let mut result = Params::new();
     for path in paths {
@@ -39,7 +108,18 @@ pub async fn get_params(cfg: &ClientConfig, paths: &[String], max_depth: u32) ->
             }));
         }
     }
-    result
+    
+    // Increment counter and check if we need a full update
+    let counter = {
+        let mut c = POLL_COUNTER.lock().unwrap();
+        *c += 1;
+        *c
+    };
+    
+    let force_full = counter % FULL_UPDATE_INTERVAL == 1; // First call and every Nth call
+    
+    // Apply delta filtering
+    filter_delta(result, force_full)
 }
 
 /// Handle a SET request for the given (path, value) pairs.
