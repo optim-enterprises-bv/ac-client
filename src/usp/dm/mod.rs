@@ -16,7 +16,7 @@ pub mod security;
 pub mod wifi;
 
 use std::collections::HashMap;
-use log::warn;
+use log::{debug, warn};
 use crate::config::ClientConfig;
 
 pub type Params = HashMap<String, String>;
@@ -86,7 +86,9 @@ async fn dispatch_get(cfg: &ClientConfig, path: &str) -> Params {
     } else if path.starts_with("Device.X_OptimACS_Firmware.") {
         firmware::get(cfg, path)
     } else {
-        warn!("DM GET: unknown path prefix: {path}");
+        // Silently return empty for unsupported paths to reduce log noise
+        // The controller will see empty values and can decide how to handle them
+        debug!("DM GET: unimplemented path: {path}");
         Params::new()
     }
 }
