@@ -205,3 +205,36 @@ pub fn read_arp_table() -> Vec<ArpEntry> {
     }
     entries
 }
+
+/// Get the primary local IP address
+pub fn get_local_ip() -> String {
+    // Try to get IP from network interface using ip command
+    if let Ok(output) = std::process::Command::new("ip")
+        .args(["-4", "addr", "show", "scope", "global"])
+        .output()
+    {
+        let text = String::from_utf8_lossy(&output.stdout);
+        for line in text.lines() {
+            if line.contains("inet ") {
+                // Parse line like: "    inet 192.168.1.100/24 brd 192.168.1.255 scope global eth0"
+                if let Some(ip_part) = line.trim().split_whitespace().nth(1) {
+                    // Remove CIDR suffix (/24)
+                    return ip_part.split('/').next().unwrap_or("").to_string();
+                }
+            }
+        }
+    }
+
+    // Fallback: try hostname command
+    if let Ok(output) = std::process::Command::new("hostname").arg("-I").output() {
+        let text = String::from_utf8_lossy(&output.stdout);
+        return text
+            .trim()
+            .split_whitespace()
+            .next()
+            .unwrap_or("")
+            .to_string();
+    }
+
+    String::new()
+}
