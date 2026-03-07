@@ -12,6 +12,7 @@ pub mod dhcp;
 pub mod firmware;
 pub mod hosts;
 pub mod ip;
+pub mod misc;
 pub mod security;
 pub mod wifi;
 
@@ -85,6 +86,19 @@ async fn dispatch_get(cfg: &ClientConfig, path: &str) -> Params {
         cameras::get(cfg, path).await
     } else if path.starts_with("Device.X_OptimACS_Firmware.") {
         firmware::get(cfg, path)
+    } else if path.starts_with("Device.IP.") || 
+              path.starts_with("Device.DNS.") ||
+              path.starts_with("Device.Routing.") ||
+              path.starts_with("Device.NAT.") ||
+              path.starts_with("Device.Firewall.") ||
+              path.starts_with("Device.QoS.") ||
+              path.starts_with("Device.WireGuard.") ||
+              path.starts_with("Device.X_TP_OpenVPN.") ||
+              path.starts_with("Device.Time.") ||
+              path.starts_with("Device.USB.") ||
+              path.starts_with("Device.Cellular.") ||
+              path.starts_with("Device.NeighborDiscovery.") {
+        misc::get(cfg, path).await
     } else {
         // Silently return empty for unsupported paths to reduce log noise
         // The controller will see empty values and can decide how to handle them
