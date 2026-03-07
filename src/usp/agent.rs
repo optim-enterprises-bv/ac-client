@@ -258,18 +258,27 @@ pub async fn handle_incoming(
 
 fn collect_boot_params(cfg: &ClientConfig) -> HashMap<String, String> {
     let mut m = HashMap::new();
-    m.insert("Device.DeviceInfo.HostName".into(),         cfg.sys_model.clone());
+    
+    // Device.DeviceInfo parameters (matching what LuCI shows)
+    let device_model = util::read_device_model();
+    let device_arch = util::read_device_arch();
+    let hostname = crate::usp::tp469::uci_backend::get_system_hostname();
+    
+    m.insert("Device.DeviceInfo.HostName".into(),         hostname);
+    m.insert("Device.DeviceInfo.ModelName".into(),        device_model.clone());
     m.insert("Device.DeviceInfo.SoftwareVersion".into(),  util::read_fw_version());
-    m.insert("Device.DeviceInfo.HardwareVersion".into(),  cfg.sys_model.clone());
+    m.insert("Device.DeviceInfo.HardwareVersion".into(),  device_arch.clone()); // Architecture
     m.insert("Device.DeviceInfo.SerialNumber".into(),     cfg.mac_addr.clone());
     m.insert("Device.DeviceInfo.UpTime".into(),           util::read_uptime());
     m.insert("Device.DeviceInfo.X_OptimACS_LoadAvg".into(), util::read_load_avg());
     m.insert("Device.DeviceInfo.X_OptimACS_FreeMem".into(),  util::read_free_mem());
+    
     // Add IP address to Boot! parameters
     let local_ip = util::get_local_ip();
     if !local_ip.is_empty() {
         m.insert("Device.IP.Interface.1.IPAddress".into(), local_ip);
     }
+    
     // TR-181 §9.3.6 required Boot! event parameters
     m.insert("Cause".into(),           "LocalReboot".into());
     m.insert("FirmwareUpdated".into(), "false".into());

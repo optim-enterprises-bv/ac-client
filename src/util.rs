@@ -238,3 +238,74 @@ pub fn get_local_ip() -> String {
 
     String::new()
 }
+
+/// Get OpenWrt device model (like LuCI shows)
+pub fn read_device_model() -> String {
+    // Try /tmp/sysinfo/model first (this is what LuCI uses)
+    if let Ok(model) = fs::read_to_string("/tmp/sysinfo/model") {
+        let model = model.trim();
+        if !model.is_empty() {
+            return model.to_string();
+        }
+    }
+
+    // Fallback: try ubus call system board
+    if let Ok(output) = std::process::Command::new("ubus")
+        .args(["call", "system", "board"])
+        .output()
+    {
+        let text = String::from_utf8_lossy(&output.stdout);
+        // Parse JSON-like output to find model
+        for line in text.lines() {
+            if let Some(idx) = line.find("\"model\":") {
+                if let Some(start) = line[idx..].find('"').map(|i| idx + i + 1) {
+                    if let Some(end) = line[start..].find('"') {
+                        return line[start..start + end].to_string();
+                    }
+                }
+            }
+        }
+    }
+
+    // Final fallback: board name
+    if let Ok(board) = fs::read_to_string("/tmp/sysinfo/board_name") {
+        return board.trim().to_string();
+    }
+
+    String::new()
+}
+
+/// Get OpenWrt architecture/target (like LuCI shows)
+pub fn read_device_arch() -> String {
+    // Try /tmp/sysinfo/target first
+    if let Ok(target) = fs::read_to_string("/tmp/sysinfo/target") {
+        let target = target.trim();
+        if !target.is_empty() {
+            return target.to_string();
+        }
+    }
+
+    // Fallback: try ubus call system board for target
+    if let Ok(output) = std::process::Command::new("ubus")
+        .args(["call", "system", "board"])
+        .output()
+    {
+        let text = String::from_utf8_lossy(&output.stdout);
+        for line in text.lines() {
+            if let Some(idx) = line.find("\"target\":") {
+                if let Some(start) = line[idx..].find('"').map(|i| idx + i + 1) {
+                    if let Some(end) = line[start..].find('"') {
+                        return line[start..start + end].to_string();
+                    }
+                }
+            }
+        }
+    }
+
+    // Final fallback: use uname -m
+    if let Ok(output) = std::process::Command::new("uname").arg("-m").output() {
+        return String::from_utf8_lossy(&output.stdout).trim().to_string();
+    }
+
+    String::new()
+}
