@@ -255,6 +255,51 @@ pub async fn set(_cfg: &ClientConfig, path: &str, value: &str) -> Result<(), Str
             }
         }
     }
+    // Handle SSID Advertisement (hidden SSID)
+    else if path.ends_with(".SSIDAdvertisementEnabled") {
+        if let Some(idx) = parse_ssid_index(path) {
+            if idx > 0 && idx <= ifaces.len() {
+                let iface = &ifaces[idx - 1];
+                // SSIDAdvertisementEnabled: true = visible (hidden=0), false = hidden (hidden=1)
+                let hidden = if value == "true" || value == "1" { "0" } else { "1" };
+                uci_set(&format!("wireless.{iface}.hidden"), hidden)?;
+                uci_commit("wireless")?;
+                wifi_reload().await?;
+                info!("WiFi SSID {idx} advertisement set to '{value}' (hidden={hidden})");
+            } else {
+                return Err(format!("SSID index {idx} out of range"));
+            }
+        }
+    }
+    // Handle AccessPoint MaxAssociatedDevices (max stations)
+    else if path.ends_with(".MaxAssociatedDevices") {
+        if let Some(idx) = parse_ap_index(path) {
+            if idx > 0 && idx <= ifaces.len() {
+                let iface = &ifaces[idx - 1];
+                uci_set(&format!("wireless.{iface}.maxassoc"), value)?;
+                uci_commit("wireless")?;
+                wifi_reload().await?;
+                info!("WiFi AccessPoint {idx} max associations set to '{value}'");
+            } else {
+                return Err(format!("AccessPoint index {idx} out of range"));
+            }
+        }
+    }
+    // Handle AccessPoint WMM Enable
+    else if path.ends_with(".WMMEnable") {
+        if let Some(idx) = parse_ap_index(path) {
+            if idx > 0 && idx <= ifaces.len() {
+                let iface = &ifaces[idx - 1];
+                let wmm = if value == "true" || value == "1" { "1" } else { "0" };
+                uci_set(&format!("wireless.{iface}.wmm"), wmm)?;
+                uci_commit("wireless")?;
+                wifi_reload().await?;
+                info!("WiFi AccessPoint {idx} WMM set to '{wmm}'");
+            } else {
+                return Err(format!("AccessPoint index {idx} out of range"));
+            }
+        }
+    }
     // Handle Radio Channel
     else if path.ends_with(".Channel") {
         if let Some(idx) = parse_radio_index(path) {
