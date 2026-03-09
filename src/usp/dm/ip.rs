@@ -109,6 +109,15 @@ pub async fn get(_cfg: &ClientConfig, path: &str) -> HashMap<String, String> {
             let gateway = uci_get(&format!("network.{section}.gateway"));
             let dns = uci_get(&format!("network.{section}.dns"));
             
+            // Get interface name and stats
+            let bridge_name = format!("br-{section}");
+            let stats = get_interface_stats(&bridge_name).await;
+            let mac = get_interface_mac(&bridge_name).await;
+            let status = get_interface_status(&bridge_name).await;
+            
+            // Insert name
+            m.insert(format!("Device.IP.Interface.{iface_idx}.X_OptimACS_Name"), section.clone());
+            
             if !ip.is_empty() {
                 m.insert(format!("{base}IPAddress"), ip);
             }
@@ -124,18 +133,46 @@ pub async fn get(_cfg: &ClientConfig, path: &str) -> HashMap<String, String> {
             if !dns.is_empty() {
                 m.insert(format!("Device.IP.Interface.{iface_idx}.X_OptimACS_DNS"), dns);
             }
+            if !mac.is_empty() {
+                m.insert(format!("Device.IP.Interface.{iface_idx}.MACAddress"), mac);
+            }
+            m.insert(format!("Device.IP.Interface.{iface_idx}.Status"), status);
+            
+            // Add stats if available
+            if let Some(rx_bytes) = stats.get("rx_bytes") {
+                m.insert(format!("Device.IP.Interface.{iface_idx}.X_OptimACS_RXBytes"), rx_bytes.clone());
+            }
+            if let Some(rx_packets) = stats.get("rx_packets") {
+                m.insert(format!("Device.IP.Interface.{iface_idx}.X_OptimACS_RXPackets"), rx_packets.clone());
+            }
+            if let Some(tx_bytes) = stats.get("tx_bytes") {
+                m.insert(format!("Device.IP.Interface.{iface_idx}.X_OptimACS_TXBytes"), tx_bytes.clone());
+            }
+            if let Some(tx_packets) = stats.get("tx_packets") {
+                m.insert(format!("Device.IP.Interface.{iface_idx}.X_OptimACS_TXPackets"), tx_packets.clone());
+            }
+            if let Some(uptime) = stats.get("uptime") {
+                m.insert(format!("Device.IP.Interface.{iface_idx}.X_OptimACS_Uptime"), uptime.clone());
+            }
         }
     } else if let Some(idx) = specific_idx {
         // Specific interface requested
         if idx > 0 && idx <= interfaces.len() {
             let (section, _name) = &interfaces[idx - 1];
             let base = format!("Device.IP.Interface.{idx}.IPv4Address.1.");
+            let bridge_name = format!("br-{section}");
             
             let ip = uci_get(&format!("network.{section}.ipaddr"));
             let mask = uci_get(&format!("network.{section}.netmask"));
             let proto = uci_get(&format!("network.{section}.proto"));
             let gateway = uci_get(&format!("network.{section}.gateway"));
             let dns = uci_get(&format!("network.{section}.dns"));
+            let stats = get_interface_stats(&bridge_name).await;
+            let mac = get_interface_mac(&bridge_name).await;
+            let status = get_interface_status(&bridge_name).await;
+            
+            // Insert name
+            m.insert(format!("Device.IP.Interface.{idx}.X_OptimACS_Name"), section.clone());
             
             if path.ends_with(".IPAddress") {
                 m.insert(format!("{base}IPAddress"), ip);
@@ -159,6 +196,27 @@ pub async fn get(_cfg: &ClientConfig, path: &str) -> HashMap<String, String> {
                 }
                 if !dns.is_empty() {
                     m.insert(format!("Device.IP.Interface.{idx}.X_OptimACS_DNS"), dns);
+                }
+                if !mac.is_empty() {
+                    m.insert(format!("Device.IP.Interface.{idx}.MACAddress"), mac);
+                }
+                m.insert(format!("Device.IP.Interface.{idx}.Status"), status);
+                
+                // Add stats if available
+                if let Some(rx_bytes) = stats.get("rx_bytes") {
+                    m.insert(format!("Device.IP.Interface.{idx}.X_OptimACS_RXBytes"), rx_bytes.clone());
+                }
+                if let Some(rx_packets) = stats.get("rx_packets") {
+                    m.insert(format!("Device.IP.Interface.{idx}.X_OptimACS_RXPackets"), rx_packets.clone());
+                }
+                if let Some(tx_bytes) = stats.get("tx_bytes") {
+                    m.insert(format!("Device.IP.Interface.{idx}.X_OptimACS_TXBytes"), tx_bytes.clone());
+                }
+                if let Some(tx_packets) = stats.get("tx_packets") {
+                    m.insert(format!("Device.IP.Interface.{idx}.X_OptimACS_TXPackets"), tx_packets.clone());
+                }
+                if let Some(uptime) = stats.get("uptime") {
+                    m.insert(format!("Device.IP.Interface.{idx}.X_OptimACS_Uptime"), uptime.clone());
                 }
             }
         }
@@ -228,4 +286,110 @@ async fn reload_network() -> Result<(), String> {
     
     warn!("Network reload command failed, changes will apply on reboot");
     Ok(()) // Don't fail the operation
+}
+
+/// Get interface statistics from /proc/net/dev
+async fn get_interface_stats(iface: &str) -> HashMap<String, String> {
+    let mut stats = HashMap::new();
+    
+    // Read /proc/net/dev
+    if let Ok(content) = tokio::fs::read_to_string("/proc/net/dev").await {
+        for line in content.lines() {
+            if line.contains(iface) {
+                // Parse line like: "  br-lan: 123456789 1234567    0    0    0     0          0         0 987654321 9876543    0    0    0    0       0          0"
+                let parts: Vec<&str> = line.split_whitespace().collect();
+                if parts.len() >= 9 {
+                    if let Ok(rx_bytes) = parts[1].parse::<u64>() {
+                        stats.insert("rx_bytes".to_string(), format_bytes(rx_bytes));
+                    }
+                    if let Ok(rx_packets) = parts[2].parse::<u64>() {
+                        stats.insert("rx_packets".to_string(), format_number(rx_packets));
+                    }
+                    if let Ok(tx_bytes) = parts[9].parse::<u64>() {
+                        stats.insert("tx_bytes".to_string(), format_bytes(tx_bytes));
+                    }
+                    if let Ok(tx_packets) = parts[10].parse::<u64>() {
+                        stats.insert("tx_packets".to_string(), format_number(tx_packets));
+                    }
+                }
+                break;
+            }
+        }
+    }
+    
+    // Get interface uptime from /sys/class/net/{iface}/operstate or similar
+    if let Ok(content) = tokio::fs::read_to_string(format!("/sys/class/net/{}/operstate", iface)).await {
+        let state = content.trim();
+        if state == "up" {
+            // Try to get carrier uptime if available
+            if let Ok(carrier) = tokio::fs::read_to_string(format!("/sys/class/net/{}/carrier_up_time", iface)).await {
+                let seconds = carrier.trim().parse::<u64>().unwrap_or(0);
+                stats.insert("uptime".to_string(), format_duration(seconds));
+            }
+        }
+    }
+    
+    stats
+}
+
+/// Get MAC address from /sys/class/net/{iface}/address
+async fn get_interface_mac(iface: &str) -> String {
+    if let Ok(content) = tokio::fs::read_to_string(format!("/sys/class/net/{}/address", iface)).await {
+        content.trim().to_string()
+    } else {
+        String::new()
+    }
+}
+
+/// Get interface operational status
+async fn get_interface_status(iface: &str) -> String {
+    if let Ok(content) = tokio::fs::read_to_string(format!("/sys/class/net/{}/operstate", iface)).await {
+        match content.trim() {
+            "up" => "Up",
+            "down" => "Down",
+            _ => "Unknown",
+        }.to_string()
+    } else {
+        "Down".to_string()
+    }
+}
+
+/// Format bytes to human-readable (GB, MB, etc.)
+fn format_bytes(bytes: u64) -> String {
+    const GB: u64 = 1_000_000_000;
+    const MB: u64 = 1_000_000;
+    const KB: u64 = 1_000;
+    
+    if bytes >= GB {
+        format!("{:.2} GB", bytes as f64 / GB as f64)
+    } else if bytes >= MB {
+        format!("{:.2} MB", bytes as f64 / MB as f64)
+    } else if bytes >= KB {
+        format!("{:.2} KB", bytes as f64 / KB as f64)
+    } else {
+        format!("{} B", bytes)
+    }
+}
+
+/// Format number with commas
+fn format_number(num: u64) -> String {
+    num.to_string()
+}
+
+/// Format seconds to human-readable duration
+fn format_duration(seconds: u64) -> String {
+    let days = seconds / 86400;
+    let hours = (seconds % 86400) / 3600;
+    let mins = (seconds % 3600) / 60;
+    let secs = seconds % 60;
+    
+    if days > 0 {
+        format!("{}d {}h {}m {}s", days, hours, mins, secs)
+    } else if hours > 0 {
+        format!("{}h {}m {}s", hours, mins, secs)
+    } else if mins > 0 {
+        format!("{}m {}s", mins, secs)
+    } else {
+        format!("{}s", secs)
+    }
 }
