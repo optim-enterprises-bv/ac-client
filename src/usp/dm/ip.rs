@@ -28,7 +28,7 @@ fn get_network_interfaces() -> Vec<(String, String)> {
                 let section = parts[1].to_string();
                 
                 // Skip non-interface sections
-                if section == "globals" || section == "switch" {
+                if section == "globals" || section == "switch" || section == "loopback" {
                     continue;
                 }
                 
