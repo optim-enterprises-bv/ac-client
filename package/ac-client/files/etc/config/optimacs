@@ -39,17 +39,16 @@ config optimacs 'agent'
 
 	# ── USP Message Transport Protocol (MTP) ──────────────────────────────
 	# Which MTP(s) to use: websocket | mqtt | both
-	option mtp           'websocket'
+	option mtp           'mqtt'
 
 	# WebSocket MTP: direct WSS URL to ac-server.
 	# When left empty, built automatically from server_host + server_port.
 	# For local testing: option ws_url 'wss://192.168.10.5:3491'
-	option ws_url        'wss://usp.optimcloud.com:3491/usp'
+	# option ws_url      'wss://usp.optimcloud.com:3491/usp'
 
 	# MQTT MTP: URL of the EMQX (or other) broker.
 	# Required only when mtp = mqtt or mtp = both.
-	# Example: mqtt://emqx.example.com:1883
-	# option mqtt_url    ''
+	option mqtt_url      'mqtt://emqx.optimcloud.com:1883'
 
 	# ── USP endpoint identifiers ───────────────────────────────────────────
 	# Agent endpoint ID sent in every USP Record.
