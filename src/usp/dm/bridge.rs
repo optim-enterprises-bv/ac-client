@@ -61,7 +61,7 @@ fn get_uci_path(bridge_name: &str, option: &str) -> String {
 }
 
 /// Get bridge configuration from UCI network config
-pub async fn get(cfg: &ClientConfig, path: &str) -> Params {
+pub async fn get(_cfg: &ClientConfig, path: &str) -> Params {
     let mut result = Params::new();
     
     // Parse bridge index from path like "Device.X_OptimACS_Network.Bridge.1.Name"

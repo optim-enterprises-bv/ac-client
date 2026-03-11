@@ -39,7 +39,6 @@ fn get_network_interfaces() -> Vec<(String, String)> {
                             interfaces.push((current_section.clone(), current_section.clone()));
                         }
                         current_section = section.clone();
-                        has_proto = false;
                     }
                     has_proto = true;
                 }

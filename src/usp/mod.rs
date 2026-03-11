@@ -19,12 +19,6 @@ pub enum UspError {
     Decode(#[from] prost::DecodeError),
     #[error("WebSocket: {0}")]
     WebSocket(#[from] tokio_tungstenite::tungstenite::Error),
-    #[error("MQTT: {0}")]
-    Mqtt(String),
-    #[error("data model: {0}")]
-    DataModel(String),
-    #[error("protocol: {0}")]
-    Protocol(String),
     #[error("IO: {0}")]
     Io(#[from] std::io::Error),
 }

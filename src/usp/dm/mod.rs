@@ -18,7 +18,7 @@ pub mod wifi;
 
 use std::collections::HashMap;
 use std::sync::Mutex;
-use log::{debug, info, warn};
+use log::{debug, info};
 use crate::config::ClientConfig;
 
 pub type Params = HashMap<String, String>;

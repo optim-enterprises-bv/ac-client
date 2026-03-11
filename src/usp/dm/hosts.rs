@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use log::{info, warn};
 use crate::config::ClientConfig;
-use crate::usp::tp469::uci_backend::{uci_get, uci_set, uci_commit};
+use crate::usp::tp469::uci_backend::uci_commit;
 
 fn uci_add_list(path: &str, value: &str) -> Result<(), String> {
     let status = std::process::Command::new("uci")
