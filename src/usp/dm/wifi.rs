@@ -173,7 +173,18 @@ pub async fn get(_cfg: &ClientConfig, path: &str) -> HashMap<String, String> {
             let disabled = uci_get(&format!("wireless.{iface}.disabled"));
             let enabled = disabled != "1";
 
-            m.insert(format!("Device.WiFi.AccessPoint.{ap_idx}.Security.ModeEnabled"), enc.clone());
+            // ModeEnabled — return friendly name matching WPAEncryptionModes
+            let mode_friendly = match enc.as_str() {
+                "psk2" | "psk2+ccmp" => "WPA2-Personal",
+                "psk-mixed" | "psk-mixed+ccmp" => "WPA-WPA2-Personal",
+                "sae" => "WPA3-Personal",
+                "sae-mixed" => "WPA2-WPA3-Personal",
+                "wpa2" | "wpa2+ccmp" => "WPA2-Enterprise",
+                "owe" => "OWE",
+                "none" | "" => "None",
+                other => other,
+            };
+            m.insert(format!("Device.WiFi.AccessPoint.{ap_idx}.Security.ModeEnabled"), mode_friendly.to_string());
             if !key.is_empty() {
                 m.insert(format!("Device.WiFi.AccessPoint.{ap_idx}.Security.KeyPassphrase"), key);
             }
