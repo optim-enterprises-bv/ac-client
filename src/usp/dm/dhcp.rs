@@ -4,50 +4,141 @@ use std::collections::HashMap;
 use log::{info, warn};
 use crate::config::ClientConfig;
 
-/// Get all DHCP static leases from UCI
-pub async fn get(_cfg: &ClientConfig, _path: &str) -> HashMap<String, String> {
+/// UCI helper — read a single value, returning None if empty/missing
+fn uci_get_raw(key: &str) -> Option<String> {
+    let out = std::process::Command::new("uci")
+        .args(["get", key])
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    out
+}
+
+/// Get DHCP pool sections that have a 'start' option (real pools)
+fn get_dhcp_pools() -> Vec<String> {
     let out = std::process::Command::new("uci")
         .args(["show", "dhcp"])
         .output()
         .ok()
         .and_then(|o| String::from_utf8(o.stdout).ok())
         .unwrap_or_default();
-
-    let mut m = HashMap::new();
-    let mut idx = 1u32;
+    let mut pools = Vec::new();
     for line in out.lines() {
-        if line.contains("host.") && line.contains(".mac=") {
-            // Extract section name (e.g., "dhcp.host_001122334455")
-            let section = line.split('.').nth(1).unwrap_or("").to_string();
-            let mac = line.split('=').nth(1).unwrap_or("").trim_matches('\'').to_string();
-            
-            // Find corresponding IP
-            let ip_line = out.lines()
-                .find(|l| l.contains(&format!("dhcp.{section}.ip=")));
-            let ip = ip_line
-                .and_then(|l| l.split('=').nth(1))
-                .unwrap_or("")
-                .trim_matches('\'')
-                .to_string();
-            
-            // Find hostname if present
-            let name_line = out.lines()
-                .find(|l| l.contains(&format!("dhcp.{section}.name=")));
-            let name = name_line
-                .and_then(|l| l.split('=').nth(1))
-                .unwrap_or("")
-                .trim_matches('\'')
-                .to_string();
-            
-            let base = format!("Device.DHCPv4.Server.Pool.1.StaticAddress.{idx}.");
-            m.insert(format!("{base}Chaddr"), mac);
-            m.insert(format!("{base}Yiaddr"), ip);
-            if !name.is_empty() {
-                m.insert(format!("{base}X_OptimACS_Hostname"), name);
+        if line.starts_with("dhcp.") && line.contains(".start=") {
+            if let Some(section) = line.split('.').nth(1) {
+                if !pools.contains(&section.to_string()) {
+                    pools.push(section.to_string());
+                }
             }
-            idx += 1;
         }
     }
+    if pools.is_empty() {
+        pools.push("lan".to_string());
+    }
+    pools
+}
+
+/// Get DHCP parameters — pool config + static leases
+pub async fn get(_cfg: &ClientConfig, path: &str) -> HashMap<String, String> {
+    let mut m = HashMap::new();
+    let pools = get_dhcp_pools();
+
+    // ── Pool-level config ──
+    if path.contains("PoolNumberOfEntries") {
+        m.insert(path.to_string(), pools.len().to_string());
+        return m;
+    }
+
+    if path.contains("Server.Pool.") {
+        let pool_idx: usize = path
+            .split("Pool.").nth(1)
+            .and_then(|s| s.split('.').next())
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(1);
+        let pool_name = pools.get(pool_idx - 1).cloned().unwrap_or_else(|| "lan".to_string());
+
+        if path.ends_with("Enable") {
+            let ignore = uci_get_raw(&format!("dhcp.{pool_name}.ignore")).unwrap_or_default();
+            m.insert(path.to_string(), (ignore != "1").to_string());
+        } else if path.ends_with("Status") {
+            let ignore = uci_get_raw(&format!("dhcp.{pool_name}.ignore")).unwrap_or_default();
+            m.insert(path.to_string(), if ignore == "1" { "Disabled" } else { "Enabled" }.to_string());
+        } else if path.ends_with("MinAddress") || path.ends_with("Start") {
+            let start = uci_get_raw(&format!("dhcp.{pool_name}.start")).unwrap_or_else(|| "100".to_string());
+            m.insert(path.to_string(), start);
+        } else if path.ends_with("MaxAddress") || path.ends_with("Limit") {
+            let limit = uci_get_raw(&format!("dhcp.{pool_name}.limit")).unwrap_or_else(|| "150".to_string());
+            m.insert(path.to_string(), limit);
+        } else if path.ends_with("SubnetMask") {
+            let iface = uci_get_raw(&format!("dhcp.{pool_name}.interface")).unwrap_or_else(|| pool_name.clone());
+            let mask = uci_get_raw(&format!("network.{iface}.netmask")).unwrap_or_else(|| "255.255.255.0".to_string());
+            m.insert(path.to_string(), mask);
+        } else if path.ends_with("DomainName") {
+            let domain = uci_get_raw("dhcp.@dnsmasq[0].domain").unwrap_or_else(|| "lan".to_string());
+            m.insert(path.to_string(), domain);
+        } else if path.ends_with("LeaseTime") {
+            let lt = uci_get_raw(&format!("dhcp.{pool_name}.leasetime")).unwrap_or_else(|| "12h".to_string());
+            m.insert(path.to_string(), lt);
+        } else if path.ends_with("LeaseNumberOfEntries") {
+            let count = std::fs::read_to_string("/tmp/dhcp.leases")
+                .map(|s| s.lines().filter(|l| !l.trim().is_empty()).count())
+                .unwrap_or(0);
+            m.insert(path.to_string(), count.to_string());
+        } else if path.ends_with("StaticAddressNumberOfEntries") {
+            let out = std::process::Command::new("uci")
+                .args(["show", "dhcp"])
+                .output()
+                .ok()
+                .and_then(|o| String::from_utf8(o.stdout).ok())
+                .unwrap_or_default();
+            let count = out.lines().filter(|l| l.contains("@host[") && l.contains(".mac=")).count();
+            m.insert(path.to_string(), count.to_string());
+        } else if path.ends_with("Interface") {
+            let iface = uci_get_raw(&format!("dhcp.{pool_name}.interface")).unwrap_or_else(|| pool_name.clone());
+            m.insert(path.to_string(), iface);
+        } else if path.ends_with("DNSServers") {
+            let dns = uci_get_raw(&format!("dhcp.{pool_name}.dhcp_option")).unwrap_or_default();
+            let servers: String = dns.split_whitespace()
+                .filter(|o| o.starts_with("6,"))
+                .map(|o| o.trim_start_matches("6,"))
+                .collect::<Vec<&str>>()
+                .join(",");
+            m.insert(path.to_string(), servers);
+        } else if path.contains("StaticAddress.") {
+            // Static lease query — original logic
+            let uci_out = std::process::Command::new("uci")
+                .args(["show", "dhcp"])
+                .output()
+                .ok()
+                .and_then(|o| String::from_utf8(o.stdout).ok())
+                .unwrap_or_default();
+            let mut idx = 1u32;
+            for line in uci_out.lines() {
+                if line.contains("host.") && line.contains(".mac=") {
+                    let section = line.split('.').nth(1).unwrap_or("").to_string();
+                    let mac = line.split('=').nth(1).unwrap_or("").trim_matches('\'').to_string();
+                    let ip = uci_out.lines()
+                        .find(|l| l.contains(&format!("dhcp.{section}.ip=")))
+                        .and_then(|l| l.split('=').nth(1))
+                        .unwrap_or("").trim_matches('\'').to_string();
+                    let name = uci_out.lines()
+                        .find(|l| l.contains(&format!("dhcp.{section}.name=")))
+                        .and_then(|l| l.split('=').nth(1))
+                        .unwrap_or("").trim_matches('\'').to_string();
+                    let base = format!("Device.DHCPv4.Server.Pool.1.StaticAddress.{idx}.");
+                    m.insert(format!("{base}Chaddr"), mac);
+                    m.insert(format!("{base}Yiaddr"), ip);
+                    if !name.is_empty() {
+                        m.insert(format!("{base}X_OptimACS_Hostname"), name);
+                    }
+                    idx += 1;
+                }
+            }
+        }
+    }
+
     m
 }
 

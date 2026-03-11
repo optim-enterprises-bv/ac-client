@@ -139,11 +139,26 @@ pub async fn get(_cfg: &ClientConfig, path: &str) -> HashMap<String, String> {
             let ssid_idx = idx + 1;
             let ssid = uci_get(&format!("wireless.{iface}.ssid"));
             let disabled = uci_get(&format!("wireless.{iface}.disabled"));
-            let enable = if disabled == "1" { "false" } else { "true" };
-            
+            let enable = disabled != "1";
+
             if !ssid.is_empty() {
                 m.insert(format!("Device.WiFi.SSID.{ssid_idx}.SSID"), ssid);
                 m.insert(format!("Device.WiFi.SSID.{ssid_idx}.Enable"), enable.to_string());
+                // SSID Status: Up if enabled
+                m.insert(format!("Device.WiFi.SSID.{ssid_idx}.Status"), if enable { "Up" } else { "Down" }.to_string());
+                // Try to get BSSID for this SSID's interface
+                let iface_name = uci_get(&format!("wireless.{iface}.ifname"));
+                let net_iface = if !iface_name.is_empty() { iface_name } else {
+                    // Derive from radio assignment
+                    let device = uci_get(&format!("wireless.{iface}.device"));
+                    get_phy_interface(&device)
+                };
+                if !net_iface.is_empty() {
+                    let bssid = get_iw_bssid(&net_iface);
+                    if !bssid.is_empty() {
+                        m.insert(format!("Device.WiFi.SSID.{ssid_idx}.BSSID"), bssid);
+                    }
+                }
             }
         }
     }
@@ -155,13 +170,50 @@ pub async fn get(_cfg: &ClientConfig, path: &str) -> HashMap<String, String> {
             let enc = uci_get(&format!("wireless.{iface}.encryption"));
             let key = uci_get(&format!("wireless.{iface}.key"));
             let mode = uci_get(&format!("wireless.{iface}.mode"));
-            
-            m.insert(format!("Device.WiFi.AccessPoint.{ap_idx}.Security.ModeEnabled"), enc);
+            let disabled = uci_get(&format!("wireless.{iface}.disabled"));
+            let enabled = disabled != "1";
+
+            m.insert(format!("Device.WiFi.AccessPoint.{ap_idx}.Security.ModeEnabled"), enc.clone());
             if !key.is_empty() {
                 m.insert(format!("Device.WiFi.AccessPoint.{ap_idx}.Security.KeyPassphrase"), key);
             }
             if !mode.is_empty() {
                 m.insert(format!("Device.WiFi.AccessPoint.{ap_idx}.Mode"), mode);
+            }
+
+            // AccessPoint Status
+            m.insert(format!("Device.WiFi.AccessPoint.{ap_idx}.Status"),
+                if enabled { "Enabled" } else { "Disabled" }.to_string());
+
+            // WPA encryption modes (derive from enc)
+            let wpa_modes = match enc.as_str() {
+                "psk2" | "psk2+ccmp" => "WPA2-Personal",
+                "psk-mixed" | "psk-mixed+ccmp" => "WPA-WPA2-Personal",
+                "sae" => "WPA3-Personal",
+                "sae-mixed" => "WPA2-WPA3-Personal",
+                "wpa2" | "wpa2+ccmp" => "WPA2-Enterprise",
+                "none" | "" => "None",
+                other => other,
+            };
+            m.insert(format!("Device.WiFi.AccessPoint.{ap_idx}.Security.WPAEncryptionModes"), wpa_modes.to_string());
+
+            // MFP (802.11w management frame protection)
+            let ieee80211w = uci_get(&format!("wireless.{iface}.ieee80211w"));
+            let mfp = match ieee80211w.as_str() {
+                "2" => "Required",
+                "1" => "Optional",
+                _ => "Disabled",
+            };
+            m.insert(format!("Device.WiFi.AccessPoint.{ap_idx}.Security.MFPConfig"), mfp.to_string());
+
+            // AssociatedDeviceNumberOfEntries for this AP
+            let device = uci_get(&format!("wireless.{iface}.device"));
+            let phy_iface = if !device.is_empty() { get_phy_interface(&device) } else { String::new() };
+            if !phy_iface.is_empty() {
+                let count = get_associated_device_count(&phy_iface);
+                m.insert(format!("Device.WiFi.AccessPoint.{ap_idx}.AssociatedDeviceNumberOfEntries"), count.to_string());
+            } else {
+                m.insert(format!("Device.WiFi.AccessPoint.{ap_idx}.AssociatedDeviceNumberOfEntries"), "0".to_string());
             }
         }
     }
@@ -179,7 +231,7 @@ pub async fn get(_cfg: &ClientConfig, path: &str) -> HashMap<String, String> {
             let dtim_period = uci_get(&format!("wireless.{device}.dtim_period"));
 
             // Enable is inverse of disabled in UCI
-            let enable = if disabled == "1" { "false" } else { "true" };
+            let enable = disabled != "1";
 
             if !chan.is_empty() {
                 m.insert(format!("Device.WiFi.Radio.{radio_idx}.Channel"), chan);
@@ -201,8 +253,11 @@ pub async fn get(_cfg: &ClientConfig, path: &str) -> HashMap<String, String> {
                 m.insert(format!("Device.WiFi.Radio.{radio_idx}.DTIMPeriod"), dtim_period);
             }
 
-            // Get BSSID and bitrate from iw dev for this radio's interface
+            // Radio Status: Up if enabled and phy interface exists, Down otherwise
             let phy_iface = get_phy_interface(device);
+            let status = if enable && !phy_iface.is_empty() { "Up" } else { "Down" };
+            m.insert(format!("Device.WiFi.Radio.{radio_idx}.Status"), status.to_string());
+
             if !phy_iface.is_empty() {
                 let bssid = get_iw_bssid(&phy_iface);
                 if !bssid.is_empty() {
