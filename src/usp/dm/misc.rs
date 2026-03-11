@@ -38,6 +38,11 @@ pub async fn get(_cfg: &ClientConfig, path: &str) -> Params {
         return handle_nat(path);
     }
     
+    // Device.DHCPv4
+    if path.starts_with("Device.DHCPv4.") {
+        return handle_dhcpv4(path);
+    }
+
     // Device.Firewall
     if path.starts_with("Device.Firewall.") {
         return handle_firewall(path);
@@ -260,15 +265,10 @@ fn handle_nat(path: &str) -> Params {
 
 fn handle_firewall(path: &str) -> Params {
     let mut result = Params::new();
-    
+
     if path.ends_with("Level") {
-        // Read from UCI
-        let level = std::process::Command::new("uci")
-            .args(["get", "firewall.@defaults[0].input"])
-            .output()
-            .ok()
-            .and_then(|o| String::from_utf8(o.stdout).ok())
-            .map(|s| match s.trim() {
+        let level = uci_get_raw("firewall.@defaults[0].input")
+            .map(|s| match s.as_str() {
                 "ACCEPT" => "Low",
                 "REJECT" => "High",
                 "DROP" => "High",
@@ -278,9 +278,57 @@ fn handle_firewall(path: &str) -> Params {
         result.insert(path.to_string(), level.to_string());
     } else if path.ends_with("Config") {
         result.insert(path.to_string(), "Standard".to_string());
+    } else if path.ends_with("X_OptimACS_SynFlood") {
+        let val = uci_get_raw("firewall.@defaults[0].syn_flood").unwrap_or_default();
+        let enabled = val == "1" || val == "true";
+        result.insert(path.to_string(), enabled.to_string());
+    } else if path.ends_with("X_OptimACS_DropInvalid") {
+        let val = uci_get_raw("firewall.@defaults[0].drop_invalid").unwrap_or_default();
+        let enabled = val == "1" || val == "true";
+        result.insert(path.to_string(), enabled.to_string());
+    } else if path.ends_with("X_OptimACS_Input") {
+        let val = uci_get_raw("firewall.@defaults[0].input").unwrap_or_else(|| "REJECT".to_string());
+        result.insert(path.to_string(), val);
+    } else if path.ends_with("X_OptimACS_Output") {
+        let val = uci_get_raw("firewall.@defaults[0].output").unwrap_or_else(|| "ACCEPT".to_string());
+        result.insert(path.to_string(), val);
+    } else if path.ends_with("X_OptimACS_Forward") {
+        let val = uci_get_raw("firewall.@defaults[0].forward").unwrap_or_else(|| "REJECT".to_string());
+        result.insert(path.to_string(), val);
+    } else if path.ends_with("X_OptimACS_FlowOffloading") {
+        let val = uci_get_raw("firewall.@defaults[0].flow_offloading").unwrap_or_default();
+        let enabled = val == "1" || val == "true";
+        result.insert(path.to_string(), enabled.to_string());
+    } else if path.ends_with("ZoneNumberOfEntries") {
+        // Count firewall zones
+        let output = std::process::Command::new("uci")
+            .args(["show", "firewall"])
+            .output()
+            .ok()
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .unwrap_or_default();
+        let count = output.lines()
+            .filter(|l| l.contains("@zone[") && l.contains(".name="))
+            .count();
+        result.insert(path.to_string(), count.to_string());
     }
-    
+
     result
+}
+
+/// Helper to read a UCI value and return trimmed Option<String>
+fn uci_get_raw(key: &str) -> Option<String> {
+    std::process::Command::new("uci")
+        .args(["get", key])
+        .output()
+        .ok()
+        .and_then(|o| {
+            if o.status.success() {
+                String::from_utf8(o.stdout).ok().map(|s| s.trim().trim_matches('\'').to_string())
+            } else {
+                None
+            }
+        })
 }
 
 // ── QoS ────────────────────────────────────────────────────────────────────
@@ -310,48 +358,71 @@ fn handle_qos(path: &str) -> Params {
 
 fn handle_wireguard(path: &str) -> Params {
     let mut result = Params::new();
-    
-    if path.contains("InterfaceNumberOfEntries") || path.contains("PeersNumberOfEntries") {
-        result.insert(path.to_string(), "0".to_string());
+
+    // Count real WireGuard interfaces from `wg show interfaces`
+    let wg_ifaces = get_wg_interfaces();
+
+    if path.contains("InterfaceNumberOfEntries") {
+        result.insert(path.to_string(), wg_ifaces.len().to_string());
     } else if path.contains("Interface.") {
-        // Check if WireGuard interface exists
         let iface_num = extract_index(path, "Interface.").unwrap_or(1);
-        let iface_name = format!("wg{}", iface_num);
-        
-        // Check if interface exists
-        let exists = std::process::Command::new("ip")
-            .args(["link", "show", &iface_name])
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false);
-        
-        if exists {
-            if path.ends_with("ListenPort") {
-                let port = std::process::Command::new("wg")
-                    .args(["show", &iface_name, "listen-port"])
-                    .output()
-                    .ok()
-                    .and_then(|o| String::from_utf8(o.stdout).ok())
-                    .map(|s| s.trim().to_string())
-                    .unwrap_or_default();
-                result.insert(path.to_string(), port);
-            } else if path.ends_with("PublicKey") {
-                let key = std::process::Command::new("wg")
-                    .args(["show", &iface_name, "public-key"])
-                    .output()
-                    .ok()
-                    .and_then(|o| String::from_utf8(o.stdout).ok())
-                    .map(|s| s.trim().to_string())
-                    .unwrap_or_default();
-                result.insert(path.to_string(), key);
-            }
+        let iface_name = wg_ifaces.get(iface_num - 1).cloned()
+            .unwrap_or_else(|| format!("wg{}", iface_num - 1));
+
+        if path.ends_with("PeersNumberOfEntries") {
+            let count = get_wg_peer_count(&iface_name);
+            result.insert(path.to_string(), count.to_string());
+        } else if path.ends_with("Status") {
+            let exists = std::process::Command::new("ip")
+                .args(["link", "show", &iface_name])
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false);
+            result.insert(path.to_string(), if exists { "Up" } else { "Down" }.to_string());
+        } else if path.ends_with("ListenPort") {
+            let port = std::process::Command::new("wg")
+                .args(["show", &iface_name, "listen-port"])
+                .output()
+                .ok()
+                .and_then(|o| String::from_utf8(o.stdout).ok())
+                .map(|s| s.trim().to_string())
+                .unwrap_or_default();
+            result.insert(path.to_string(), port);
+        } else if path.ends_with("PublicKey") {
+            let key = std::process::Command::new("wg")
+                .args(["show", &iface_name, "public-key"])
+                .output()
+                .ok()
+                .and_then(|o| String::from_utf8(o.stdout).ok())
+                .map(|s| s.trim().to_string())
+                .unwrap_or_default();
+            result.insert(path.to_string(), key);
         } else {
-            // Return empty for non-existent interfaces
             result.insert(path.to_string(), "".to_string());
         }
     }
-    
+
     result
+}
+
+fn get_wg_interfaces() -> Vec<String> {
+    std::process::Command::new("wg")
+        .args(["show", "interfaces"])
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|s| s.split_whitespace().map(|i| i.to_string()).collect())
+        .unwrap_or_default()
+}
+
+fn get_wg_peer_count(iface: &str) -> usize {
+    std::process::Command::new("wg")
+        .args(["show", iface, "peers"])
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|s| s.lines().filter(|l| !l.trim().is_empty()).count())
+        .unwrap_or(0)
 }
 
 // ── OpenVPN ────────────────────────────────────────────────────────────────
@@ -456,43 +527,76 @@ fn handle_time(path: &str) -> Params {
 
 fn handle_usb(path: &str) -> Params {
     let mut result = Params::new();
-    
-    if path.contains("HostNumberOfEntries") || path.contains("DeviceNumberOfEntries") {
-        // Count USB devices from /sys/bus/usb/devices
-        let count = std::fs::read_dir("/sys/bus/usb/devices")
-            .map(|entries| entries.filter(|e| {
-                if let Ok(entry) = e {
-                    entry.file_name().to_string_lossy().starts_with("1-") ||
-                    entry.file_name().to_string_lossy().starts_with("2-")
-                } else {
-                    false
-                }
-            }).count())
-            .unwrap_or(0);
-        result.insert(path.to_string(), count.to_string());
-    } else if path.contains("Device.1.") {
-        // Get first USB device info
-        if path.ends_with("DeviceNumber") {
-            result.insert(path.to_string(), "1".to_string());
-        } else {
-            // Read from /sys/bus/usb/devices
-            let device_path = "/sys/bus/usb/devices/1-1";
-            let value = if path.ends_with("VendorID") {
-                read_usb_attr(device_path, "idVendor")
+
+    let usb_devices = get_usb_devices();
+
+    if path.contains("USBHosts.HostNumberOfEntries") {
+        // Typically 1 host controller
+        result.insert(path.to_string(), if usb_devices.is_empty() { "0" } else { "1" }.to_string());
+    } else if path.contains("HostNumberOfEntries") || path.contains("DeviceNumberOfEntries") {
+        result.insert(path.to_string(), usb_devices.len().to_string());
+    } else if path.contains("Host.1.Device.") {
+        // Device.USB.USBHosts.Host.1.Device.{d}.* path
+        let dev_idx = extract_index(path, "Device.").unwrap_or(1);
+        if let Some(dev_path) = usb_devices.get(dev_idx - 1) {
+            let value = if path.ends_with("DeviceNumber") {
+                dev_idx.to_string()
+            } else if path.ends_with("VendorID") {
+                read_usb_attr(dev_path, "idVendor")
             } else if path.ends_with("ProductID") {
-                read_usb_attr(device_path, "idProduct")
+                read_usb_attr(dev_path, "idProduct")
             } else if path.ends_with("Manufacturer") {
-                read_usb_attr(device_path, "manufacturer")
-            } else if path.ends_with("ProductClass") || path.ends_with("SerialNumber") {
-                read_usb_attr(device_path, "product")
+                read_usb_attr(dev_path, "manufacturer")
+            } else if path.ends_with("ProductClass") {
+                read_usb_attr(dev_path, "bDeviceClass")
+            } else if path.ends_with("SerialNumber") {
+                read_usb_attr(dev_path, "serial")
+            } else if path.ends_with("USBVersion") {
+                read_usb_attr(dev_path, "version")
             } else {
                 "".to_string()
             };
             result.insert(path.to_string(), value);
         }
+    } else if path.contains("Device.1.") {
+        // Legacy flat path
+        let device_path = usb_devices.first().map(|s| s.as_str()).unwrap_or("/sys/bus/usb/devices/1-1");
+        let value = if path.ends_with("DeviceNumber") {
+            "1".to_string()
+        } else if path.ends_with("VendorID") {
+            read_usb_attr(device_path, "idVendor")
+        } else if path.ends_with("ProductID") {
+            read_usb_attr(device_path, "idProduct")
+        } else if path.ends_with("Manufacturer") {
+            read_usb_attr(device_path, "manufacturer")
+        } else if path.ends_with("ProductClass") || path.ends_with("SerialNumber") {
+            read_usb_attr(device_path, "product")
+        } else {
+            "".to_string()
+        };
+        result.insert(path.to_string(), value);
     }
-    
+
     result
+}
+
+/// Enumerate real USB device paths from /sys/bus/usb/devices
+fn get_usb_devices() -> Vec<String> {
+    std::fs::read_dir("/sys/bus/usb/devices")
+        .map(|entries| {
+            let mut devs: Vec<String> = entries
+                .filter_map(|e| e.ok())
+                .filter(|e| {
+                    let name = e.file_name().to_string_lossy().to_string();
+                    // Match actual devices like 1-1, 1-2, 2-1 (not root hubs like usb1, usb2)
+                    (name.starts_with("1-") || name.starts_with("2-")) && !name.contains(':')
+                })
+                .map(|e| e.path().to_string_lossy().to_string())
+                .collect();
+            devs.sort();
+            devs
+        })
+        .unwrap_or_default()
 }
 
 fn read_usb_attr(device_path: &str, attr: &str) -> String {
@@ -506,33 +610,112 @@ fn read_usb_attr(device_path: &str, attr: &str) -> String {
 
 fn handle_cellular(path: &str) -> Params {
     let mut result = Params::new();
-    
+
     if path.contains("InterfaceNumberOfEntries") {
-        // Check if modem exists using mmcli or qmi
-        let has_modem = std::process::Command::new("which")
-            .arg("mmcli")
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false);
+        let has_modem = get_mmcli_modem_index().is_some();
         result.insert(path.to_string(), if has_modem { "1" } else { "0" }.to_string());
     } else if path.contains("Interface.1.") {
-        // Check if modem is available
-        if path.ends_with("Status") {
-            let status = std::process::Command::new("mmcli")
-                .args(["-L"])
-                .output()
-                .ok()
-                .and_then(|o| String::from_utf8(o.stdout).ok())
-                .map(|s| if s.contains("No modems") { "Not present" } else { "Present" }.to_string())
-                .unwrap_or_else(|| "Not present".to_string());
-            result.insert(path.to_string(), status);
+        if let Some(modem_idx) = get_mmcli_modem_index() {
+            let modem_info = get_mmcli_info(&modem_idx);
+
+            if path.ends_with("Status") {
+                let status = modem_info.get("state").cloned().unwrap_or_else(|| "Unknown".to_string());
+                result.insert(path.to_string(), status);
+            } else if path.ends_with("IMEI") {
+                result.insert(path.to_string(), modem_info.get("imei").cloned().unwrap_or_default());
+            } else if path.ends_with("SignalStrength") {
+                result.insert(path.to_string(), modem_info.get("signal").cloned().unwrap_or_default());
+            } else if path.ends_with("Band") {
+                result.insert(path.to_string(), modem_info.get("band").cloned().unwrap_or_default());
+            } else if path.ends_with("RoamingStatus") {
+                result.insert(path.to_string(), modem_info.get("roaming").cloned().unwrap_or_else(|| "Unknown".to_string()));
+            } else {
+                result.insert(path.to_string(), "".to_string());
+            }
         } else {
-            // These would require parsing modem manager output
-            result.insert(path.to_string(), "".to_string());
+            result.insert(path.to_string(), "Not present".to_string());
         }
     }
-    
+
     result
+}
+
+/// Get modem index from mmcli -L (returns first modem index like "0")
+fn get_mmcli_modem_index() -> Option<String> {
+    let output = std::process::Command::new("mmcli")
+        .args(["-L"])
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())?;
+
+    // Parse line like: "/org/freedesktop/ModemManager1/Modem/0 [Quectel] EC25"
+    for line in output.lines() {
+        if line.contains("/Modem/") {
+            if let Some(idx_start) = line.rfind("/Modem/") {
+                let rest = &line[idx_start + 7..];
+                let idx: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+                if !idx.is_empty() {
+                    return Some(idx);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Get modem info from mmcli -m <idx>
+fn get_mmcli_info(modem_idx: &str) -> std::collections::HashMap<String, String> {
+    let mut info = std::collections::HashMap::new();
+
+    let output = std::process::Command::new("mmcli")
+        .args(["-m", modem_idx])
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .unwrap_or_default();
+
+    for line in output.lines() {
+        let trimmed = line.trim();
+        if trimmed.contains("imei") || trimmed.contains("IMEI") {
+            if let Some(val) = extract_mmcli_value(trimmed) {
+                info.insert("imei".to_string(), val);
+            }
+        }
+        if trimmed.contains("signal quality") {
+            if let Some(val) = extract_mmcli_value(trimmed) {
+                // Extract just the percentage number
+                let num: String = val.chars().take_while(|c| c.is_ascii_digit()).collect();
+                info.insert("signal".to_string(), num);
+            }
+        }
+        if trimmed.contains("state") && !trimmed.contains("power state") && !trimmed.contains("access") {
+            if let Some(val) = extract_mmcli_value(trimmed) {
+                info.insert("state".to_string(), val);
+            }
+        }
+        if trimmed.contains("current bands") || trimmed.contains("access technologies") {
+            if let Some(val) = extract_mmcli_value(trimmed) {
+                info.insert("band".to_string(), val);
+            }
+        }
+        if trimmed.contains("roaming") {
+            if let Some(val) = extract_mmcli_value(trimmed) {
+                info.insert("roaming".to_string(), val);
+            }
+        }
+    }
+
+    info
+}
+
+fn extract_mmcli_value(line: &str) -> Option<String> {
+    if let Some(colon_idx) = line.find(':') {
+        let val = line[colon_idx + 1..].trim().to_string();
+        if !val.is_empty() && val != "--" {
+            return Some(val);
+        }
+    }
+    None
 }
 
 // ── NeighborDiscovery ───────────────────────────────────────────────────────
@@ -580,6 +763,105 @@ fn get_neighbor(idx: usize) -> Option<Neighbor> {
     } else {
         None
     }
+}
+
+// ── DHCPv4 ──────────────────────────────────────────────────────────────────
+
+fn handle_dhcpv4(path: &str) -> Params {
+    let mut result = Params::new();
+
+    if path.contains("Server.Pool.") {
+        // Get DHCP pool info from UCI (dnsmasq or dhcp config)
+        let pool_idx = extract_index(path, "Pool.").unwrap_or(1);
+        // UCI: dhcp.lan (pool 1), dhcp.guest (pool 2), etc.
+        let pools = get_dhcp_pools();
+        let pool_name = pools.get(pool_idx - 1).cloned().unwrap_or_else(|| "lan".to_string());
+
+        if path.ends_with("Enable") {
+            let ignore = uci_get_raw(&format!("dhcp.{pool_name}.ignore")).unwrap_or_default();
+            let enabled = ignore != "1";
+            result.insert(path.to_string(), enabled.to_string());
+        } else if path.ends_with("Status") {
+            let ignore = uci_get_raw(&format!("dhcp.{pool_name}.ignore")).unwrap_or_default();
+            let status = if ignore == "1" { "Disabled" } else { "Enabled" };
+            result.insert(path.to_string(), status.to_string());
+        } else if path.ends_with("MinAddress") || path.ends_with("Start") {
+            let start = uci_get_raw(&format!("dhcp.{pool_name}.start")).unwrap_or_else(|| "100".to_string());
+            result.insert(path.to_string(), start);
+        } else if path.ends_with("MaxAddress") || path.ends_with("Limit") {
+            let limit = uci_get_raw(&format!("dhcp.{pool_name}.limit")).unwrap_or_else(|| "150".to_string());
+            result.insert(path.to_string(), limit);
+        } else if path.ends_with("SubnetMask") {
+            // Read from network config for this pool's interface
+            let iface = uci_get_raw(&format!("dhcp.{pool_name}.interface")).unwrap_or_else(|| pool_name.clone());
+            let mask = uci_get_raw(&format!("network.{iface}.netmask")).unwrap_or_else(|| "255.255.255.0".to_string());
+            result.insert(path.to_string(), mask);
+        } else if path.ends_with("DomainName") {
+            let domain = uci_get_raw("dhcp.@dnsmasq[0].domain").unwrap_or_else(|| "lan".to_string());
+            result.insert(path.to_string(), domain);
+        } else if path.ends_with("LeaseTime") {
+            let leasetime = uci_get_raw(&format!("dhcp.{pool_name}.leasetime")).unwrap_or_else(|| "12h".to_string());
+            result.insert(path.to_string(), leasetime);
+        } else if path.ends_with("LeaseNumberOfEntries") {
+            // Count active leases from /tmp/dhcp.leases
+            let count = std::fs::read_to_string("/tmp/dhcp.leases")
+                .map(|s| s.lines().filter(|l| !l.trim().is_empty()).count())
+                .unwrap_or(0);
+            result.insert(path.to_string(), count.to_string());
+        } else if path.ends_with("StaticAddressNumberOfEntries") {
+            // Count static hosts from UCI
+            let output = std::process::Command::new("uci")
+                .args(["show", "dhcp"])
+                .output()
+                .ok()
+                .and_then(|o| String::from_utf8(o.stdout).ok())
+                .unwrap_or_default();
+            let count = output.lines().filter(|l| l.contains("@host[") && l.contains(".mac=")).count();
+            result.insert(path.to_string(), count.to_string());
+        } else if path.ends_with("Interface") || path.ends_with("X_OptimACS_Interface") {
+            let iface = uci_get_raw(&format!("dhcp.{pool_name}.interface")).unwrap_or_else(|| pool_name.clone());
+            result.insert(path.to_string(), iface);
+        } else if path.ends_with("DNSServers") || path.ends_with("X_OptimACS_DNSServers") {
+            let dns = uci_get_raw(&format!("dhcp.{pool_name}.dhcp_option"))
+                .unwrap_or_default();
+            let dns_servers: String = dns.split_whitespace()
+                .filter(|o| o.starts_with("6,"))
+                .map(|o| o.trim_start_matches("6,"))
+                .collect::<Vec<&str>>()
+                .join(",");
+            result.insert(path.to_string(), dns_servers);
+        }
+    } else if path.contains("Server.PoolNumberOfEntries") {
+        let count = get_dhcp_pools().len();
+        result.insert(path.to_string(), count.to_string());
+    }
+
+    result
+}
+
+fn get_dhcp_pools() -> Vec<String> {
+    let output = std::process::Command::new("uci")
+        .args(["show", "dhcp"])
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .unwrap_or_default();
+
+    let mut pools = Vec::new();
+    for line in output.lines() {
+        // Look for sections that have start= (indicating DHCP pool)
+        if line.starts_with("dhcp.") && line.contains(".start=") {
+            if let Some(section) = line.split('.').nth(1) {
+                if !pools.contains(&section.to_string()) {
+                    pools.push(section.to_string());
+                }
+            }
+        }
+    }
+    if pools.is_empty() {
+        pools.push("lan".to_string());
+    }
+    pools
 }
 
 // ── Helper Functions ────────────────────────────────────────────────────────
