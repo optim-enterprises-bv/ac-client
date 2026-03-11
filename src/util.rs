@@ -103,7 +103,7 @@ pub fn read_fw_version() -> String {
 
 // ── System stats (/proc) ──────────────────────────────────────────────────────
 
-/// Return uptime as a formatted string "Xd Xh Xm Xs".
+/// Return uptime in seconds (TR-181 Device.DeviceInfo.UpTime is an integer).
 pub fn read_uptime() -> String {
     let content = fs::read_to_string("/proc/uptime").unwrap_or_default();
     let secs_f: f64 = content
@@ -111,14 +111,7 @@ pub fn read_uptime() -> String {
         .next()
         .and_then(|s| s.parse().ok())
         .unwrap_or(0.0);
-    let secs = secs_f as u64;
-    format!(
-        "{}d {}h {}m {}s",
-        secs / 86400,
-        (secs % 86400) / 3600,
-        (secs % 3600) / 60,
-        secs % 60
-    )
+    (secs_f as u64).to_string()
 }
 
 /// Return the load average string (e.g. "0.10 0.05 0.01").
