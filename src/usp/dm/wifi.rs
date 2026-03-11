@@ -148,16 +148,28 @@ pub async fn get(_cfg: &ClientConfig, path: &str) -> HashMap<String, String> {
                 m.insert(format!("Device.WiFi.SSID.{ssid_idx}.Status"), if enable { "Up" } else { "Down" }.to_string());
                 // Try to get BSSID for this SSID's interface
                 let iface_name = uci_get(&format!("wireless.{iface}.ifname"));
+                let device = uci_get(&format!("wireless.{iface}.device"));
                 let net_iface = if !iface_name.is_empty() { iface_name } else {
-                    // Derive from radio assignment
-                    let device = uci_get(&format!("wireless.{iface}.device"));
                     get_phy_interface(&device)
                 };
+                let mut bssid = String::new();
                 if !net_iface.is_empty() {
-                    let bssid = get_iw_bssid(&net_iface);
-                    if !bssid.is_empty() {
-                        m.insert(format!("Device.WiFi.SSID.{ssid_idx}.BSSID"), bssid);
+                    bssid = get_iw_bssid(&net_iface);
+                    if bssid.is_empty() {
+                        // Fallback: read MAC from /sys/class/net/<iface>/address
+                        bssid = get_sysfs_mac(&net_iface);
                     }
+                }
+                // Fallback: UCI macaddr for this wifi-iface
+                if bssid.is_empty() {
+                    bssid = uci_get(&format!("wireless.{iface}.macaddr"));
+                }
+                // Fallback: UCI macaddr for the parent radio device
+                if bssid.is_empty() && !device.is_empty() {
+                    bssid = uci_get(&format!("wireless.{device}.macaddr"));
+                }
+                if !bssid.is_empty() {
+                    m.insert(format!("Device.WiFi.SSID.{ssid_idx}.BSSID"), bssid);
                 }
             }
         }
@@ -199,11 +211,21 @@ pub async fn get(_cfg: &ClientConfig, path: &str) -> HashMap<String, String> {
             // BSSID for this AccessPoint (from the corresponding wireless interface)
             let ap_device = uci_get(&format!("wireless.{iface}.device"));
             let ap_phy = if !ap_device.is_empty() { get_phy_interface(&ap_device) } else { String::new() };
+            let mut ap_bssid = String::new();
             if !ap_phy.is_empty() {
-                let bssid = get_iw_bssid(&ap_phy);
-                if !bssid.is_empty() {
-                    m.insert(format!("Device.WiFi.AccessPoint.{ap_idx}.BSSID"), bssid);
+                ap_bssid = get_iw_bssid(&ap_phy);
+                if ap_bssid.is_empty() {
+                    ap_bssid = get_sysfs_mac(&ap_phy);
                 }
+            }
+            if ap_bssid.is_empty() {
+                ap_bssid = uci_get(&format!("wireless.{iface}.macaddr"));
+            }
+            if ap_bssid.is_empty() && !ap_device.is_empty() {
+                ap_bssid = uci_get(&format!("wireless.{ap_device}.macaddr"));
+            }
+            if !ap_bssid.is_empty() {
+                m.insert(format!("Device.WiFi.AccessPoint.{ap_idx}.BSSID"), ap_bssid);
             }
 
             // SSIDAdvertisementEnabled (inverse of UCI hidden flag)
@@ -275,7 +297,12 @@ pub async fn get(_cfg: &ClientConfig, path: &str) -> HashMap<String, String> {
                 m.insert(format!("Device.WiFi.Radio.{radio_idx}.OperatingFrequencyBand"), band_friendly.to_string());
             }
             if !htmode.is_empty() {
-                m.insert(format!("Device.WiFi.Radio.{radio_idx}.OperatingChannelBandwidth"), htmode);
+                m.insert(format!("Device.WiFi.Radio.{radio_idx}.OperatingChannelBandwidth"), htmode.clone());
+                // Derive MaxBitRate from htmode and band
+                let max_bitrate = estimate_max_bitrate(&htmode, &band);
+                if !max_bitrate.is_empty() {
+                    m.insert(format!("Device.WiFi.Radio.{radio_idx}.MaxBitRate"), max_bitrate);
+                }
             }
             if !txpower.is_empty() {
                 m.insert(format!("Device.WiFi.Radio.{radio_idx}.TransmitPower"), txpower);
@@ -326,11 +353,22 @@ pub async fn get(_cfg: &ClientConfig, path: &str) -> HashMap<String, String> {
             let status = if enable && !phy_iface.is_empty() { "Up" } else { "Down" };
             m.insert(format!("Device.WiFi.Radio.{radio_idx}.Status"), status.to_string());
 
+            // BSSID with fallbacks
+            let mut radio_bssid = String::new();
             if !phy_iface.is_empty() {
-                let bssid = get_iw_bssid(&phy_iface);
-                if !bssid.is_empty() {
-                    m.insert(format!("Device.WiFi.Radio.{radio_idx}.X_OptimACS_BSSID"), bssid);
+                radio_bssid = get_iw_bssid(&phy_iface);
+                if radio_bssid.is_empty() {
+                    radio_bssid = get_sysfs_mac(&phy_iface);
                 }
+            }
+            if radio_bssid.is_empty() {
+                radio_bssid = uci_get(&format!("wireless.{device}.macaddr"));
+            }
+            if !radio_bssid.is_empty() {
+                m.insert(format!("Device.WiFi.Radio.{radio_idx}.X_OptimACS_BSSID"), radio_bssid);
+            }
+
+            if !phy_iface.is_empty() {
                 let bitrate = get_iw_bitrate(&phy_iface);
                 if !bitrate.is_empty() {
                     m.insert(format!("Device.WiFi.Radio.{radio_idx}.X_OptimACS_Bitrate"), bitrate);
@@ -507,6 +545,45 @@ fn get_phy_interface(device: &str) -> String {
     }
 
     iface_name
+}
+
+/// Estimate max PHY bitrate from htmode and band
+fn estimate_max_bitrate(htmode: &str, band: &str) -> String {
+    // Approximate maximum PHY rates for common configurations
+    let rate = match htmode {
+        // 802.11be (EHT)
+        "EHT320" => "46080 Mbps",
+        "EHT160" => "23040 Mbps",
+        "EHT80" if band == "6g" => "11520 Mbps",
+        "EHT80" => "11520 Mbps",
+        "EHT40" => "5760 Mbps",
+        "EHT20" => "2880 Mbps",
+        // 802.11ax (HE)
+        "HE160" => "9608 Mbps",
+        "HE80" => "4804 Mbps",
+        "HE40" => "2402 Mbps",
+        "HE20" => "1201 Mbps",
+        // 802.11ac (VHT)
+        "VHT160" => "6933 Mbps",
+        "VHT80" => "3467 Mbps",
+        "VHT40" => "1733 Mbps",
+        "VHT20" => "867 Mbps",
+        // 802.11n (HT)
+        "HT40" => "300 Mbps",
+        "HT20" => "144 Mbps",
+        // Legacy
+        _ => "",
+    };
+    rate.to_string()
+}
+
+/// Read MAC address from /sys/class/net/<iface>/address
+fn get_sysfs_mac(iface: &str) -> String {
+    std::fs::read_to_string(format!("/sys/class/net/{iface}/address"))
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty() && s != "00:00:00:00:00:00")
+        .unwrap_or_default()
 }
 
 /// Get BSSID from `iw dev <iface> info`
