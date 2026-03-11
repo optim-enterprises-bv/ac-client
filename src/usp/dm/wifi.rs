@@ -238,7 +238,15 @@ pub async fn get(_cfg: &ClientConfig, path: &str) -> HashMap<String, String> {
             }
             m.insert(format!("Device.WiFi.Radio.{radio_idx}.Enable"), enable.to_string());
             if !band.is_empty() {
-                m.insert(format!("Device.WiFi.Radio.{radio_idx}.OperatingFrequencyBand"), band);
+                // Map UCI band values to TR-181 OperatingFrequencyBand
+                let band_friendly = match band.as_str() {
+                    "2g" => "2.4GHz",
+                    "5g" => "5GHz",
+                    "6g" => "6GHz",
+                    "60g" => "60GHz",
+                    other => other,
+                };
+                m.insert(format!("Device.WiFi.Radio.{radio_idx}.OperatingFrequencyBand"), band_friendly.to_string());
             }
             if !htmode.is_empty() {
                 m.insert(format!("Device.WiFi.Radio.{radio_idx}.OperatingChannelBandwidth"), htmode);
@@ -251,6 +259,34 @@ pub async fn get(_cfg: &ClientConfig, path: &str) -> HashMap<String, String> {
             }
             if !dtim_period.is_empty() {
                 m.insert(format!("Device.WiFi.Radio.{radio_idx}.DTIMPeriod"), dtim_period);
+            }
+
+            // Additional radio params
+            let rts_threshold = uci_get(&format!("wireless.{device}.rts"));
+            if !rts_threshold.is_empty() {
+                m.insert(format!("Device.WiFi.Radio.{radio_idx}.RTSThreshold"), rts_threshold);
+            } else {
+                m.insert(format!("Device.WiFi.Radio.{radio_idx}.RTSThreshold"), "2347".to_string());
+            }
+
+            let guard_interval = uci_get(&format!("wireless.{device}.short_gi"));
+            let gi_value = match guard_interval.as_str() {
+                "0" => "Long",
+                "1" | "" => "Auto",
+                _ => "Auto",
+            };
+            m.insert(format!("Device.WiFi.Radio.{radio_idx}.GuardInterval"), gi_value.to_string());
+
+            // IEEE 802.11h (DFS/TPC) — enabled by default on 5GHz
+            let band_val = uci_get(&format!("wireless.{device}.band"));
+            let ieee80211h = band_val == "5g" || band_val == "6g";
+            m.insert(format!("Device.WiFi.Radio.{radio_idx}.IEEE80211hEnabled"), ieee80211h.to_string());
+
+            let max_assoc = uci_get(&format!("wireless.{device}.maxassoc"));
+            if !max_assoc.is_empty() {
+                m.insert(format!("Device.WiFi.Radio.{radio_idx}.MaxAssociatedDevices"), max_assoc);
+            } else {
+                m.insert(format!("Device.WiFi.Radio.{radio_idx}.MaxAssociatedDevices"), "0".to_string());
             }
 
             // Radio Status: Up if enabled and phy interface exists, Down otherwise
@@ -269,6 +305,47 @@ pub async fn get(_cfg: &ClientConfig, path: &str) -> HashMap<String, String> {
                 }
                 let assoc_count = get_associated_device_count(&phy_iface);
                 m.insert(format!("Device.WiFi.Radio.{radio_idx}.AssociatedDeviceNumberOfEntries"), assoc_count.to_string());
+            }
+        }
+    }
+
+    // Handle AssociatedDevice requests (connected WiFi clients)
+    if path.contains("AssociatedDevice.") || path.ends_with("Device.WiFi.") {
+        for (idx, iface) in ifaces.iter().enumerate() {
+            let ap_idx = idx + 1;
+            let device = uci_get(&format!("wireless.{iface}.device"));
+            let phy_iface = if !device.is_empty() { get_phy_interface(&device) } else { String::new() };
+            if !phy_iface.is_empty() {
+                let stations = get_station_dump(&phy_iface);
+                for (sta_idx, sta) in stations.iter().enumerate() {
+                    let si = sta_idx + 1;
+                    let base = format!("Device.WiFi.AccessPoint.{ap_idx}.AssociatedDevice.{si}");
+                    if let Some(mac) = sta.get("mac") {
+                        m.insert(format!("{base}.MACAddress"), mac.clone());
+                    }
+                    if let Some(signal) = sta.get("signal") {
+                        m.insert(format!("{base}.SignalStrength"), signal.clone());
+                    }
+                    if let Some(tx_rate) = sta.get("tx_bitrate") {
+                        m.insert(format!("{base}.LastDataDownlinkRate"), tx_rate.clone());
+                    }
+                    if let Some(rx_rate) = sta.get("rx_bitrate") {
+                        m.insert(format!("{base}.LastDataUplinkRate"), rx_rate.clone());
+                    }
+                    if let Some(tx_bytes) = sta.get("tx_bytes") {
+                        m.insert(format!("{base}.BytesSent"), tx_bytes.clone());
+                    }
+                    if let Some(rx_bytes) = sta.get("rx_bytes") {
+                        m.insert(format!("{base}.BytesReceived"), rx_bytes.clone());
+                    }
+                    // Try to resolve IP from ARP table
+                    if let Some(mac) = sta.get("mac") {
+                        let ip = resolve_ip_from_arp(mac);
+                        if !ip.is_empty() {
+                            m.insert(format!("{base}.IPAddress"), ip);
+                        }
+                    }
+                }
             }
         }
     }
@@ -372,6 +449,112 @@ fn get_iw_bitrate(iface: &str) -> String {
             return trimmed.trim_start_matches("tx bitrate:").trim().to_string();
         }
     }
+    String::new()
+}
+
+/// Parse `iw dev <iface> station dump` into per-station maps
+fn get_station_dump(iface: &str) -> Vec<HashMap<String, String>> {
+    let output = std::process::Command::new("iw")
+        .args(["dev", iface, "station", "dump"])
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .unwrap_or_default();
+
+    let mut stations = Vec::new();
+    let mut current: Option<HashMap<String, String>> = None;
+
+    for line in output.lines() {
+        if line.starts_with("Station ") {
+            // Save previous station
+            if let Some(sta) = current.take() {
+                stations.push(sta);
+            }
+            let mut sta = HashMap::new();
+            // "Station aa:bb:cc:dd:ee:ff (on wlan0)"
+            if let Some(mac) = line.split_whitespace().nth(1) {
+                sta.insert("mac".to_string(), mac.to_uppercase());
+            }
+            current = Some(sta);
+        } else if let Some(ref mut sta) = current {
+            let trimmed = line.trim();
+            if let Some((key, val)) = trimmed.split_once(':') {
+                let key = key.trim();
+                let val = val.trim();
+                match key {
+                    "signal" => {
+                        // "signal:  -42 [-42, -48] dBm" → extract first number
+                        let dbm = val.split_whitespace().next().unwrap_or(val);
+                        sta.insert("signal".to_string(), dbm.to_string());
+                    }
+                    "tx bitrate" => {
+                        // "tx bitrate:  866.7 MBit/s ..." → extract rate in kbps
+                        if let Some(rate_str) = val.split_whitespace().next() {
+                            if let Ok(mbps) = rate_str.parse::<f64>() {
+                                sta.insert("tx_bitrate".to_string(), format!("{}", (mbps * 1000.0) as u64));
+                            } else {
+                                sta.insert("tx_bitrate".to_string(), val.to_string());
+                            }
+                        }
+                    }
+                    "rx bitrate" => {
+                        if let Some(rate_str) = val.split_whitespace().next() {
+                            if let Ok(mbps) = rate_str.parse::<f64>() {
+                                sta.insert("rx_bitrate".to_string(), format!("{}", (mbps * 1000.0) as u64));
+                            } else {
+                                sta.insert("rx_bitrate".to_string(), val.to_string());
+                            }
+                        }
+                    }
+                    "rx bytes" => {
+                        sta.insert("rx_bytes".to_string(), val.to_string());
+                    }
+                    "tx bytes" => {
+                        sta.insert("tx_bytes".to_string(), val.to_string());
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    // Don't forget last station
+    if let Some(sta) = current {
+        stations.push(sta);
+    }
+
+    stations
+}
+
+/// Resolve IP address from ARP/neighbor table by MAC
+fn resolve_ip_from_arp(mac: &str) -> String {
+    let mac_lower = mac.to_lowercase();
+
+    // Try /proc/net/arp first
+    if let Ok(content) = std::fs::read_to_string("/proc/net/arp") {
+        for line in content.lines().skip(1) {
+            let fields: Vec<&str> = line.split_whitespace().collect();
+            if fields.len() >= 4 && fields[3].to_lowercase() == mac_lower {
+                return fields[0].to_string();
+            }
+        }
+    }
+
+    // Fallback: ip neigh
+    let output = std::process::Command::new("ip")
+        .args(["neigh", "show"])
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .unwrap_or_default();
+
+    for line in output.lines() {
+        if line.to_lowercase().contains(&mac_lower) {
+            if let Some(ip) = line.split_whitespace().next() {
+                return ip.to_string();
+            }
+        }
+    }
+
     String::new()
 }
 
