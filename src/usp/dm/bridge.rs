@@ -287,27 +287,45 @@ async fn get_bridge_params(bridge_name: &str) -> Params {
         } else {
             params.insert("Ports".to_string(), "".to_string());
         }
-        
+
         // Get proto from interface
         let proto = uci_get(&format!("network.{}.proto", iface_name));
-        params.insert("Proto".to_string(), 
-            if proto.is_empty() { "none".to_string() } else { proto });
-        
-        // Get IP address
-        let ipaddr = uci_get(&format!("network.{}.ipaddr", iface_name));
+        params.insert("Proto".to_string(),
+            if proto.is_empty() { "none".to_string() } else { proto.clone() });
+
+        // Get IP/netmask/gateway from UCI first, then fall back to runtime state
+        let mut ipaddr = uci_get(&format!("network.{}.ipaddr", iface_name));
+        let mut netmask = uci_get(&format!("network.{}.netmask", iface_name));
+        let mut gateway = uci_get(&format!("network.{}.gateway", iface_name));
+        let mut dns = String::new();
+
+        // For DHCP/dynamic protocols, UCI won't have IP info — get from ubus runtime
+        if ipaddr.is_empty() || (proto == "dhcp" || proto == "dhcpv6" || proto == "pppoe") {
+            let rt = get_ubus_interface_status(&iface_name);
+            if let Some(ip) = rt.get("ipaddr") {
+                if !ip.is_empty() { ipaddr = ip.clone(); }
+            }
+            if let Some(mask) = rt.get("netmask") {
+                if !mask.is_empty() { netmask = mask.clone(); }
+            }
+            if let Some(gw) = rt.get("gateway") {
+                if !gw.is_empty() { gateway = gw.clone(); }
+            }
+            if let Some(d) = rt.get("dns") {
+                dns = d.clone();
+            }
+        }
+
         params.insert("IPAddress".to_string(), ipaddr);
-        
-        // Get netmask
-        let netmask = uci_get(&format!("network.{}.netmask", iface_name));
         params.insert("Netmask".to_string(), netmask);
-        
-        // Get gateway
-        let gateway = uci_get(&format!("network.{}.gateway", iface_name));
         params.insert("Gateway".to_string(), gateway);
-        
+        if !dns.is_empty() {
+            params.insert("DNS".to_string(), dns);
+        }
+
         // Enable - check if interface is disabled
         let enabled = uci_get(&format!("network.{}.enabled", iface_name));
-        params.insert("Enable".to_string(), 
+        params.insert("Enable".to_string(),
             if enabled == "0" { "false".to_string() } else { "true".to_string() });
     } else {
         // No interface found using this bridge
@@ -330,6 +348,116 @@ async fn get_bridge_params(bridge_name: &str) -> Params {
 async fn get_bridge_param(bridge_name: &str, param: &str) -> String {
     let params = get_bridge_params(bridge_name).await;
     params.get(param).cloned().unwrap_or_default()
+}
+
+/// Query `ubus call network.interface.<name> status` for runtime IP state.
+/// Returns a map with keys: ipaddr, netmask, gateway, dns, uptime.
+fn get_ubus_interface_status(iface_name: &str) -> HashMap<String, String> {
+    let mut result = HashMap::new();
+
+    let out = std::process::Command::new("ubus")
+        .args(["call", &format!("network.interface.{}", iface_name), "status"])
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .unwrap_or_default();
+
+    if out.is_empty() {
+        return result;
+    }
+
+    // Parse ipv4-address[0].address and mask
+    // Format: "ipv4-address": [ { "address": "...", "mask": N } ]
+    if let Some(pos) = out.find("\"ipv4-address\"") {
+        let chunk = &out[pos..];
+        if let Some(addr_pos) = chunk.find("\"address\"") {
+            let after = &chunk[addr_pos + 9..];
+            if let Some(start) = after.find('"') {
+                let rest = &after[start + 1..];
+                if let Some(end) = rest.find('"') {
+                    result.insert("ipaddr".to_string(), rest[..end].to_string());
+                }
+            }
+        }
+        if let Some(mask_pos) = chunk.find("\"mask\"") {
+            let after = &chunk[mask_pos + 5..];
+            // Find the number after ":"
+            let after = after.trim_start_matches(|c: char| !c.is_ascii_digit());
+            if let Some(end) = after.find(|c: char| !c.is_ascii_digit()) {
+                if let Ok(cidr) = after[..end].parse::<u32>() {
+                    result.insert("netmask".to_string(), cidr_to_netmask(cidr));
+                }
+            }
+        }
+    }
+
+    // Parse default route gateway
+    // "route": [ { "target": "0.0.0.0", "mask": 0, "nexthop": "..." } ]
+    if let Some(pos) = out.find("\"route\"") {
+        let chunk = &out[pos..];
+        // Find nexthop from the default route (target 0.0.0.0)
+        let mut search = chunk;
+        while let Some(nh_pos) = search.find("\"nexthop\"") {
+            let after = &search[nh_pos + 9..];
+            if let Some(start) = after.find('"') {
+                let rest = &after[start + 1..];
+                if let Some(end) = rest.find('"') {
+                    let nexthop = &rest[..end];
+                    if nexthop != "0.0.0.0" && !nexthop.is_empty() {
+                        result.insert("gateway".to_string(), nexthop.to_string());
+                        break;
+                    }
+                }
+            }
+            search = &search[nh_pos + 10..];
+        }
+    }
+
+    // Parse dns-server array
+    if let Some(pos) = out.find("\"dns-server\"") {
+        let chunk = &out[pos..];
+        if let Some(arr_start) = chunk.find('[') {
+            if let Some(arr_end) = chunk[arr_start..].find(']') {
+                let arr = &chunk[arr_start..arr_start + arr_end];
+                let servers: Vec<&str> = arr
+                    .split('"')
+                    .filter(|s| !s.is_empty() && !s.contains('[') && !s.contains(',') && s.trim() != ",")
+                    .filter(|s| s.contains('.') || s.contains(':'))
+                    .collect();
+                if !servers.is_empty() {
+                    result.insert("dns".to_string(), servers.join(","));
+                }
+            }
+        }
+    }
+
+    // Parse uptime
+    if let Some(pos) = out.find("\"uptime\"") {
+        let after = &out[pos + 8..];
+        let after = after.trim_start_matches(|c: char| !c.is_ascii_digit());
+        if let Some(end) = after.find(|c: char| !c.is_ascii_digit()) {
+            if let Ok(secs) = after[..end].parse::<u64>() {
+                result.insert("uptime".to_string(), secs.to_string());
+            }
+        }
+    }
+
+    result
+}
+
+/// Convert CIDR prefix length to dotted-decimal subnet mask
+fn cidr_to_netmask(cidr: u32) -> String {
+    if cidr == 0 {
+        return "0.0.0.0".to_string();
+    }
+    let mask: u32 = !0u32 << (32 - cidr.min(32));
+    format!(
+        "{}.{}.{}.{}",
+        (mask >> 24) & 0xFF,
+        (mask >> 16) & 0xFF,
+        (mask >> 8) & 0xFF,
+        mask & 0xFF,
+    )
 }
 
 /// Get interface operational status

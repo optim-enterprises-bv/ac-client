@@ -102,12 +102,21 @@ pub async fn get(_cfg: &ClientConfig, path: &str) -> HashMap<String, String> {
         for (idx, (section, _name)) in interfaces.iter().enumerate() {
             let iface_idx = idx + 1;
             let base = format!("Device.IP.Interface.{iface_idx}.IPv4Address.1.");
-            
-            let ip = uci_get(&format!("network.{section}.ipaddr"));
-            let mask = uci_get(&format!("network.{section}.netmask"));
+
+            let mut ip = uci_get(&format!("network.{section}.ipaddr"));
+            let mut mask = uci_get(&format!("network.{section}.netmask"));
             let proto = uci_get(&format!("network.{section}.proto"));
-            let gateway = uci_get(&format!("network.{section}.gateway"));
-            let dns = uci_get(&format!("network.{section}.dns"));
+            let mut gateway = uci_get(&format!("network.{section}.gateway"));
+            let mut dns = uci_get(&format!("network.{section}.dns"));
+
+            // For DHCP/dynamic protocols, get runtime state from ubus
+            if ip.is_empty() || proto == "dhcp" || proto == "dhcpv6" || proto == "pppoe" {
+                let rt = get_ubus_interface_status(section);
+                if let Some(v) = rt.get("ipaddr") { if !v.is_empty() { ip = v.clone(); } }
+                if let Some(v) = rt.get("netmask") { if !v.is_empty() { mask = v.clone(); } }
+                if let Some(v) = rt.get("gateway") { if !v.is_empty() { gateway = v.clone(); } }
+                if let Some(v) = rt.get("dns") { if !v.is_empty() { dns = v.clone(); } }
+            }
             
             // Get interface name and stats
             let bridge_name = format!("br-{section}");
@@ -183,12 +192,21 @@ pub async fn get(_cfg: &ClientConfig, path: &str) -> HashMap<String, String> {
             let (section, _name) = &interfaces[idx - 1];
             let base = format!("Device.IP.Interface.{idx}.IPv4Address.1.");
             let bridge_name = format!("br-{section}");
-            
-            let ip = uci_get(&format!("network.{section}.ipaddr"));
-            let mask = uci_get(&format!("network.{section}.netmask"));
+
+            let mut ip = uci_get(&format!("network.{section}.ipaddr"));
+            let mut mask = uci_get(&format!("network.{section}.netmask"));
             let proto = uci_get(&format!("network.{section}.proto"));
-            let gateway = uci_get(&format!("network.{section}.gateway"));
-            let dns = uci_get(&format!("network.{section}.dns"));
+            let mut gateway = uci_get(&format!("network.{section}.gateway"));
+            let mut dns = uci_get(&format!("network.{section}.dns"));
+
+            // For DHCP/dynamic protocols, get runtime state from ubus
+            if ip.is_empty() || proto == "dhcp" || proto == "dhcpv6" || proto == "pppoe" {
+                let rt = get_ubus_interface_status(section);
+                if let Some(v) = rt.get("ipaddr") { if !v.is_empty() { ip = v.clone(); } }
+                if let Some(v) = rt.get("netmask") { if !v.is_empty() { mask = v.clone(); } }
+                if let Some(v) = rt.get("gateway") { if !v.is_empty() { gateway = v.clone(); } }
+                if let Some(v) = rt.get("dns") { if !v.is_empty() { dns = v.clone(); } }
+            }
             let stats = get_interface_stats(&bridge_name).await;
             let mac = get_interface_mac(&bridge_name).await;
             let status = get_interface_status(&bridge_name).await;
@@ -330,6 +348,101 @@ async fn reload_network() -> Result<(), String> {
     
     warn!("Network reload command failed, changes will apply on reboot");
     Ok(()) // Don't fail the operation
+}
+
+/// Query `ubus call network.interface.<name> status` for runtime IP state.
+/// Returns a map with keys: ipaddr, netmask, gateway, dns.
+fn get_ubus_interface_status(iface_name: &str) -> HashMap<String, String> {
+    let mut result = HashMap::new();
+
+    let out = std::process::Command::new("ubus")
+        .args(["call", &format!("network.interface.{}", iface_name), "status"])
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .unwrap_or_default();
+
+    if out.is_empty() {
+        return result;
+    }
+
+    // Parse ipv4-address[0].address and mask
+    if let Some(pos) = out.find("\"ipv4-address\"") {
+        let chunk = &out[pos..];
+        if let Some(addr_pos) = chunk.find("\"address\"") {
+            let after = &chunk[addr_pos + 9..];
+            if let Some(start) = after.find('"') {
+                let rest = &after[start + 1..];
+                if let Some(end) = rest.find('"') {
+                    result.insert("ipaddr".to_string(), rest[..end].to_string());
+                }
+            }
+        }
+        if let Some(mask_pos) = chunk.find("\"mask\"") {
+            let after = &chunk[mask_pos + 5..];
+            let after = after.trim_start_matches(|c: char| !c.is_ascii_digit());
+            if let Some(end) = after.find(|c: char| !c.is_ascii_digit()) {
+                if let Ok(cidr) = after[..end].parse::<u32>() {
+                    result.insert("netmask".to_string(), cidr_to_netmask(cidr));
+                }
+            }
+        }
+    }
+
+    // Parse default route gateway
+    if let Some(pos) = out.find("\"route\"") {
+        let chunk = &out[pos..];
+        let mut search = chunk;
+        while let Some(nh_pos) = search.find("\"nexthop\"") {
+            let after = &search[nh_pos + 9..];
+            if let Some(start) = after.find('"') {
+                let rest = &after[start + 1..];
+                if let Some(end) = rest.find('"') {
+                    let nexthop = &rest[..end];
+                    if nexthop != "0.0.0.0" && !nexthop.is_empty() {
+                        result.insert("gateway".to_string(), nexthop.to_string());
+                        break;
+                    }
+                }
+            }
+            search = &search[nh_pos + 10..];
+        }
+    }
+
+    // Parse dns-server array
+    if let Some(pos) = out.find("\"dns-server\"") {
+        let chunk = &out[pos..];
+        if let Some(arr_start) = chunk.find('[') {
+            if let Some(arr_end) = chunk[arr_start..].find(']') {
+                let arr = &chunk[arr_start..arr_start + arr_end];
+                let servers: Vec<&str> = arr
+                    .split('"')
+                    .filter(|s| !s.is_empty() && !s.contains('[') && !s.contains(',') && s.trim() != ",")
+                    .filter(|s| s.contains('.') || s.contains(':'))
+                    .collect();
+                if !servers.is_empty() {
+                    result.insert("dns".to_string(), servers.join(","));
+                }
+            }
+        }
+    }
+
+    result
+}
+
+/// Convert CIDR prefix length to dotted-decimal subnet mask
+fn cidr_to_netmask(cidr: u32) -> String {
+    if cidr == 0 {
+        return "0.0.0.0".to_string();
+    }
+    let mask: u32 = !0u32 << (32 - cidr.min(32));
+    format!(
+        "{}.{}.{}.{}",
+        (mask >> 24) & 0xFF,
+        (mask >> 16) & 0xFF,
+        (mask >> 8) & 0xFF,
+        mask & 0xFF,
+    )
 }
 
 /// Get interface statistics from /proc/net/dev
