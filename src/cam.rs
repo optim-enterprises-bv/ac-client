@@ -9,13 +9,11 @@
 
 #![allow(dead_code, clippy::all)]
 
-use std::path::PathBuf;
 use std::time::Duration;
 
 use log::{debug, info, warn};
 use reqwest::Client;
 
-use crate::config::ClientConfig;
 use crate::error::{AcError, Result};
 use crate::util;
 
@@ -78,31 +76,6 @@ async fn is_axis_camera(http: &Client, ip: &str) -> bool {
     false
 }
 
-/// Retrieve the SD card status for a camera.
-pub async fn get_sd_status(http: &Client, ip: &str) -> String {
-    let url = format!("http://{ip}/axis-cgi/disks/list.cgi?diskid=SD_DISK");
-    match http
-        .get(&url)
-        .timeout(Duration::from_secs(5))
-        .send()
-        .await
-        .and_then(|r| Ok(r))
-    {
-        Ok(resp) => {
-            let status = resp.status();
-            if status.is_success() {
-                "ok".to_string()
-            } else {
-                format!("http-{}", status.as_u16())
-            }
-        }
-        Err(e) => {
-            debug!("SD status check for {ip} failed: {e}");
-            "unknown".to_string()
-        }
-    }
-}
-
 /// Capture a JPEG snapshot from an Axis camera.
 ///
 /// Returns the raw JPEG bytes, or `None` if the capture failed.
@@ -149,24 +122,3 @@ pub fn build_camera_http_client() -> Result<Client> {
         .map_err(AcError::Http)
 }
 
-/// Save a camera image to the local image directory.
-///
-/// `img_dir/<mac_no_colons>/<timestamp>.jpg`
-pub async fn save_image_locally(
-    cfg:    &ClientConfig,
-    camera: &Camera,
-    image:  &[u8],
-) -> Option<PathBuf> {
-    let dir = cfg.img_dir.join(util::mac_no_colons(&camera.mac));
-    if let Err(e) = tokio::fs::create_dir_all(&dir).await {
-        warn!("cannot create image dir {}: {e}", dir.display());
-        return None;
-    }
-    let ts = chrono::Local::now().format("%Y%m%d%H%M%S").to_string();
-    let path = dir.join(format!("{ts}.jpg"));
-    if let Err(e) = tokio::fs::write(&path, image).await {
-        warn!("cannot write image {}: {e}", path.display());
-        return None;
-    }
-    Some(path)
-}

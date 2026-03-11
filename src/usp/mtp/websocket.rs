@@ -23,10 +23,11 @@ const RECONNECT_DELAY: Duration = Duration::from_secs(10);
 
 /// Generate a Sec-WebSocket-Key header value (base64-encoded 16-byte nonce)
 fn generate_websocket_key() -> String {
+    use base64::Engine;
     use rand::Rng;
     let mut nonce = [0u8; 16];
     rand::thread_rng().fill(&mut nonce);
-    base64::encode(nonce)
+    base64::engine::general_purpose::STANDARD.encode(nonce)
 }
 
 /// Run the WebSocket MTP agent loop.  Reconnects automatically.
