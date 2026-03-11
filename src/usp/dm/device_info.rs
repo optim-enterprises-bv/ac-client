@@ -2,6 +2,7 @@
 
 use crate::config::ClientConfig;
 use crate::util;
+use crate::usp::tp469::uci_backend;
 use std::collections::HashMap;
 
 pub fn get(cfg: &ClientConfig, path: &str) -> HashMap<String, String> {
@@ -13,7 +14,8 @@ pub fn get(cfg: &ClientConfig, path: &str) -> HashMap<String, String> {
     match path.trim_start_matches(base) {
         "" => {
             // Return ALL parameters
-            insert(&mut m, "HostName", cfg.sys_model.clone());
+            let hostname = uci_backend::get_system_hostname();
+            insert(&mut m, "HostName", if hostname.is_empty() { cfg.sys_model.clone() } else { hostname });
             insert(&mut m, "SoftwareVersion", util::read_fw_version());
             insert(&mut m, "HardwareVersion", cfg.sys_model.clone());
             insert(&mut m, "SerialNumber", cfg.mac_addr.clone());
@@ -33,7 +35,8 @@ pub fn get(cfg: &ClientConfig, path: &str) -> HashMap<String, String> {
             insert(&mut m, "DeviceStatus", util::read_device_status());
         }
         "HostName" => {
-            insert(&mut m, "HostName", cfg.sys_model.clone());
+            let hostname = uci_backend::get_system_hostname();
+            insert(&mut m, "HostName", if hostname.is_empty() { cfg.sys_model.clone() } else { hostname });
         }
         "SoftwareVersion" => {
             insert(&mut m, "SoftwareVersion", util::read_fw_version());
