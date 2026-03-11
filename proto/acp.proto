@@ -99,7 +99,7 @@ message WirelessConfig {
 message WifiDeviceConfig {
   string          name        = 1;
   string          device_type = 2;
-  int32           channel     = 3;
+  string          channel     = 3;
   optional string antenna     = 4;
   repeated string mac_filters = 5;
 }

@@ -707,6 +707,34 @@ fn handle_cellular(path: &str) -> Params {
                 result.insert(path.to_string(), modem_info.get("band").cloned().unwrap_or_default());
             } else if path.ends_with("RoamingStatus") {
                 result.insert(path.to_string(), modem_info.get("roaming").cloned().unwrap_or_else(|| "Unknown".to_string()));
+            } else if path.ends_with("IMSI") {
+                let sim_info = get_mmcli_sim_info(&modem_idx);
+                result.insert(path.to_string(), sim_info.get("imsi").cloned().unwrap_or_default());
+            } else if path.ends_with("ICCID") {
+                let sim_info = get_mmcli_sim_info(&modem_idx);
+                result.insert(path.to_string(), sim_info.get("iccid").cloned().unwrap_or_default());
+            } else if path.ends_with("RSRP") {
+                let sig = get_mmcli_signal_info(&modem_idx);
+                result.insert(path.to_string(), sig.get("rsrp").cloned().unwrap_or_default());
+            } else if path.ends_with("RSRQ") {
+                let sig = get_mmcli_signal_info(&modem_idx);
+                result.insert(path.to_string(), sig.get("rsrq").cloned().unwrap_or_default());
+            } else if path.ends_with("SINR") {
+                let sig = get_mmcli_signal_info(&modem_idx);
+                result.insert(path.to_string(), sig.get("sinr").cloned().unwrap_or_default());
+            } else if path.ends_with("RegisteredNetwork") {
+                result.insert(path.to_string(), modem_info.get("operator_name").cloned().unwrap_or_default());
+            } else if path.ends_with("BytesSent") {
+                let val = read_sysfs_net_stat("tx_bytes");
+                result.insert(path.to_string(), val);
+            } else if path.ends_with("BytesReceived") {
+                let val = read_sysfs_net_stat("rx_bytes");
+                result.insert(path.to_string(), val);
+            } else if path.ends_with("SignalStrengthLevel") {
+                let level = signal_quality_to_level(
+                    modem_info.get("signal").and_then(|s| s.parse::<u32>().ok()).unwrap_or(0)
+                );
+                result.insert(path.to_string(), level.to_string());
             } else {
                 result.insert(path.to_string(), "".to_string());
             }
@@ -781,9 +809,165 @@ fn get_mmcli_info(modem_idx: &str) -> std::collections::HashMap<String, String> 
                 info.insert("roaming".to_string(), val);
             }
         }
+        if trimmed.contains("operator name") {
+            if let Some(val) = extract_mmcli_value(trimmed) {
+                info.insert("operator_name".to_string(), val);
+            }
+        }
     }
 
     info
+}
+
+/// Get SIM properties (IMSI, ICCID) by finding the SIM path from modem info,
+/// then querying it with `mmcli -i <sim_idx>`.
+fn get_mmcli_sim_info(modem_idx: &str) -> std::collections::HashMap<String, String> {
+    let mut info = std::collections::HashMap::new();
+
+    // First, get the SIM path from `mmcli -m <idx> --output-keyvalue`
+    let output = std::process::Command::new("mmcli")
+        .args(["-m", modem_idx, "--output-keyvalue"])
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .unwrap_or_default();
+
+    // Find the primary SIM path, e.g. "modem.generic.sim : /org/freedesktop/ModemManager1/SIM/0"
+    let mut sim_idx = None;
+    for line in output.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("modem.generic.sim") && trimmed.contains("/SIM/") {
+            if let Some(pos) = trimmed.rfind("/SIM/") {
+                let rest = &trimmed[pos + 5..];
+                let idx: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+                if !idx.is_empty() {
+                    sim_idx = Some(idx);
+                }
+            }
+        }
+        // Also grab IMSI/ICCID directly if available in keyvalue output
+        if trimmed.starts_with("sim.properties.imsi") {
+            if let Some(val) = extract_kv_value(trimmed) {
+                info.insert("imsi".to_string(), val);
+            }
+        }
+        if trimmed.starts_with("sim.properties.iccid") {
+            if let Some(val) = extract_kv_value(trimmed) {
+                info.insert("iccid".to_string(), val);
+            }
+        }
+    }
+
+    // If we didn't get them from modem keyvalue, query the SIM directly
+    if info.get("imsi").is_none() || info.get("iccid").is_none() {
+        if let Some(idx) = sim_idx {
+            let sim_output = std::process::Command::new("mmcli")
+                .args(["-i", &idx])
+                .output()
+                .ok()
+                .and_then(|o| String::from_utf8(o.stdout).ok())
+                .unwrap_or_default();
+
+            for line in sim_output.lines() {
+                let trimmed = line.trim();
+                if trimmed.contains("imsi") && info.get("imsi").is_none() {
+                    if let Some(val) = extract_mmcli_value(trimmed) {
+                        info.insert("imsi".to_string(), val);
+                    }
+                }
+                if trimmed.contains("iccid") && info.get("iccid").is_none() {
+                    if let Some(val) = extract_mmcli_value(trimmed) {
+                        info.insert("iccid".to_string(), val);
+                    }
+                }
+            }
+        }
+    }
+
+    info
+}
+
+/// Get LTE signal metrics (RSRP, RSRQ, SINR) from `mmcli -m <idx> --signal-get`
+fn get_mmcli_signal_info(modem_idx: &str) -> std::collections::HashMap<String, String> {
+    let mut info = std::collections::HashMap::new();
+
+    let output = std::process::Command::new("mmcli")
+        .args(["-m", modem_idx, "--signal-get"])
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .unwrap_or_default();
+
+    for line in output.lines() {
+        let trimmed = line.trim();
+        if trimmed.contains("rsrp") {
+            if let Some(val) = extract_mmcli_value(trimmed) {
+                // Value may include unit like "-100.0 dBm", keep just the number
+                let num = val.split_whitespace().next().unwrap_or(&val).to_string();
+                info.insert("rsrp".to_string(), num);
+            }
+        }
+        if trimmed.contains("rsrq") {
+            if let Some(val) = extract_mmcli_value(trimmed) {
+                let num = val.split_whitespace().next().unwrap_or(&val).to_string();
+                info.insert("rsrq".to_string(), num);
+            }
+        }
+        if trimmed.contains("s/n") || trimmed.contains("snr") || trimmed.contains("sinr") {
+            if let Some(val) = extract_mmcli_value(trimmed) {
+                let num = val.split_whitespace().next().unwrap_or(&val).to_string();
+                info.insert("sinr".to_string(), num);
+            }
+        }
+    }
+
+    info
+}
+
+/// Read wwan interface byte counters from sysfs.
+/// Tries wwan0 first, then falls back to any wwan* interface.
+fn read_sysfs_net_stat(stat: &str) -> String {
+    // Try wwan0 first
+    let path = format!("/sys/class/net/wwan0/statistics/{stat}");
+    if let Ok(val) = std::fs::read_to_string(&path) {
+        return val.trim().to_string();
+    }
+    // Fallback: find any wwan* interface
+    if let Ok(entries) = std::fs::read_dir("/sys/class/net") {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.starts_with("wwan") {
+                let fallback = format!("/sys/class/net/{name}/statistics/{stat}");
+                if let Ok(val) = std::fs::read_to_string(&fallback) {
+                    return val.trim().to_string();
+                }
+            }
+        }
+    }
+    String::new()
+}
+
+/// Map signal quality percentage (0-100) to a discrete level (0-5).
+fn signal_quality_to_level(percent: u32) -> u32 {
+    match percent {
+        0 => 0,
+        1..=20 => 1,
+        21..=40 => 2,
+        41..=60 => 3,
+        61..=80 => 4,
+        _ => 5,
+    }
+}
+
+/// Extract value from mmcli keyvalue format ("key : value")
+fn extract_kv_value(line: &str) -> Option<String> {
+    if let Some(colon_idx) = line.find(':') {
+        let val = line[colon_idx + 1..].trim().to_string();
+        if !val.is_empty() && val != "--" {
+            return Some(val);
+        }
+    }
+    None
 }
 
 fn extract_mmcli_value(line: &str) -> Option<String> {
