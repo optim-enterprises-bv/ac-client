@@ -388,7 +388,7 @@ fn handle_wireguard(path: &str) -> Params {
                 .map(|s| s.trim().to_string())
                 .unwrap_or_default();
             result.insert(path.to_string(), port);
-        } else if path.ends_with("PublicKey") {
+        } else if path.ends_with("PublicKey") && !path.contains("Peer.") {
             let key = std::process::Command::new("wg")
                 .args(["show", &iface_name, "public-key"])
                 .output()
@@ -397,6 +397,29 @@ fn handle_wireguard(path: &str) -> Params {
                 .map(|s| s.trim().to_string())
                 .unwrap_or_default();
             result.insert(path.to_string(), key);
+        } else if path.contains("Peer.") {
+            // Per-peer params from `wg show <iface> dump`
+            let peer_num = extract_index(path, "Peer.").unwrap_or(1);
+            let peers = get_wg_peers(&iface_name);
+            if let Some(peer) = peers.get(peer_num - 1) {
+                if path.ends_with("PublicKey") {
+                    result.insert(path.to_string(), peer.public_key.clone());
+                } else if path.ends_with("AllowedIPs") {
+                    result.insert(path.to_string(), peer.allowed_ips.clone());
+                } else if path.ends_with("LastHandshakeTime") {
+                    result.insert(path.to_string(), peer.last_handshake.clone());
+                } else if path.ends_with("TransferRx") {
+                    result.insert(path.to_string(), peer.rx_bytes.clone());
+                } else if path.ends_with("TransferTx") {
+                    result.insert(path.to_string(), peer.tx_bytes.clone());
+                } else if path.ends_with("PersistentKeepalive") {
+                    result.insert(path.to_string(), peer.keepalive.clone());
+                } else {
+                    result.insert(path.to_string(), "".to_string());
+                }
+            } else {
+                result.insert(path.to_string(), "".to_string());
+            }
         } else {
             result.insert(path.to_string(), "".to_string());
         }
@@ -413,6 +436,61 @@ fn get_wg_interfaces() -> Vec<String> {
         .and_then(|o| String::from_utf8(o.stdout).ok())
         .map(|s| s.split_whitespace().map(|i| i.to_string()).collect())
         .unwrap_or_default()
+}
+
+struct WgPeer {
+    public_key: String,
+    allowed_ips: String,
+    last_handshake: String,
+    rx_bytes: String,
+    tx_bytes: String,
+    keepalive: String,
+}
+
+/// Parse `wg show <iface> dump` for per-peer data.
+/// Dump format (tab-separated, first line is interface, rest are peers):
+///   <private_key> <public_key> <listen-port> <fwmark>
+///   <public_key> <preshared_key> <endpoint> <allowed_ips> <latest_handshake> <rx> <tx> <keepalive>
+fn get_wg_peers(iface: &str) -> Vec<WgPeer> {
+    let output = std::process::Command::new("wg")
+        .args(["show", iface, "dump"])
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .unwrap_or_default();
+
+    let mut peers = Vec::new();
+    for (i, line) in output.lines().enumerate() {
+        if i == 0 { continue; } // skip interface line
+        let fields: Vec<&str> = line.split('\t').collect();
+        if fields.len() >= 8 {
+            let handshake_epoch = fields[4].parse::<u64>().unwrap_or(0);
+            let handshake_str = if handshake_epoch == 0 {
+                "Never".to_string()
+            } else {
+                // Seconds ago
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                let ago = now.saturating_sub(handshake_epoch);
+                if ago < 60 { format!("{}s ago", ago) }
+                else if ago < 3600 { format!("{}m ago", ago / 60) }
+                else { format!("{}h {}m ago", ago / 3600, (ago % 3600) / 60) }
+            };
+
+            peers.push(WgPeer {
+                public_key: fields[0].to_string(),
+                allowed_ips: fields[3].to_string(),
+                last_handshake: handshake_str,
+                rx_bytes: fields[5].to_string(),
+                tx_bytes: fields[6].to_string(),
+                keepalive: if fields[7] == "off" { "0".to_string() } else { fields[7].to_string() },
+            });
+        }
+    }
+
+    peers
 }
 
 fn get_wg_peer_count(iface: &str) -> usize {
