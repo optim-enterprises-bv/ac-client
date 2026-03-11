@@ -61,6 +61,10 @@ config optimacs 'agent'
 	# This must match the USP_ENDPOINT_ID configured on ac-server.
 	option controller_id 'OptimACS-Controller-1'
 
+	# Account claim token from the OptimACS dashboard.
+	# Links this device to your tenant account on first Boot! connect.
+	# option claim_token ''
+
 	# ── TLS / certificate paths ────────────────────────────────────────────
 	# CA certificate — used to verify the server's TLS certificate.
 	option ca_file       '/etc/apclient/init/ca.crt'

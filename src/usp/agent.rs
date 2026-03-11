@@ -295,6 +295,12 @@ fn collect_boot_params(cfg: &ClientConfig) -> HashMap<String, String> {
     // TR-181 §9.3.6 required Boot! event parameters
     m.insert("Cause".into(),           "LocalReboot".into());
     m.insert("FirmwareUpdated".into(), "false".into());
+
+    // OptimACS claim token — links device to a tenant account
+    if !cfg.claim_token.is_empty() {
+        m.insert("Device.X_OptimACS.ClaimToken".into(), cfg.claim_token.clone());
+    }
+
     m
 }
 

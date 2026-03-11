@@ -78,6 +78,8 @@ pub struct ClientConfig {
     pub usp_endpoint_id: String,
     /// Controller endpoint ID.
     pub controller_id: String,
+    /// Claim token linking this device to a tenant account.
+    pub claim_token: String,
     /// WebSocket MTP URL (e.g. `wss://ac-server:3491/usp`).
     pub ws_url: Option<String>,
     /// MQTT broker URL (e.g. `mqtt://emqx:1883`).
@@ -113,6 +115,7 @@ impl Default for ClientConfig {
             log_syslog: true,
             usp_endpoint_id: String::new(),
             controller_id: String::new(),
+            claim_token: String::new(),
             ws_url: None,
             mqtt_url: None,
             mtp: MtpType::WebSocket,
@@ -252,6 +255,10 @@ pub fn load_config(path: &Path) -> Result<ClientConfig> {
             "controller_id" => {
                 cfg.controller_id = val.clone();
                 debug!("Config: controller_id = {}", cfg.controller_id);
+            }
+            "claim_token" => {
+                cfg.claim_token = val.clone();
+                debug!("Config: claim_token = {}", cfg.claim_token);
             }
             "ws_url" => {
                 cfg.ws_url = Some(val.clone());
@@ -408,6 +415,9 @@ pub fn load_config_uci() -> Result<ClientConfig> {
     }
     if let Some(v) = uci_get_str("controller_id") {
         cfg.controller_id = v;
+    }
+    if let Some(v) = uci_get_str("claim_token") {
+        cfg.claim_token = v;
     }
     if let Some(v) = uci_get_str("ws_url") {
         cfg.ws_url = Some(v);

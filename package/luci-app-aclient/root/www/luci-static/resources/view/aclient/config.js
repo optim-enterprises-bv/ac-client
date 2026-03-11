@@ -114,6 +114,14 @@ return view.extend({
 			  'Defaults to <code>ac-server</code> when empty.'));
 		o.placeholder = 'ac-server';
 
+		o = s.taboption('connection', form.Value, 'claim_token',
+			_('Claim Token'),
+			_('Account claim token from your OptimACS dashboard. ' +
+			  'Links this device to your account so you can manage it. ' +
+			  'Find this token in <strong>Account Settings → Claim Token</strong>.'));
+		o.placeholder = 'CT-XXXXXX';
+		o.password    = true;
+
 		// ╔══════════════════════════════════════════════════════════════════════╗
 		// ║  TAB 2 — TLS / Certificates                                          ║
 		// ╚══════════════════════════════════════════════════════════════════════╝
