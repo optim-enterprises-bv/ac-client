@@ -6,7 +6,7 @@ use prost::Message;
 use uuid::Uuid;
 
 use super::usp_msg::{
-    body::MsgBody, header::MessageType, notify, Body, Error, Header, Msg, NotifyResp, OperateResp,
+    body::MsgBody, header::MessageType, notify, Body, Error, Header, Msg, OperateResp,
 };
 use super::{Result, UspError};
 
@@ -106,24 +106,6 @@ pub fn build_get_supported_proto() -> Msg {
                         controller_supported_versions: "1.3".into(),
                     },
                 )),
-            })),
-        }),
-    }
-}
-
-// ── Builder: NOTIFY_RESP ─────────────────────────────────────────────────────
-
-pub fn build_notify_resp(msg_id: &str, subscription_id: &str) -> Msg {
-    Msg {
-        header: Some(Header {
-            msg_id: msg_id.into(),
-            msg_type: MessageType::NotifyResp as i32,
-        }),
-        body: Some(Body {
-            msg_body: Some(MsgBody::Response(super::usp_msg::Response {
-                resp_type: Some(super::usp_msg::response::RespType::NotifyResp(NotifyResp {
-                    subscription_id: subscription_id.into(),
-                })),
             })),
         }),
     }

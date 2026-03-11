@@ -10,9 +10,9 @@ pub mod add_delete;
 pub mod error_codes;
 pub mod get_instances;
 pub mod get_supported_dm;
-pub mod notifications;
-pub mod search;
-pub mod subscriptions;
+mod notifications;
+mod search;
+mod subscriptions;
 pub mod supported_dm_schema;
 pub mod uci_backend;
 
