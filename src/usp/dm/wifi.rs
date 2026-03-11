@@ -185,6 +185,21 @@ pub async fn get(_cfg: &ClientConfig, path: &str) -> HashMap<String, String> {
             m.insert(format!("Device.WiFi.AccessPoint.{ap_idx}.Status"),
                 if enabled { "Enabled" } else { "Disabled" }.to_string());
 
+            // BSSID for this AccessPoint (from the corresponding wireless interface)
+            let ap_device = uci_get(&format!("wireless.{iface}.device"));
+            let ap_phy = if !ap_device.is_empty() { get_phy_interface(&ap_device) } else { String::new() };
+            if !ap_phy.is_empty() {
+                let bssid = get_iw_bssid(&ap_phy);
+                if !bssid.is_empty() {
+                    m.insert(format!("Device.WiFi.AccessPoint.{ap_idx}.BSSID"), bssid);
+                }
+            }
+
+            // SSIDAdvertisementEnabled (inverse of UCI hidden flag)
+            let hidden = uci_get(&format!("wireless.{iface}.hidden"));
+            let advertised = hidden != "1";
+            m.insert(format!("Device.WiFi.AccessPoint.{ap_idx}.SSIDAdvertisementEnabled"), advertised.to_string());
+
             // WPA encryption modes (derive from enc)
             let wpa_modes = match enc.as_str() {
                 "psk2" | "psk2+ccmp" => "WPA2-Personal",
@@ -289,6 +304,12 @@ pub async fn get(_cfg: &ClientConfig, path: &str) -> HashMap<String, String> {
                 m.insert(format!("Device.WiFi.Radio.{radio_idx}.MaxAssociatedDevices"), "0".to_string());
             }
 
+            // Radio Name — hardware description from /sys/class/ieee80211/phy*/device
+            let radio_name = get_radio_hardware_name(device);
+            if !radio_name.is_empty() {
+                m.insert(format!("Device.WiFi.Radio.{radio_idx}.Name"), radio_name);
+            }
+
             // Radio Status: Up if enabled and phy interface exists, Down otherwise
             let phy_iface = get_phy_interface(device);
             let status = if enable && !phy_iface.is_empty() { "Up" } else { "Down" };
@@ -369,6 +390,67 @@ pub async fn get(_cfg: &ClientConfig, path: &str) -> HashMap<String, String> {
     }
 
     m
+}
+
+/// Get radio hardware description (e.g. "MediaTek MT7996E 802.11ax")
+fn get_radio_hardware_name(device: &str) -> String {
+    let idx = device.trim_start_matches("radio").parse::<usize>().unwrap_or(0);
+    let phy = format!("phy{}", idx);
+
+    // Try reading from /sys/class/ieee80211/<phy>/device/uevent for driver/vendor
+    let uevent_path = format!("/sys/class/ieee80211/{}/device/uevent", phy);
+    let driver = std::fs::read_to_string(&uevent_path)
+        .ok()
+        .and_then(|content| {
+            content.lines()
+                .find(|l| l.starts_with("DRIVER="))
+                .map(|l| l.trim_start_matches("DRIVER=").to_string())
+        })
+        .unwrap_or_default();
+
+    // Try to get device model from modalias or device name
+    let device_path = format!("/sys/class/ieee80211/{}/device/device", phy);
+    let device_id = std::fs::read_to_string(&device_path)
+        .ok()
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default();
+
+    let vendor_path = format!("/sys/class/ieee80211/{}/device/vendor", phy);
+    let vendor_id = std::fs::read_to_string(&vendor_path)
+        .ok()
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default();
+
+    // Get supported modes from iw phy
+    let band = uci_get(&format!("wireless.{}.band", device));
+    let modes = match band.as_str() {
+        "2g" => "802.11bgn",
+        "5g" => "802.11ac/ax",
+        "6g" => "802.11ax/be",
+        _ => "802.11",
+    };
+
+    // Build a friendly name
+    if !driver.is_empty() {
+        // Map common driver names to friendly chip names
+        let chip = match driver.as_str() {
+            "mt7996e" => "MediaTek MT7996E",
+            "mt7915e" => "MediaTek MT7915E",
+            "mt7921e" | "mt7921_pci" => "MediaTek MT7921",
+            "mt7622" => "MediaTek MT7622",
+            "ath11k_pci" | "ath11k" => "Qualcomm IPQ8074/QCN9074",
+            "ath10k_pci" | "ath10k" => "Qualcomm Atheros QCA9984",
+            "ath9k" => "Qualcomm Atheros AR9xxx",
+            "iwlwifi" => "Intel WiFi",
+            "mac80211_hwsim" => "mac80211_hwsim",
+            _ => &driver,
+        };
+        format!("{} {}", chip, modes)
+    } else if !vendor_id.is_empty() && !device_id.is_empty() {
+        format!("WiFi {} {} {}", vendor_id, device_id, modes)
+    } else {
+        format!("Generic {} Radio", modes)
+    }
 }
 
 /// Get the wireless interface name for a radio device (e.g. radio0 -> phy0-ap0 or wlan0)
