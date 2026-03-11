@@ -144,6 +144,22 @@ pub fn read_free_mem() -> String {
     String::new()
 }
 
+/// Return total memory in kB as a string, read from `/proc/meminfo`.
+pub fn read_mem_total() -> String {
+    let content = fs::read_to_string("/proc/meminfo").unwrap_or_default();
+    for line in content.lines() {
+        if let Some(rest) = line.strip_prefix("MemTotal:") {
+            let kb: u64 = rest
+                .split_whitespace()
+                .next()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0);
+            return kb.to_string();
+        }
+    }
+    String::new()
+}
+
 // ── SSID ─────────────────────────────────────────────────────────────────────
 
 /// Read the SSID of the first wireless interface via `iw`.

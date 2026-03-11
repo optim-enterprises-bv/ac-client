@@ -125,10 +125,10 @@ pub async fn get(_cfg: &ClientConfig, path: &str) -> HashMap<String, String> {
                 m.insert(format!("{base}SubnetMask"), mask);
             }
             if !proto.is_empty() {
-                m.insert(format!("{base}AddressingType"), proto);
+                m.insert(format!("{base}AddressingType"), proto.clone());
             }
             if !gateway.is_empty() {
-                m.insert(format!("Device.IP.Interface.{iface_idx}.X_OptimACS_Gateway"), gateway);
+                m.insert(format!("Device.IP.Interface.{iface_idx}.X_OptimACS_Gateway"), gateway.clone());
             }
             if !dns.is_empty() {
                 m.insert(format!("Device.IP.Interface.{iface_idx}.X_OptimACS_DNS"), dns);
@@ -137,7 +137,29 @@ pub async fn get(_cfg: &ClientConfig, path: &str) -> HashMap<String, String> {
                 m.insert(format!("Device.IP.Interface.{iface_idx}.MACAddress"), mac);
             }
             m.insert(format!("Device.IP.Interface.{iface_idx}.Status"), status);
-            
+
+            // Upstream flag: true for wan/wan6 interfaces
+            let is_upstream = section.starts_with("wan");
+            m.insert(format!("Device.IP.Interface.{iface_idx}.X_OptimACS_Upstream"), is_upstream.to_string());
+
+            // Friendly protocol name
+            let proto_friendly = match proto.as_str() {
+                "dhcp" => "DHCPv4",
+                "dhcpv6" => "DHCPv6",
+                "static" => "Static",
+                "pppoe" => "PPPoE",
+                "pptp" => "PPTP",
+                "l2tp" => "L2TP",
+                "none" => "Unmanaged",
+                other => other,
+            };
+            m.insert(format!("Device.IP.Interface.{iface_idx}.X_OptimACS_Protocol"), proto_friendly.to_string());
+
+            // GatewayIPv4 alias for Gateway
+            if !gateway.is_empty() {
+                m.insert(format!("Device.IP.Interface.{iface_idx}.X_OptimACS_GatewayIPv4"), gateway.clone());
+            }
+
             // Add stats if available
             if let Some(rx_bytes) = stats.get("rx_bytes") {
                 m.insert(format!("Device.IP.Interface.{iface_idx}.X_OptimACS_RXBytes"), rx_bytes.clone());
@@ -189,10 +211,10 @@ pub async fn get(_cfg: &ClientConfig, path: &str) -> HashMap<String, String> {
                     m.insert(format!("{base}SubnetMask"), mask);
                 }
                 if !proto.is_empty() {
-                    m.insert(format!("{base}AddressingType"), proto);
+                    m.insert(format!("{base}AddressingType"), proto.clone());
                 }
                 if !gateway.is_empty() {
-                    m.insert(format!("Device.IP.Interface.{idx}.X_OptimACS_Gateway"), gateway);
+                    m.insert(format!("Device.IP.Interface.{idx}.X_OptimACS_Gateway"), gateway.clone());
                 }
                 if !dns.is_empty() {
                     m.insert(format!("Device.IP.Interface.{idx}.X_OptimACS_DNS"), dns);
@@ -201,7 +223,29 @@ pub async fn get(_cfg: &ClientConfig, path: &str) -> HashMap<String, String> {
                     m.insert(format!("Device.IP.Interface.{idx}.MACAddress"), mac);
                 }
                 m.insert(format!("Device.IP.Interface.{idx}.Status"), status);
-                
+
+                // Upstream flag
+                let is_upstream = section.starts_with("wan");
+                m.insert(format!("Device.IP.Interface.{idx}.X_OptimACS_Upstream"), is_upstream.to_string());
+
+                // Friendly protocol name
+                let proto_friendly = match proto.as_str() {
+                    "dhcp" => "DHCPv4",
+                    "dhcpv6" => "DHCPv6",
+                    "static" => "Static",
+                    "pppoe" => "PPPoE",
+                    "pptp" => "PPTP",
+                    "l2tp" => "L2TP",
+                    "none" => "Unmanaged",
+                    other => other,
+                };
+                m.insert(format!("Device.IP.Interface.{idx}.X_OptimACS_Protocol"), proto_friendly.to_string());
+
+                // GatewayIPv4 alias
+                if !gateway.is_empty() {
+                    m.insert(format!("Device.IP.Interface.{idx}.X_OptimACS_GatewayIPv4"), gateway.clone());
+                }
+
                 // Add stats if available
                 if let Some(rx_bytes) = stats.get("rx_bytes") {
                     m.insert(format!("Device.IP.Interface.{idx}.X_OptimACS_RXBytes"), rx_bytes.clone());
@@ -354,21 +398,9 @@ async fn get_interface_status(iface: &str) -> String {
     }
 }
 
-/// Format bytes to human-readable (GB, MB, etc.)
+/// Return raw byte count as a string (UI handles formatting)
 fn format_bytes(bytes: u64) -> String {
-    const GB: u64 = 1_000_000_000;
-    const MB: u64 = 1_000_000;
-    const KB: u64 = 1_000;
-    
-    if bytes >= GB {
-        format!("{:.2} GB", bytes as f64 / GB as f64)
-    } else if bytes >= MB {
-        format!("{:.2} MB", bytes as f64 / MB as f64)
-    } else if bytes >= KB {
-        format!("{:.2} KB", bytes as f64 / KB as f64)
-    } else {
-        format!("{} B", bytes)
-    }
+    bytes.to_string()
 }
 
 /// Format number with commas
