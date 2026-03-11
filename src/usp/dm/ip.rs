@@ -185,6 +185,17 @@ pub async fn get(_cfg: &ClientConfig, path: &str) -> HashMap<String, String> {
             if let Some(uptime) = stats.get("uptime") {
                 m.insert(format!("Device.IP.Interface.{iface_idx}.X_OptimACS_Uptime"), uptime.clone());
             }
+
+            // IPv6 — always from runtime state
+            let rt6 = get_ubus_interface_status(section);
+            if let Some(v6) = rt6.get("ipv6addr") {
+                if !v6.is_empty() {
+                    m.insert(format!("Device.IP.Interface.{iface_idx}.IPv6Address.1.IPAddress"), v6.clone());
+                    if let Some(prefix) = rt6.get("ipv6prefix") {
+                        m.insert(format!("Device.IP.Interface.{iface_idx}.IPv6Address.1.PrefixLength"), prefix.clone());
+                    }
+                }
+            }
         }
     } else if let Some(idx) = specific_idx {
         // Specific interface requested
@@ -280,10 +291,21 @@ pub async fn get(_cfg: &ClientConfig, path: &str) -> HashMap<String, String> {
                 if let Some(uptime) = stats.get("uptime") {
                     m.insert(format!("Device.IP.Interface.{idx}.X_OptimACS_Uptime"), uptime.clone());
                 }
+
+                // IPv6 — always from runtime state
+                let rt6 = get_ubus_interface_status(section);
+                if let Some(v6) = rt6.get("ipv6addr") {
+                    if !v6.is_empty() {
+                        m.insert(format!("Device.IP.Interface.{idx}.IPv6Address.1.IPAddress"), v6.clone());
+                        if let Some(prefix) = rt6.get("ipv6prefix") {
+                            m.insert(format!("Device.IP.Interface.{idx}.IPv6Address.1.PrefixLength"), prefix.clone());
+                        }
+                    }
+                }
             }
         }
     }
-    
+
     m
 }
 
@@ -422,6 +444,44 @@ fn get_ubus_interface_status(iface_name: &str) -> HashMap<String, String> {
                     .collect();
                 if !servers.is_empty() {
                     result.insert("dns".to_string(), servers.join(","));
+                }
+            }
+        }
+    }
+
+    // Parse ipv6-address[0].address and mask
+    if let Some(pos) = out.find("\"ipv6-address\"") {
+        let chunk = &out[pos..];
+        if let Some(addr_pos) = chunk.find("\"address\"") {
+            let after = &chunk[addr_pos + 9..];
+            if let Some(start) = after.find('"') {
+                let rest = &after[start + 1..];
+                if let Some(end) = rest.find('"') {
+                    result.insert("ipv6addr".to_string(), rest[..end].to_string());
+                }
+            }
+        }
+        if let Some(mask_pos) = chunk.find("\"mask\"") {
+            let after = &chunk[mask_pos + 5..];
+            let after = after.trim_start_matches(|c: char| !c.is_ascii_digit());
+            if let Some(end) = after.find(|c: char| !c.is_ascii_digit()) {
+                result.insert("ipv6prefix".to_string(), after[..end].to_string());
+            }
+        }
+    }
+
+    // Parse ipv6-prefix-assignment for delegated prefix
+    if let Some(pos) = out.find("\"ipv6-prefix-assignment\"") {
+        let chunk = &out[pos..];
+        if let Some(addr_pos) = chunk.find("\"address\"") {
+            let after = &chunk[addr_pos + 9..];
+            if let Some(start) = after.find('"') {
+                let rest = &after[start + 1..];
+                if let Some(end) = rest.find('"') {
+                    let addr = &rest[..end];
+                    if !addr.is_empty() {
+                        result.insert("ipv6prefix_addr".to_string(), addr.to_string());
+                    }
                 }
             }
         }
