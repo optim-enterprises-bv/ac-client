@@ -69,9 +69,9 @@ define Package/luci-app-aclient/install
 
 	# rpcd ACL — grants read+write on the 'optimacs' UCI package and
 	# read access on the 'service' and 'rc' rpcd objects.
-	$(INSTALL_DIR) $(1)/usr/share/rpcd/acls.d
-	$(INSTALL_DATA) ./root/usr/share/rpcd/acls.d/luci-app-aclient.json \
-		$(1)/usr/share/rpcd/acls.d/luci-app-aclient.json
+	$(INSTALL_DIR) $(1)/usr/share/rpcd/acl.d
+	$(INSTALL_DATA) ./root/usr/share/rpcd/acl.d/luci-app-aclient.json \
+		$(1)/usr/share/rpcd/acl.d/luci-app-aclient.json
 
 	# JavaScript views
 	$(INSTALL_DIR) $(1)/www/luci-static/resources/view/aclient
