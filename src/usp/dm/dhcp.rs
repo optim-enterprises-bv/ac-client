@@ -106,6 +106,20 @@ pub async fn get(_cfg: &ClientConfig, path: &str) -> HashMap<String, String> {
                 .collect::<Vec<&str>>()
                 .join(",");
             m.insert(path.to_string(), servers);
+        } else if path.contains("Client.") {
+            // Active DHCP leases from /tmp/dhcp.leases
+            // Format: <expiry_epoch> <mac> <ip> <hostname> <duid>
+            let leases = get_active_leases();
+            for (li, lease) in leases.iter().enumerate() {
+                let ci = li + 1;
+                let base = format!("Device.DHCPv4.Server.Pool.{pool_idx}.Client.{ci}");
+                m.insert(format!("{base}.Chaddr"), lease.mac.clone());
+                m.insert(format!("{base}.IPv4Address.1.IPAddress"), lease.ip.clone());
+                if !lease.hostname.is_empty() && lease.hostname != "*" {
+                    m.insert(format!("{base}.X_OptimACS_Hostname"), lease.hostname.clone());
+                }
+                m.insert(format!("{base}.LeaseTimeRemaining"), lease.remaining.clone());
+            }
         } else if path.contains("StaticAddress.") {
             // Static lease query — original logic
             let uci_out = std::process::Command::new("uci")
@@ -140,6 +154,42 @@ pub async fn get(_cfg: &ClientConfig, path: &str) -> HashMap<String, String> {
     }
 
     m
+}
+
+struct DhcpLease {
+    mac: String,
+    ip: String,
+    hostname: String,
+    remaining: String,
+}
+
+/// Parse active DHCP leases from /tmp/dhcp.leases
+fn get_active_leases() -> Vec<DhcpLease> {
+    let content = std::fs::read_to_string("/tmp/dhcp.leases").unwrap_or_default();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+
+    content
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .filter_map(|line| {
+            let fields: Vec<&str> = line.split_whitespace().collect();
+            if fields.len() >= 4 {
+                let expiry = fields[0].parse::<u64>().unwrap_or(0);
+                let remaining = if expiry > now { expiry - now } else { 0 };
+                Some(DhcpLease {
+                    mac: fields[1].to_uppercase(),
+                    ip: fields[2].to_string(),
+                    hostname: fields[3].to_string(),
+                    remaining: remaining.to_string(),
+                })
+            } else {
+                None
+            }
+        })
+        .collect()
 }
 
 /// Set DHCP static lease parameters (Chaddr/MAC or Yiaddr/IP)
