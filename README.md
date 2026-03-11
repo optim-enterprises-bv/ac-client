@@ -189,7 +189,7 @@ The Broadband Forum's **TR-369 User Services Platform** (USP) defines a vendor-n
 
 **ac-server** is the Rust USP Controller with complete **TP-469/USMP** message support. It listens on `:3491` for incoming WebSocket connections and subscribes to EMQX for MQTT connections. It dispatches USP messages to the TR-181 data model, manages the device database with full UCI parameter storage, delegates X.509 certificate signing to step-ca, and maintains the USP command queue for reliable configuration delivery.
 
-**Database (MariaDB/MySQL)** stores all device configurations including the complete UCI parameter set:
+**Database (YugabyteDB/PostgreSQL)** stores all device configurations including the complete UCI parameter set:
 - WiFi radios with EHT (WiFi 7) modes, cell density, country codes
 - Network interfaces with bridge ports, IPv6 prefixes, MAC addresses
 - DHCP pools and static leases with hostnames
@@ -216,7 +216,7 @@ usp/v1/{controller_endpoint_id}  ← controller subscribes (receives Agent messa
 | step-ca | PKI / Certificate Authority | 9000 (HTTPS) |
 | optimacs-ui | Management web console (FastAPI + GraphQL) | 8080 |
 | EMQX | MQTT broker (USP MQTT MTP) | 1883, 8883, 8083, 8084, 18083 |
-| MariaDB / MySQL | Device and UCI configuration database | 3306 |
+| YugabyteDB | Device and UCI configuration database (PostgreSQL wire) | 5433 |
 | Redis | Config-proto cache, rate-limit store (optional) | 6379 |
 
 ### System Architecture (Mermaid)
@@ -228,7 +228,7 @@ flowchart TB
         Server[ac-server<br/>USP Controller<br/>Port 3491]
         CA[step-ca<br/>PKI / CA<br/>Port 9000]
         MQTT[EMQX<br/>MQTT Broker<br/>Ports 1883/8883]
-        DB[(MariaDB/MySQL<br/>UCI Config Database)]
+        DB[(YugabyteDB<br/>UCI Config Database)]
         Redis[(Redis<br/>Cache)]
     end
     
@@ -562,6 +562,8 @@ The CA private key **never touches ac-server**. ac-server holds only the EC P-25
 - **Axis IP-camera discovery** (ARP scan + CGI API) and JPEG upload
 - **GNSS telemetry** (NMEA serial reader)
 - **ValueChange** periodic telemetry (uptime, load, GPS, wireless, modem)
+- **Claim token tenant linking** — device reads `claim_token` from UCI config and sends it in Boot! Notify; controller auto-links to the subscriber's tenant
+- **LuCI management app** (`package/luci-app-aclient/`) — Overview and Config tabs in the OpenWrt web UI
 - **OpenWrt package feed** entry (`package/ac-client/`) for cross-compilation via `rust-package.mk`
 - **Production ready** — 20+ unit tests, error handling, rollback support
 
@@ -665,6 +667,40 @@ ac-client/
             ├── ac-client.init    — procd init script
             └── ac_client.conf    — default configuration
 ```
+
+---
+
+## LuCI Management App
+
+The `package/luci-app-aclient/` directory provides a LuCI web UI for managing ac-client from the OpenWrt admin interface.
+
+### Tabs
+
+| Tab | Description |
+|-----|-------------|
+| **Overview** | Connection status, endpoint ID, last seen, controller info |
+| **Config** | Edit server host, claim token, MTP selection, telemetry interval |
+
+### Installation
+
+The LuCI app is built alongside ac-client in the OpenWrt buildroot:
+
+```sh
+make menuconfig
+#    LuCI → Applications → luci-app-aclient  [*]
+make package/luci-app-aclient/compile V=s
+```
+
+### Installed files
+
+| Path | Description |
+|------|-------------|
+| `/usr/share/luci/menu.d/luci-app-aclient.json` | Menu registration (under Services → OptimACS) |
+| `/usr/share/rpcd/acl.d/luci-app-aclient.json` | rpcd ACL grants for UCI read/write |
+| `/www/luci-static/resources/view/aclient/overview.js` | Overview tab |
+| `/www/luci-static/resources/view/aclient/config.js` | Configuration tab |
+
+> **Note:** The ACL file must be in `/usr/share/rpcd/acl.d/` (not `acls.d/`). An incorrect path causes `RPC call failed with ubus code 6: Permission denied` errors.
 
 ---
 
@@ -866,6 +902,14 @@ scp <server>:/etc/optimacs/CA/rootCA.crt \
 | `mac_addr` | *(auto)* | MAC address — auto-detected from `br-lan`/`eth0`/`wlan0` |
 | `usp_endpoint_id` | *(auto)* | USP Endpoint ID — auto-generated as `oui:{oui}:{mac}` |
 | `controller_id` | *(required)* | Controller endpoint ID (e.g., `ac-server` or `OptimACS-Controller-1`) |
+
+### Tenant Linking (Claim Token)
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `claim_token` | *(empty)* | Claim token for automatic tenant linking. Set via UCI: `uci set optimacs.agent.claim_token='TOKEN'` |
+
+When `claim_token` is set, ac-client includes it in the Boot! Notify message. The controller uses it to automatically link the device to the subscriber's tenant — no admin approval required. The token is generated per-subscriber in the OptimACS UI under **My Account → Devices**.
 
 ### Telemetry
 
