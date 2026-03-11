@@ -132,6 +132,7 @@ pub async fn get(_cfg: &ClientConfig, path: &str) -> HashMap<String, String> {
     let mut m = HashMap::new();
     let ifaces = get_wifi_ifaces();
     let devices = get_wifi_devices();
+    let ubus_map = build_ubus_iface_map();
     
     // Handle SSID requests
     if path.contains("SSID.") || path.ends_with("Device.WiFi.") {
@@ -147,10 +148,18 @@ pub async fn get(_cfg: &ClientConfig, path: &str) -> HashMap<String, String> {
                 // SSID Status: Up if enabled
                 m.insert(format!("Device.WiFi.SSID.{ssid_idx}.Status"), if enable { "Up" } else { "Down" }.to_string());
                 // Try to get BSSID for this SSID's interface
-                let iface_name = uci_get(&format!("wireless.{iface}.ifname"));
                 let device = uci_get(&format!("wireless.{iface}.device"));
-                let net_iface = if !iface_name.is_empty() { iface_name } else {
-                    get_phy_interface(&device)
+                let net_iface = {
+                    // 1. ubus (works on single-chip multi-band radios like MT7996)
+                    let ubus_iface = ubus_map.get(iface.as_str()).cloned().unwrap_or_default();
+                    if !ubus_iface.is_empty() { ubus_iface }
+                    // 2. UCI ifname property
+                    else {
+                        let ifname = uci_get(&format!("wireless.{iface}.ifname"));
+                        if !ifname.is_empty() { ifname }
+                        // 3. Legacy: derive from radio device name
+                        else { get_phy_interface(&device) }
+                    }
                 };
                 let mut bssid = String::new();
                 if !net_iface.is_empty() {
@@ -210,7 +219,16 @@ pub async fn get(_cfg: &ClientConfig, path: &str) -> HashMap<String, String> {
 
             // BSSID for this AccessPoint (from the corresponding wireless interface)
             let ap_device = uci_get(&format!("wireless.{iface}.device"));
-            let ap_phy = if !ap_device.is_empty() { get_phy_interface(&ap_device) } else { String::new() };
+            let ap_phy = {
+                let ubus_iface = ubus_map.get(iface.as_str()).cloned().unwrap_or_default();
+                if !ubus_iface.is_empty() { ubus_iface }
+                else {
+                    let ifname = uci_get(&format!("wireless.{iface}.ifname"));
+                    if !ifname.is_empty() { ifname }
+                    else if !ap_device.is_empty() { get_phy_interface(&ap_device) }
+                    else { String::new() }
+                }
+            };
             let mut ap_bssid = String::new();
             if !ap_phy.is_empty() {
                 ap_bssid = get_iw_bssid(&ap_phy);
@@ -256,7 +274,12 @@ pub async fn get(_cfg: &ClientConfig, path: &str) -> HashMap<String, String> {
 
             // AssociatedDeviceNumberOfEntries for this AP
             let device = uci_get(&format!("wireless.{iface}.device"));
-            let phy_iface = if !device.is_empty() { get_phy_interface(&device) } else { String::new() };
+            let phy_iface = {
+                let ubus_iface = ubus_map.get(iface.as_str()).cloned().unwrap_or_default();
+                if !ubus_iface.is_empty() { ubus_iface }
+                else if !device.is_empty() { get_phy_interface(&device) }
+                else { String::new() }
+            };
             if !phy_iface.is_empty() {
                 let count = get_associated_device_count(&phy_iface);
                 m.insert(format!("Device.WiFi.AccessPoint.{ap_idx}.AssociatedDeviceNumberOfEntries"), count.to_string());
@@ -349,7 +372,17 @@ pub async fn get(_cfg: &ClientConfig, path: &str) -> HashMap<String, String> {
             }
 
             // Radio Status: Up if enabled and phy interface exists, Down otherwise
-            let phy_iface = get_phy_interface(device);
+            // Find the first iface that belongs to this radio device
+            let phy_iface = {
+                let mut found = String::new();
+                for iface in &ifaces {
+                    if uci_get(&format!("wireless.{iface}.device")) == *device {
+                        found = ubus_map.get(iface.as_str()).cloned().unwrap_or_default();
+                        if !found.is_empty() { break; }
+                    }
+                }
+                if found.is_empty() { get_phy_interface(device) } else { found }
+            };
             let status = if enable && !phy_iface.is_empty() { "Up" } else { "Down" };
             m.insert(format!("Device.WiFi.Radio.{radio_idx}.Status"), status.to_string());
 
@@ -384,7 +417,12 @@ pub async fn get(_cfg: &ClientConfig, path: &str) -> HashMap<String, String> {
         for (idx, iface) in ifaces.iter().enumerate() {
             let ap_idx = idx + 1;
             let device = uci_get(&format!("wireless.{iface}.device"));
-            let phy_iface = if !device.is_empty() { get_phy_interface(&device) } else { String::new() };
+            let phy_iface = {
+                let ubus_iface = ubus_map.get(iface.as_str()).cloned().unwrap_or_default();
+                if !ubus_iface.is_empty() { ubus_iface }
+                else if !device.is_empty() { get_phy_interface(&device) }
+                else { String::new() }
+            };
             if !phy_iface.is_empty() {
                 let stations = get_station_dump(&phy_iface);
                 for (sta_idx, sta) in stations.iter().enumerate() {
@@ -500,6 +538,54 @@ fn get_radio_hardware_name(device: &str) -> String {
     } else {
         format!("Generic {} Radio", modes)
     }
+}
+
+/// Build a section→ifname map from `ubus call network.wireless status`.
+///
+/// This is the canonical OpenWrt method and handles single-chip multi-band
+/// radios (e.g. MT7996) where all bands share one phy and the radio→phy
+/// naming assumption breaks.
+fn build_ubus_iface_map() -> HashMap<String, String> {
+    let mut map = HashMap::new();
+
+    let ubus_out = std::process::Command::new("ubus")
+        .args(["call", "network.wireless", "status"])
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .unwrap_or_default();
+
+    if ubus_out.is_empty() {
+        return map;
+    }
+
+    // Minimal JSON parsing: find each "section"/"ifname" pair.
+    // The output structure is:
+    //   { "radioN": { "interfaces": [ { "section": "...", "ifname": "..." }, ... ] } }
+    let mut search_from = 0;
+    while let Some(sec_pos) = ubus_out[search_from..].find("\"section\": \"") {
+        let abs_pos = search_from + sec_pos;
+        let sec_start = abs_pos + "\"section\": \"".len();
+        if let Some(sec_end) = ubus_out[sec_start..].find('"') {
+            let section = &ubus_out[sec_start..sec_start + sec_end];
+            // Look for "ifname" after this section
+            let after = &ubus_out[sec_start + sec_end..];
+            if let Some(ifname_pos) = after.find("\"ifname\": \"") {
+                let if_start = ifname_pos + "\"ifname\": \"".len();
+                if let Some(if_end) = after[if_start..].find('"') {
+                    let ifname = &after[if_start..if_start + if_end];
+                    if !ifname.is_empty() && !section.is_empty() {
+                        map.insert(section.to_string(), ifname.to_string());
+                    }
+                }
+            }
+            search_from = sec_start + sec_end + 1;
+        } else {
+            break;
+        }
+    }
+
+    map
 }
 
 /// Get the wireless interface name for a radio device (e.g. radio0 -> phy0-ap0 or wlan0)
