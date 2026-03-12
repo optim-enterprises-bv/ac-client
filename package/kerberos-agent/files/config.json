@@ -1,0 +1,88 @@
+{
+    "type": "agent",
+    "key": "",
+    "name": "agent",
+    "time": "Europe/Amsterdam",
+    "offline": "false",
+    "auto_clean": "true",
+    "auto_clean_max_size": 100,
+    "capture": {
+        "ipcamera": {
+            "rtsp": "",
+            "sub_rtsp": "",
+            "onvif": "false",
+            "onvif_xaddr": "",
+            "onvif_username": "",
+            "onvif_password": ""
+        },
+        "recording": "true",
+        "continuous": "false",
+        "liveview": "true",
+        "motion": "true",
+        "snapshots": "false",
+        "prerecording": 3,
+        "postrecording": 10,
+        "maxlengthrecording": 30,
+        "pixelChangeThreshold": 150,
+        "fragmented": "true",
+        "fragmentedDuration": 8
+    },
+    "timetable": [
+        "1-1-1-1-1-1-1-1-1-1-1-1-1-1-1-1-1-1-1-1-1-1-1-1",
+        "1-1-1-1-1-1-1-1-1-1-1-1-1-1-1-1-1-1-1-1-1-1-1-1",
+        "1-1-1-1-1-1-1-1-1-1-1-1-1-1-1-1-1-1-1-1-1-1-1-1",
+        "1-1-1-1-1-1-1-1-1-1-1-1-1-1-1-1-1-1-1-1-1-1-1-1",
+        "1-1-1-1-1-1-1-1-1-1-1-1-1-1-1-1-1-1-1-1-1-1-1-1",
+        "1-1-1-1-1-1-1-1-1-1-1-1-1-1-1-1-1-1-1-1-1-1-1-1",
+        "1-1-1-1-1-1-1-1-1-1-1-1-1-1-1-1-1-1-1-1-1-1-1-1"
+    ],
+    "region": {
+        "polygon": []
+    },
+    "cloud": "kstorage",
+    "s3": {
+        "proxy_uri": "",
+        "bucket": "",
+        "region": "",
+        "username": "",
+        "password": ""
+    },
+    "kerberosvault": {
+        "uri": "",
+        "access_key": "",
+        "secret_key": "",
+        "provider": "",
+        "directory": "",
+        "max_retries": 3,
+        "timeout": 30
+    },
+    "dropbox": {
+        "access_token": "",
+        "directory": ""
+    },
+    "mqtt": {
+        "uri": "",
+        "username": "",
+        "password": ""
+    },
+    "stunuri": "stun:stun.l.google.com:19302",
+    "forceTurn": "false",
+    "turnuri": "",
+    "turnusername": "",
+    "turnpassword": "",
+    "encryption": {
+        "enabled": "false",
+        "recordings": "false",
+        "fingerprint": "",
+        "private_key": "",
+        "symmetric_key": ""
+    },
+    "signing": {
+        "enabled": "false",
+        "private_key": ""
+    },
+    "realtime_processing": {
+        "enabled": "false",
+        "topic": ""
+    }
+}

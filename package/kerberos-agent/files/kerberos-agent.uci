@@ -1,0 +1,25 @@
+config main 'main'
+	option enabled '1'
+	option port '8080'
+	option name 'agent'
+
+config camera 'camera'
+	# RTSP stream URL (e.g., rtsp://192.168.1.100:554/stream1)
+	option rtsp_url ''
+	# ONVIF discovery/control
+	option onvif_enabled '0'
+	option onvif_xaddr ''
+	option onvif_username 'admin'
+	option onvif_password ''
+
+config mqtt 'mqtt'
+	# MQTT broker for OptimACS integration (EMQX)
+	option uri 'tcp://emqx.optimacs:1883'
+	option username ''
+	option password ''
+
+config vault 'vault'
+	# Kerberos Vault for recording storage
+	option uri 'http://kerberos-vault.optimacs'
+	option access_key ''
+	option secret_key ''

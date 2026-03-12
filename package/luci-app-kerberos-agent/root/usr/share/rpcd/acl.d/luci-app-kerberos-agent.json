@@ -1,0 +1,11 @@
+{
+	"luci-app-kerberos-agent": {
+		"description": "Grant access to Kerberos Agent configuration",
+		"read": {
+			"uci": ["kerberos-agent"]
+		},
+		"write": {
+			"uci": ["kerberos-agent"]
+		}
+	}
+}
