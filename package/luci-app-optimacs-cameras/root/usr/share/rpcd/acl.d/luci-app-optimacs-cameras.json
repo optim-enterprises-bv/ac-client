@@ -1,0 +1,11 @@
+{
+	"luci-app-optimacs-cameras": {
+		"description": "Grant access to OptimACS camera configuration",
+		"read": {
+			"uci": ["optimacs"]
+		},
+		"write": {
+			"uci": ["optimacs"]
+		}
+	}
+}

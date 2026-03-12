@@ -1,0 +1,14 @@
+{
+	"admin/services/optimacs-cameras": {
+		"title": "Cameras",
+		"action": {
+			"type": "view",
+			"path": "optimacs/cameras"
+		},
+		"depends": {
+			"acl": ["luci-app-optimacs-cameras"],
+			"uci": { "optimacs": true }
+		},
+		"order": 50
+	}
+}
