@@ -18,8 +18,6 @@ use super::live_stream::LiveStreamServer;
 use super::motion::MotionDetector;
 use super::mqtt_bridge::MqttBridge;
 use super::onvif_discovery;
-use super::recording::Recorder;
-use super::storage::VaultUploader;
 
 /// Runtime state for a single camera.
 struct CameraSubsystem {
@@ -27,6 +25,8 @@ struct CameraSubsystem {
     tasks: Vec<JoinHandle<()>>,
     #[allow(dead_code)]
     motion_rx: watch::Receiver<bool>,
+    /// Sub-stream frame sender (for MQTT live publishing). Falls back to main if no sub-stream.
+    live_frame_tx: broadcast::Sender<super::capture::VideoFrame>,
 }
 
 /// Status snapshot for a single camera (exposed to USP / API).
@@ -46,10 +46,14 @@ pub struct CameraManager {
     cameras: Arc<RwLock<HashMap<String, CameraSubsystem>>>,
     event_tx: broadcast::Sender<CameraEvent>,
     live_server: Option<Arc<LiveStreamServer>>,
+    /// Device MAC address (used as part of ac_client_id for registration).
+    mac_addr: String,
+    /// Claim token linking this device to a tenant account.
+    claim_token: String,
 }
 
 impl CameraManager {
-    pub fn new() -> Self {
+    pub fn new(mac_addr: String, claim_token: String) -> Self {
         let global = config::load_global_config();
         let (event_tx, _) = broadcast::channel(256);
 
@@ -64,6 +68,8 @@ impl CameraManager {
             cameras: Arc::new(RwLock::new(HashMap::new())),
             event_tx,
             live_server,
+            mac_addr,
+            claim_token,
         }
     }
 
@@ -73,7 +79,6 @@ impl CameraManager {
         info!("║          OptimACS Camera Module Starting            ║");
         info!("╚══════════════════════════════════════════════════════╝");
         info!("Global config:");
-        info!("  Recording dir:    {}", self.global.recording_dir);
         info!(
             "  Live stream:      {}",
             if self.global.live_stream_port > 0 {
@@ -100,10 +105,10 @@ impl CameraManager {
         );
         info!(
             "  NVR server:       {}",
-            if self.global.vault_uri.is_empty() {
-                "not configured (recordings stay local)".into()
+            if self.global.nvr_server_url.is_empty() {
+                "not configured (no central registration)".into()
             } else {
-                self.global.vault_uri.clone()
+                self.global.nvr_server_url.clone()
             }
         );
 
@@ -150,19 +155,6 @@ impl CameraManager {
             enabled_count, disabled_count, camera_configs.len()
         );
 
-        // Start MQTT bridge if configured
-        if !self.global.mqtt_uri.is_empty() {
-            let bridge = MqttBridge::new(
-                self.global.mqtt_topic_prefix.clone(),
-                self.global.mqtt_uri.clone(),
-                self.event_tx.subscribe(),
-            );
-            tokio::spawn(async move {
-                bridge.run().await;
-            });
-            info!("MQTT bridge started → {}", self.global.mqtt_uri);
-        }
-
         // Start live stream server if configured
         if let Some(ref server) = self.live_server {
             let srv = Arc::clone(server);
@@ -186,21 +178,11 @@ impl CameraManager {
             match self.spawn_camera(cam_cfg).await {
                 Ok(subsystem) => {
                     info!(
-                        "[{}] ✓ Camera started — {} tasks (capture{}{}{})",
+                        "[{}] ✓ Camera started — {} tasks (capture{})",
                         id,
                         subsystem.tasks.len(),
                         if cam_cfg.recording_mode == RecordingMode::Motion {
                             " + motion"
-                        } else {
-                            ""
-                        },
-                        match cam_cfg.recording_mode {
-                            RecordingMode::Motion => " + recorder",
-                            RecordingMode::Continuous => " + recorder(continuous)",
-                            RecordingMode::Disabled => "",
-                        },
-                        if !self.global.vault_uri.is_empty() {
-                            " + uploader"
                         } else {
                             ""
                         },
@@ -221,6 +203,50 @@ impl CameraManager {
             started, failed, disabled_count
         );
         info!("═══════════════════════════════════════════════════════");
+
+        // Start MQTT bridge with live streams
+        if !self.global.mqtt_uri.is_empty() {
+            let mut bridge = MqttBridge::new(
+                self.global.mqtt_topic_prefix.clone(),
+                self.global.mqtt_uri.clone(),
+                self.event_tx.subscribe(),
+            );
+
+            // Register live frame streams for each running camera
+            for (id, sub) in cameras.iter() {
+                bridge.add_live_stream(id.clone(), sub.live_frame_tx.subscribe());
+            }
+
+            tokio::spawn(async move {
+                bridge.run().await;
+            });
+            info!("MQTT bridge started → {} ({} live streams)", self.global.mqtt_uri, cameras.len());
+        }
+
+        // ── Register cameras with NVR server ──────────────────────────
+        if !self.global.nvr_server_url.is_empty() && !self.mac_addr.is_empty() {
+            register_cameras(
+                &self.global.nvr_server_url,
+                &self.mac_addr,
+                &self.claim_token,
+                &camera_configs,
+            )
+            .await;
+
+            // Spawn periodic heartbeat (re-registers every 5 min to keep status=online)
+            let url = self.global.nvr_server_url.clone();
+            let mac = self.mac_addr.clone();
+            let token = self.claim_token.clone();
+            let cams = camera_configs.clone();
+            tokio::spawn(async move {
+                loop {
+                    tokio::time::sleep(Duration::from_secs(300)).await;
+                    register_cameras(&url, &mac, &token, &cams).await;
+                }
+            });
+        } else if self.global.nvr_server_url.is_empty() {
+            info!("NVR server URL not configured — cameras will not be registered centrally");
+        }
 
         // ── Start periodic discovery ──────────────────────────────────
         if self.global.discovery_enabled {
@@ -370,21 +396,22 @@ impl CameraManager {
         });
         tasks.push(main_handle);
 
-        // ── Sub stream capture (optional, for motion detection) ──────────
-        let motion_frame_rx = if !cfg.sub_rtsp_url.is_empty() {
+        // ── Sub stream capture (optional, for motion detection + live MQTT) ──
+        let (motion_frame_rx, live_frame_tx) = if !cfg.sub_rtsp_url.is_empty() {
             let (sub_capture, sub_rx) = CaptureSession::new(
                 format!("{id}/sub"),
                 cfg.sub_rtsp_url.clone(),
             );
             let sub_capture = sub_capture.with_credentials(username.clone(), password.clone());
+            let sub_sender = sub_capture.sender().clone();
             let sub_handle = tokio::spawn(async move {
                 sub_capture.run().await;
             });
             tasks.push(sub_handle);
-            sub_rx
+            (sub_rx, sub_sender)
         } else {
-            // Use main stream for motion detection
-            main_sender.subscribe()
+            // Use main stream for motion detection and live MQTT
+            (main_sender.subscribe(), main_sender.clone())
         };
 
         // ── Motion detector ──────────────────────────────────────────────
@@ -402,42 +429,11 @@ impl CameraManager {
             tasks.push(motion_handle);
         }
 
-        // ── Recorder ─────────────────────────────────────────────────────
-        let rec_frame_rx = main_sender.subscribe();
-        let recorder = Recorder::new(
-            id.clone(),
-            cfg.clone(),
-            self.global.recording_dir.clone(),
-            rec_frame_rx,
-            motion_rx.clone(),
-            self.event_tx.clone(),
-        );
-        let rec_handle = tokio::spawn(async move {
-            recorder.run().await;
-        });
-        tasks.push(rec_handle);
-
-        // ── Vault uploader ───────────────────────────────────────────────
-        if !self.global.vault_uri.is_empty() {
-            let uploader = VaultUploader::new(
-                id.clone(),
-                self.global.vault_uri.clone(),
-                self.global.vault_access_key.clone(),
-                self.global.vault_secret_key.clone(),
-                self.global.recording_dir.clone(),
-            );
-            let upload_handle = tokio::spawn(async move {
-                uploader.run().await;
-            });
-            tasks.push(upload_handle);
-        } else {
-            warn!("[{id}] No Vault URI configured — recordings will stay local");
-        }
-
         Ok(CameraSubsystem {
             config: cfg.clone(),
             tasks,
             motion_rx,
+            live_frame_tx,
         })
     }
 
@@ -540,5 +536,74 @@ async fn discovery_loop_with_matching(
             }
         }
         drop(running);
+    }
+}
+
+/// Register cameras with the NVR server (upsert by ac_client_id).
+/// Uses the device claim_token for authentication and tenant resolution.
+async fn register_cameras(
+    server_url: &str,
+    mac_addr: &str,
+    claim_token: &str,
+    cameras: &HashMap<String, CameraConfig>,
+) {
+    let camera_list: Vec<serde_json::Value> = cameras
+        .iter()
+        .filter(|(_, c)| c.enabled)
+        .map(|(id, c)| {
+            serde_json::json!({
+                "cam_id": id,
+                "name": c.name,
+                "rtsp_url": c.rtsp_url,
+                "sub_rtsp_url": c.sub_rtsp_url,
+                "rtsp_username": c.effective_rtsp_username(),
+                "rtsp_password": c.effective_rtsp_password(),
+                "onvif_xaddr": c.onvif_xaddr,
+                "recording_mode": match c.recording_mode {
+                    RecordingMode::Motion => "motion",
+                    RecordingMode::Continuous => "continuous",
+                    RecordingMode::Disabled => "disabled",
+                },
+                "motion_threshold": c.pixel_threshold,
+            })
+        })
+        .collect();
+
+    if camera_list.is_empty() {
+        return;
+    }
+
+    let payload = serde_json::json!({
+        "mac_addr": mac_addr,
+        "claim_token": claim_token,
+        "cameras": camera_list,
+    });
+
+    let url = format!("{}/api/cameras/register", server_url.trim_end_matches('/'));
+
+    match reqwest::Client::new()
+        .post(&url)
+        .json(&payload)
+        .timeout(Duration::from_secs(10))
+        .send()
+        .await
+    {
+        Ok(resp) if resp.status().is_success() => {
+            info!(
+                "Registered {} camera(s) with NVR server ({})",
+                camera_list.len(),
+                server_url
+            );
+        }
+        Ok(resp) => {
+            warn!(
+                "Camera registration failed: HTTP {} from {}",
+                resp.status(),
+                url
+            );
+        }
+        Err(e) => {
+            warn!("Camera registration failed ({}): {}", url, e);
+        }
     }
 }

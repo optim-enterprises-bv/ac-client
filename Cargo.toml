@@ -54,7 +54,7 @@ libc = "0.2"
 chrono = "0.4"
 
 # HTTP client for Axis camera API calls (HTTPS with self-signed certs)
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-webpki-roots", "multipart"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-webpki-roots", "multipart", "json"] }
 
 # USP / TR-369 — WebSocket and MQTT MTPs
 tokio-tungstenite = { version = "0.24", features = ["rustls-tls-native-roots"] }

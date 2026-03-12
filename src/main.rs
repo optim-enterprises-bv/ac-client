@@ -145,7 +145,7 @@ async fn main() {
     // Start camera subsystems (if compiled with camera feature)
     #[cfg(feature = "camera")]
     {
-        let cam_mgr = camera::CameraManager::new();
+        let cam_mgr = camera::CameraManager::new(cfg.mac_addr.clone(), cfg.claim_token.clone());
         cam_mgr.start().await;
         info!("Camera manager started");
         // cam_mgr lives for the duration of the process — leaked intentionally
