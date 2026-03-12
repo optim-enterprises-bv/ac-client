@@ -1,0 +1,14 @@
+{
+	"admin/services/kerberos-agent": {
+		"title": "Kerberos Agent",
+		"action": {
+			"type": "view",
+			"path": "kerberos/agent"
+		},
+		"depends": {
+			"acl": ["luci-app-kerberos-agent"],
+			"uci": { "kerberos-agent": true }
+		},
+		"order": 60
+	}
+}

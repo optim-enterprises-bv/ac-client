@@ -1,0 +1,82 @@
+#!/bin/sh /etc/rc.common
+# Kerberos.io Agent — procd init script
+
+START=95
+STOP=10
+USE_PROCD=1
+
+PROG=/usr/bin/kerberos-agent
+CONFIG_DIR=/etc/kerberos-agent
+DATA_DIR=/var/lib/kerberos-agent
+WWW_DIR=/usr/share/kerberos-agent/www
+
+start_service() {
+	config_load kerberos-agent
+
+	local enabled port rtsp_url mqtt_uri mqtt_username mqtt_password
+	local vault_uri vault_access_key vault_secret_key
+	local agent_name onvif_enabled onvif_xaddr onvif_username onvif_password
+
+	config_get_bool enabled main enabled 1
+	[ "$enabled" -eq 0 ] && return
+
+	config_get port main port 8080
+	config_get agent_name main name "agent"
+	config_get rtsp_url camera rtsp_url ""
+	config_get onvif_enabled camera onvif_enabled 0
+	config_get onvif_xaddr camera onvif_xaddr ""
+	config_get onvif_username camera onvif_username ""
+	config_get onvif_password camera onvif_password ""
+	config_get mqtt_uri mqtt uri ""
+	config_get mqtt_username mqtt username ""
+	config_get mqtt_password mqtt password ""
+	config_get vault_uri vault uri ""
+	config_get vault_access_key vault access_key ""
+	config_get vault_secret_key vault secret_key ""
+
+	# Ensure data directories exist
+	mkdir -p "$DATA_DIR/recordings" "$DATA_DIR/snapshots" "$DATA_DIR/log"
+
+	procd_open_instance
+	procd_set_param command "$PROG" \
+		-action run \
+		-port "$port" \
+		-config "$CONFIG_DIR" \
+		-name "$agent_name"
+
+	# Camera
+	[ -n "$rtsp_url" ] && procd_append_param env "AGENT_CAPTURE_IPCAMERA_RTSP=$rtsp_url"
+	[ "$onvif_enabled" -eq 1 ] && {
+		procd_append_param env "AGENT_CAPTURE_IPCAMERA_ONVIF=true"
+		[ -n "$onvif_xaddr" ] && procd_append_param env "AGENT_CAPTURE_IPCAMERA_ONVIF_XADDR=$onvif_xaddr"
+		[ -n "$onvif_username" ] && procd_append_param env "AGENT_CAPTURE_IPCAMERA_ONVIF_USERNAME=$onvif_username"
+		[ -n "$onvif_password" ] && procd_append_param env "AGENT_CAPTURE_IPCAMERA_ONVIF_PASSWORD=$onvif_password"
+	}
+
+	# MQTT
+	[ -n "$mqtt_uri" ] && procd_append_param env "AGENT_MQTT_URI=$mqtt_uri"
+	[ -n "$mqtt_username" ] && procd_append_param env "AGENT_MQTT_USERNAME=$mqtt_username"
+	[ -n "$mqtt_password" ] && procd_append_param env "AGENT_MQTT_PASSWORD=$mqtt_password"
+
+	# Vault storage
+	[ -n "$vault_uri" ] && {
+		procd_append_param env "AGENT_CLOUD=kstorage"
+		procd_append_param env "AGENT_KERBEROSVAULT_URI=$vault_uri"
+		[ -n "$vault_access_key" ] && procd_append_param env "AGENT_KERBEROSVAULT_ACCESS_KEY=$vault_access_key"
+		[ -n "$vault_secret_key" ] && procd_append_param env "AGENT_KERBEROSVAULT_SECRET_KEY=$vault_secret_key"
+	}
+
+	# Recording paths
+	procd_append_param env "AGENT_CAPTURE_RECORDING=true"
+	procd_append_param env "AGENT_CAPTURE_MOTION=true"
+
+	procd_set_param respawn 3600 5 5
+	procd_set_param stdout 1
+	procd_set_param stderr 1
+	procd_set_param user kerberos
+	procd_close_instance
+}
+
+service_triggers() {
+	procd_add_reload_trigger "kerberos-agent"
+}
