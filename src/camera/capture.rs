@@ -51,6 +51,11 @@ impl CaptureSession {
         self.tx.subscribe()
     }
 
+    /// Get a clone of the broadcast sender (for registering with live stream server).
+    pub fn sender(&self) -> &broadcast::Sender<VideoFrame> {
+        &self.tx
+    }
+
     /// Run the RTSP capture loop. Reconnects on failure with backoff.
     /// This method runs indefinitely until the task is cancelled.
     pub async fn run(&self) {
