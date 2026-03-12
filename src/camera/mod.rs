@@ -1,7 +1,7 @@
 //! Multi-camera surveillance module for ac-client.
 //!
-//! Provides RTSP/ONVIF camera capture, motion detection, recording,
-//! and upload to Kerberos Vault — all integrated into the USP agent.
+//! Provides RTSP/ONVIF camera capture, motion detection, and live H.264
+//! streaming via MQTT to the server — all integrated into the USP agent.
 //!
 //! # Architecture
 //!
@@ -10,8 +10,7 @@
 //!   ├── CameraSubsystem("cam-1")
 //!   │     ├── RtspCapture → PacketQueue
 //!   │     ├── MotionDetector (reads from queue)
-//!   │     ├── Recorder (writes MP4, triggered by motion or continuous)
-//!   │     └── Uploader (sends recordings to Vault/S3)
+//!   │     └── MqttBridge (streams ALL H.264 frames to server)
 //!   ├── CameraSubsystem("cam-2")
 //!   │     └── ...
 //!   ├── OnvifDiscovery (periodic network scan)
@@ -29,7 +28,5 @@ pub mod manager;
 pub mod motion;
 pub mod mqtt_bridge;
 pub mod onvif_discovery;
-pub mod recording;
-pub mod storage;
 
 pub use manager::CameraManager;

@@ -1,13 +1,19 @@
-//! MQTT event bridge — publishes camera events to EMQX.
+//! MQTT event & live stream bridge — publishes camera events and H.264 frames to EMQX.
 //!
 //! Subscribes to the camera event bus and publishes JSON messages for:
 //! - Motion start/stop
 //! - Recording start/complete
 //! - Camera connect/disconnect
 //!
-//! Topic format: `{prefix}/{camera_id}/{event_type}`
-//! e.g. `kerberos/cam0/motion`, `kerberos/cam0/recording`
+//! Also publishes ALL live H.264 frames (keyframes + P-frames) for each
+//! camera so that the server can reassemble a full video stream.  Each
+//! frame is prefixed with a 1-byte type header (0x01 = key, 0x00 = P).
+//!
+//! Topic format:
+//!   `{prefix}/{camera_id}/{event_type}` — JSON events
+//!   `{prefix}/{camera_id}/live`          — 1-byte header + raw H.264 frame bytes
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -16,6 +22,7 @@ use rumqttc::{AsyncClient, MqttOptions, QoS};
 use serde::Serialize;
 use tokio::sync::broadcast;
 
+use super::capture::VideoFrame;
 use super::events::{CameraEvent, CameraEventKind};
 
 /// JSON payload for motion events.
@@ -46,11 +53,18 @@ struct ConnectionPayload {
     timestamp: String,
 }
 
-/// MQTT bridge that forwards camera events to the broker.
+/// A camera stream registered for live publishing.
+pub struct LiveStream {
+    pub camera_id: String,
+    pub frame_rx: broadcast::Receiver<VideoFrame>,
+}
+
+/// MQTT bridge that forwards camera events and live frames to the broker.
 pub struct MqttBridge {
     topic_prefix: String,
     mqtt_uri: String,
     event_rx: broadcast::Receiver<CameraEvent>,
+    live_streams: Vec<LiveStream>,
 }
 
 impl MqttBridge {
@@ -63,13 +77,19 @@ impl MqttBridge {
             topic_prefix,
             mqtt_uri,
             event_rx,
+            live_streams: Vec::new(),
         }
+    }
+
+    /// Register a camera's frame broadcast for live MQTT publishing.
+    pub fn add_live_stream(&mut self, camera_id: String, frame_rx: broadcast::Receiver<VideoFrame>) {
+        self.live_streams.push(LiveStream { camera_id, frame_rx });
     }
 
     pub async fn run(mut self) {
         info!(
-            "Camera MQTT bridge starting (prefix={}, broker={})",
-            self.topic_prefix, self.mqtt_uri
+            "Camera MQTT bridge starting (prefix={}, broker={}, live_streams={})",
+            self.topic_prefix, self.mqtt_uri, self.live_streams.len()
         );
 
         let client_id = format!("ac-camera-{}", uuid::Uuid::new_v4().as_simple());
@@ -77,9 +97,10 @@ impl MqttBridge {
 
         let mut opts = MqttOptions::new(&client_id, &host, port);
         opts.set_keep_alive(Duration::from_secs(30));
-        opts.set_max_packet_size(64 * 1024, 64 * 1024);
+        // Allow up to 300KB packets for H.264 frames (250KB max frame + header + overhead)
+        opts.set_max_packet_size(300 * 1024, 300 * 1024);
 
-        let (client, mut eventloop) = AsyncClient::new(opts, 64);
+        let (client, mut eventloop) = AsyncClient::new(opts, 128);
         let client = Arc::new(client);
 
         // Spawn MQTT event loop
@@ -96,6 +117,14 @@ impl MqttBridge {
         });
 
         info!("Camera MQTT bridge connected");
+
+        // Spawn live frame publishers for each camera
+        let prefix = self.topic_prefix.clone();
+        for stream in self.live_streams.drain(..) {
+            let client = Arc::clone(&client);
+            let topic = format!("{}/{}/live", prefix, stream.camera_id);
+            tokio::spawn(publish_live_frames(client, topic, stream.camera_id, stream.frame_rx));
+        }
 
         // Forward events to MQTT
         loop {
@@ -197,6 +226,58 @@ impl MqttBridge {
             .await?;
 
         Ok(())
+    }
+}
+
+/// Publish ALL live H.264 frames for a single camera.
+///
+/// Every frame (keyframes and P-frames) is published so the server can
+/// reassemble a full H.264 stream.  A 1-byte header is prepended:
+///   0x01 = keyframe (IDR), 0x00 = P-frame / non-key.
+/// Frames larger than 250KB are skipped to avoid MQTT packet size issues.
+async fn publish_live_frames(
+    client: Arc<AsyncClient>,
+    topic: String,
+    camera_id: String,
+    mut frame_rx: broadcast::Receiver<VideoFrame>,
+) {
+    info!("[{camera_id}] Live MQTT stream publisher started → {topic}");
+
+    let max_frame_size = 250 * 1024; // 250KB max per MQTT message
+
+    loop {
+        match frame_rx.recv().await {
+            Ok(frame) => {
+                if frame.data.len() > max_frame_size {
+                    debug!(
+                        "[{camera_id}] Skipping oversized frame: {}KB",
+                        frame.data.len() / 1024
+                    );
+                    continue;
+                }
+
+                // Prepend 1-byte header: 0x01 = keyframe, 0x00 = P-frame
+                let header: u8 = if frame.is_keyframe { 0x01 } else { 0x00 };
+                let mut payload = Vec::with_capacity(1 + frame.data.len());
+                payload.push(header);
+                payload.extend_from_slice(&frame.data);
+
+                // QoS 0 — fire and forget, lowest latency
+                if let Err(e) = client
+                    .publish(&topic, QoS::AtMostOnce, false, payload)
+                    .await
+                {
+                    debug!("[{camera_id}] Live frame publish failed: {e}");
+                }
+            }
+            Err(broadcast::error::RecvError::Lagged(n)) => {
+                debug!("[{camera_id}] Live stream lagged, skipped {n} frames");
+            }
+            Err(broadcast::error::RecvError::Closed) => {
+                info!("[{camera_id}] Live stream closed");
+                return;
+            }
+        }
     }
 }
 
