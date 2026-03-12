@@ -53,7 +53,7 @@ libc = "0.2"
 chrono = "0.4"
 
 # HTTP client for Axis camera API calls (HTTPS with self-signed certs)
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-webpki-roots"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-webpki-roots", "multipart"] }
 
 # USP / TR-369 — WebSocket and MQTT MTPs
 tokio-tungstenite = { version = "0.24", features = ["rustls-tls-native-roots"] }
@@ -65,6 +65,17 @@ url     = "2"
 # WebSocket key generation
 rand = "0.8"
 base64 = "0.22"
+
+# Camera module — RTSP capture (pure Rust, no FFmpeg/CGo)
+retina = { version = "0.4", optional = true }
+mp4    = { version = "0.14", optional = true }
+
+[features]
+default = []
+camera = [
+    "dep:retina",
+    "dep:mp4",
+]
 
 [build-dependencies]
 prost-build = "0.13"

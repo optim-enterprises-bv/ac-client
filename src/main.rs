@@ -6,6 +6,8 @@
 
 mod apply;
 mod cam;
+#[cfg(feature = "camera")]
+mod camera;
 mod config;
 mod error;
 mod gnss;
@@ -139,6 +141,17 @@ async fn main() {
     let cfg = Arc::new(cfg);
 
     info!("ac-client starting (MTP={:?})", cfg.mtp);
+
+    // Start camera subsystems (if compiled with camera feature)
+    #[cfg(feature = "camera")]
+    {
+        let cam_mgr = camera::CameraManager::new();
+        cam_mgr.start().await;
+        info!("Camera manager started");
+        // cam_mgr lives for the duration of the process — leaked intentionally
+        // so camera tasks keep running alongside the USP agent.
+        std::mem::forget(cam_mgr);
+    }
 
     // Start GNSS reader (non-fatal if device not present)
     let gnss_pos = if cfg.gnss_dev.is_empty() {
