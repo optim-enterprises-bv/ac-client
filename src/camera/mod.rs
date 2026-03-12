@@ -32,5 +32,4 @@ pub mod onvif_discovery;
 pub mod recording;
 pub mod storage;
 
-pub use config::CameraConfig;
 pub use manager::CameraManager;

@@ -11,7 +11,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use log::{debug, error, info, warn};
+use log::{debug, info, warn};
 use rumqttc::{AsyncClient, MqttOptions, QoS};
 use serde::Serialize;
 use tokio::sync::broadcast;
@@ -83,7 +83,6 @@ impl MqttBridge {
         let client = Arc::new(client);
 
         // Spawn MQTT event loop
-        let mqtt_client = Arc::clone(&client);
         tokio::spawn(async move {
             loop {
                 match eventloop.poll().await {
@@ -135,7 +134,7 @@ impl MqttBridge {
                 ("motion", p)
             }
             CameraEventKind::MotionStopped {
-                duration_secs,
+                duration_secs: _,
                 peak_change,
             } => {
                 let p = serde_json::to_string(&MotionPayload {
@@ -180,7 +179,7 @@ impl MqttBridge {
                 })?;
                 ("status", p)
             }
-            CameraEventKind::Disconnected { error } => {
+            CameraEventKind::Disconnected { error: _ } => {
                 let p = serde_json::to_string(&ConnectionPayload {
                     camera_id: event.camera_id.clone(),
                     event: "disconnected".into(),

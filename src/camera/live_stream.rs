@@ -39,11 +39,6 @@ impl LiveStreamServer {
         }
     }
 
-    /// Get a read-only snapshot of registered stream senders.
-    pub async fn streams(&self) -> HashMap<String, broadcast::Sender<VideoFrame>> {
-        self.streams.read().await.clone()
-    }
-
     /// Register a camera's frame broadcast for live streaming.
     pub async fn register_camera(
         &self,

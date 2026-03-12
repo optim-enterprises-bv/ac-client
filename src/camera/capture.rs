@@ -13,12 +13,16 @@ use retina::client::{SessionGroup, SetupOptions};
 use retina::codec::CodecItem;
 use tokio::sync::broadcast;
 
+use super::events::{CameraEvent, CameraEventKind};
+
 /// A single video frame extracted from an RTSP stream.
 #[derive(Debug, Clone)]
 pub struct VideoFrame {
     /// Frame timestamp relative to stream start (clock ticks converted to seconds).
+    #[allow(dead_code)]
     pub pts_secs: f64,
     /// Wall-clock time when this frame was received.
+    #[allow(dead_code)]
     pub received_at: Instant,
     /// Raw NAL unit data (H.264 or H.265).
     pub data: Vec<u8>,
@@ -34,6 +38,8 @@ pub struct CaptureSession {
     url: String,
     /// Broadcast sender — multiple consumers (motion, recorder) subscribe.
     tx: broadcast::Sender<VideoFrame>,
+    /// Event bus for connection status events.
+    event_tx: Option<broadcast::Sender<CameraEvent>>,
 }
 
 impl CaptureSession {
@@ -43,12 +49,22 @@ impl CaptureSession {
     pub fn new(camera_id: String, url: String) -> (Self, broadcast::Receiver<VideoFrame>) {
         // Buffer 120 frames (~4 seconds at 30fps) to absorb consumer backpressure.
         let (tx, rx) = broadcast::channel(120);
-        (Self { camera_id, url, tx }, rx)
+        (Self { camera_id, url, tx, event_tx: None }, rx)
     }
 
-    /// Get a new subscriber to the frame broadcast.
-    pub fn subscribe(&self) -> broadcast::Receiver<VideoFrame> {
-        self.tx.subscribe()
+    /// Set the event bus for emitting connection status events.
+    pub fn with_event_tx(mut self, event_tx: broadcast::Sender<CameraEvent>) -> Self {
+        self.event_tx = Some(event_tx);
+        self
+    }
+
+    fn emit_event(&self, kind: CameraEventKind) {
+        if let Some(ref tx) = self.event_tx {
+            let _ = tx.send(CameraEvent {
+                camera_id: self.camera_id.clone(),
+                kind,
+            });
+        }
     }
 
     /// Get a clone of the broadcast sender (for registering with live stream server).
@@ -68,10 +84,14 @@ impl CaptureSession {
             match self.capture_stream().await {
                 Ok(()) => {
                     warn!("[{}] RTSP stream ended cleanly", self.camera_id);
+                    self.emit_event(CameraEventKind::Disconnected { error: None });
                     backoff = Duration::from_secs(1);
                 }
                 Err(e) => {
                     error!("[{}] RTSP capture error: {}", self.camera_id, e);
+                    self.emit_event(CameraEventKind::Disconnected {
+                        error: Some(e.to_string()),
+                    });
                 }
             }
 
@@ -115,6 +135,7 @@ impl CaptureSession {
             "[{}] RTSP connected, receiving frames",
             self.camera_id
         );
+        self.emit_event(CameraEventKind::Connected);
 
         let start = Instant::now();
 

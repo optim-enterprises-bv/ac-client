@@ -12,6 +12,7 @@ pub struct CameraEvent {
 
 /// Kinds of camera events.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub enum CameraEventKind {
     /// Motion detected — change exceeds threshold.
     MotionStarted {

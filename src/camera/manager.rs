@@ -25,11 +25,13 @@ use super::storage::VaultUploader;
 struct CameraSubsystem {
     config: CameraConfig,
     tasks: Vec<JoinHandle<()>>,
+    #[allow(dead_code)]
     motion_rx: watch::Receiver<bool>,
 }
 
 /// Status snapshot for a single camera (exposed to USP / API).
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct CameraStatus {
     pub id: String,
     pub name: String,
@@ -341,6 +343,7 @@ impl CameraManager {
             format!("{id}/main"),
             cfg.rtsp_url.clone(),
         );
+        let main_capture = main_capture.with_event_tx(self.event_tx.clone());
         let main_sender = main_capture.sender().clone();
 
         // Register with live stream server
@@ -425,6 +428,7 @@ impl CameraManager {
         })
     }
 
+    #[allow(dead_code)]
     pub async fn status(&self) -> Vec<CameraStatus> {
         let cameras = self.cameras.read().await;
         cameras
@@ -439,6 +443,7 @@ impl CameraManager {
             .collect()
     }
 
+    #[allow(dead_code)]
     pub async fn stop(&self) {
         info!("Stopping all camera subsystems...");
         let mut cameras = self.cameras.write().await;
