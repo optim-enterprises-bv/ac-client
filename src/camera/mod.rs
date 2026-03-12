@@ -27,6 +27,7 @@ pub mod live_stream;
 pub mod manager;
 pub mod motion;
 pub mod mqtt_bridge;
+pub mod mqtt_control;
 pub mod onvif_discovery;
 
 pub use manager::CameraManager;
