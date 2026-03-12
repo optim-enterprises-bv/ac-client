@@ -56,6 +56,8 @@ pub struct CameraGlobalConfig {
     pub mqtt_uri: String,
     /// Port for the live stream HTTP server (0 = disabled).
     pub live_stream_port: u16,
+    /// NVR server URL for camera registration (e.g. "http://ac-server:8080").
+    pub nvr_server_url: String,
 }
 
 impl Default for CameraGlobalConfig {
@@ -70,6 +72,7 @@ impl Default for CameraGlobalConfig {
             recording_dir: "/tmp/kerberos-agent/recordings".into(),
             mqtt_uri: String::new(),
             live_stream_port: 0,
+            nvr_server_url: String::new(),
         }
     }
 }
@@ -242,6 +245,11 @@ pub fn load_global_config() -> CameraGlobalConfig {
 
     if let Ok(port) = uci_get("optimacs.camera_global.live_stream_port").parse::<u16>() {
         cfg.live_stream_port = port;
+    }
+
+    let nvr_url = uci_get("optimacs.camera_global.nvr_server_url");
+    if !nvr_url.is_empty() {
+        cfg.nvr_server_url = nvr_url;
     }
 
     cfg

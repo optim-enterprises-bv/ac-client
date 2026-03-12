@@ -46,10 +46,14 @@ pub struct CameraManager {
     cameras: Arc<RwLock<HashMap<String, CameraSubsystem>>>,
     event_tx: broadcast::Sender<CameraEvent>,
     live_server: Option<Arc<LiveStreamServer>>,
+    /// Device MAC address (used as part of ac_client_id for registration).
+    mac_addr: String,
+    /// Claim token linking this device to a tenant account.
+    claim_token: String,
 }
 
 impl CameraManager {
-    pub fn new() -> Self {
+    pub fn new(mac_addr: String, claim_token: String) -> Self {
         let global = config::load_global_config();
         let (event_tx, _) = broadcast::channel(256);
 
@@ -64,6 +68,8 @@ impl CameraManager {
             cameras: Arc::new(RwLock::new(HashMap::new())),
             event_tx,
             live_server,
+            mac_addr,
+            claim_token,
         }
     }
 
@@ -99,11 +105,19 @@ impl CameraManager {
             }
         );
         info!(
-            "  NVR server:       {}",
+            "  Vault:            {}",
             if self.global.vault_uri.is_empty() {
                 "not configured (recordings stay local)".into()
             } else {
                 self.global.vault_uri.clone()
+            }
+        );
+        info!(
+            "  NVR server:       {}",
+            if self.global.nvr_server_url.is_empty() {
+                "not configured (no central registration)".into()
+            } else {
+                self.global.nvr_server_url.clone()
             }
         );
 
@@ -221,6 +235,31 @@ impl CameraManager {
             started, failed, disabled_count
         );
         info!("═══════════════════════════════════════════════════════");
+
+        // ── Register cameras with NVR server ──────────────────────────
+        if !self.global.nvr_server_url.is_empty() && !self.mac_addr.is_empty() {
+            register_cameras(
+                &self.global.nvr_server_url,
+                &self.mac_addr,
+                &self.claim_token,
+                &camera_configs,
+            )
+            .await;
+
+            // Spawn periodic heartbeat (re-registers every 5 min to keep status=online)
+            let url = self.global.nvr_server_url.clone();
+            let mac = self.mac_addr.clone();
+            let token = self.claim_token.clone();
+            let cams = camera_configs.clone();
+            tokio::spawn(async move {
+                loop {
+                    tokio::time::sleep(Duration::from_secs(300)).await;
+                    register_cameras(&url, &mac, &token, &cams).await;
+                }
+            });
+        } else if self.global.nvr_server_url.is_empty() {
+            info!("NVR server URL not configured — cameras will not be registered centrally");
+        }
 
         // ── Start periodic discovery ──────────────────────────────────
         if self.global.discovery_enabled {
@@ -540,5 +579,74 @@ async fn discovery_loop_with_matching(
             }
         }
         drop(running);
+    }
+}
+
+/// Register cameras with the NVR server (upsert by ac_client_id).
+/// Uses the device claim_token for authentication and tenant resolution.
+async fn register_cameras(
+    server_url: &str,
+    mac_addr: &str,
+    claim_token: &str,
+    cameras: &HashMap<String, CameraConfig>,
+) {
+    let camera_list: Vec<serde_json::Value> = cameras
+        .iter()
+        .filter(|(_, c)| c.enabled)
+        .map(|(id, c)| {
+            serde_json::json!({
+                "cam_id": id,
+                "name": c.name,
+                "rtsp_url": c.rtsp_url,
+                "sub_rtsp_url": c.sub_rtsp_url,
+                "rtsp_username": c.effective_rtsp_username(),
+                "rtsp_password": c.effective_rtsp_password(),
+                "onvif_xaddr": c.onvif_xaddr,
+                "recording_mode": match c.recording_mode {
+                    RecordingMode::Motion => "motion",
+                    RecordingMode::Continuous => "continuous",
+                    RecordingMode::Disabled => "disabled",
+                },
+                "motion_threshold": c.pixel_threshold,
+            })
+        })
+        .collect();
+
+    if camera_list.is_empty() {
+        return;
+    }
+
+    let payload = serde_json::json!({
+        "mac_addr": mac_addr,
+        "claim_token": claim_token,
+        "cameras": camera_list,
+    });
+
+    let url = format!("{}/api/cameras/register", server_url.trim_end_matches('/'));
+
+    match reqwest::Client::new()
+        .post(&url)
+        .json(&payload)
+        .timeout(Duration::from_secs(10))
+        .send()
+        .await
+    {
+        Ok(resp) if resp.status().is_success() => {
+            info!(
+                "Registered {} camera(s) with NVR server ({})",
+                camera_list.len(),
+                server_url
+            );
+        }
+        Ok(resp) => {
+            warn!(
+                "Camera registration failed: HTTP {} from {}",
+                resp.status(),
+                url
+            );
+        }
+        Err(e) => {
+            warn!("Camera registration failed ({}): {}", url, e);
+        }
     }
 }
