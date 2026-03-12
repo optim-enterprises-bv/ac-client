@@ -57,7 +57,8 @@ pub fn discover(timeout: Duration) -> Vec<OnvifDevice> {
         return Vec::new();
     }
 
-    debug!("Sent WS-Discovery probe, waiting for responses...");
+    info!("ONVIF: sent WS-Discovery probe to {}, waiting {}s for responses...",
+        WS_DISCOVERY_ADDR, timeout.as_secs());
 
     let mut devices = Vec::new();
     let deadline = std::time::Instant::now() + timeout;
@@ -93,7 +94,11 @@ pub fn discover(timeout: Duration) -> Vec<OnvifDevice> {
     devices
 }
 
-/// Periodic discovery task — runs every `interval` seconds.
+/// Periodic discovery task — standalone version (without camera cross-referencing).
+///
+/// Prefer `CameraManager::start_discovery_loop()` which cross-references
+/// discovered devices against configured cameras. This function is kept for
+/// standalone/HTTP endpoint use.
 pub async fn discovery_loop(interval: Duration) {
     let probe_timeout = Duration::from_secs(5);
 
@@ -105,19 +110,20 @@ pub async fn discovery_loop(interval: Duration) {
             .await
             .unwrap_or_default();
 
-        for dev in &devices {
-            info!(
-                "  ONVIF: {} ({}{})",
-                dev.ip,
-                dev.manufacturer.as_deref().unwrap_or("unknown"),
-                dev.model
-                    .as_ref()
-                    .map(|m| format!(" {m}"))
-                    .unwrap_or_default()
-            );
+        if devices.is_empty() {
+            info!("ONVIF scan complete: no devices found on network");
+        } else {
+            info!("ONVIF scan complete: {} device(s) found", devices.len());
+            for dev in &devices {
+                info!(
+                    "  ONVIF: {} ({} {}) xaddr={}",
+                    dev.ip,
+                    dev.manufacturer.as_deref().unwrap_or("unknown"),
+                    dev.model.as_deref().unwrap_or(""),
+                    dev.xaddr,
+                );
+            }
         }
-
-        // TODO: auto-add discovered cameras to UCI config if not already present
 
         tokio::time::sleep(interval).await;
     }

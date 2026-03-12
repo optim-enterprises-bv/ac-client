@@ -110,15 +110,27 @@ async fn handle_connection(
         .and_then(|line| line.split_whitespace().nth(1))
         .unwrap_or("/");
 
+    // Determine HTTP method
+    let method = request
+        .lines()
+        .next()
+        .and_then(|line| line.split_whitespace().next())
+        .unwrap_or("GET");
+
     // Parse: /live/{camera_id}/mjpeg or /live/{camera_id}/h264
     let parts: Vec<&str> = path.trim_matches('/').split('/').collect();
 
+    // ── POST /discover or POST /cameras/discover — ONVIF discovery ───
+    if (path == "/discover" || path == "/cameras/discover") && method == "POST" {
+        return handle_discover(stream).await;
+    }
+
+    // ── GET / — camera list ──────────────────────────────────────────
     if parts.len() < 3 || parts[0] != "live" {
-        // Return camera list as JSON
         let camera_ids: Vec<String> = streams.read().await.keys().cloned().collect();
         let body = serde_json::to_string(&camera_ids)?;
         let response = format!(
-            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: {}\r\n\r\n{}",
             body.len(),
             body
         );
@@ -235,5 +247,45 @@ async fn handle_connection(
         }
     }
 
+    Ok(())
+}
+
+/// Handle ONVIF discovery request — runs a probe and returns JSON results.
+async fn handle_discover(mut stream: tokio::net::TcpStream) -> anyhow::Result<()> {
+    use super::onvif_discovery;
+    use std::time::Duration;
+
+    info!("ONVIF discovery requested via HTTP");
+
+    // Run discovery in a blocking thread (it does UDP I/O)
+    let devices = tokio::task::spawn_blocking(move || {
+        onvif_discovery::discover(Duration::from_secs(5))
+    })
+    .await
+    .unwrap_or_default();
+
+    // Build JSON response
+    let cameras: Vec<serde_json::Value> = devices
+        .into_iter()
+        .map(|d| {
+            serde_json::json!({
+                "xaddr": d.xaddr,
+                "ip": d.ip,
+                "name": d.manufacturer.as_deref().unwrap_or(""),
+                "hardware": d.model.as_deref().unwrap_or(""),
+            })
+        })
+        .collect();
+
+    let body = serde_json::json!({ "cameras": cameras }).to_string();
+
+    let response = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: {}\r\n\r\n{}",
+        body.len(),
+        body
+    );
+    stream.write_all(response.as_bytes()).await?;
+
+    info!("ONVIF discovery returned {} camera(s)", cameras.len());
     Ok(())
 }
