@@ -329,13 +329,14 @@ impl CameraManager {
             anyhow::bail!("No RTSP URL configured for camera {id}");
         }
 
-        // Build authenticated RTSP URLs
-        let main_url = cfg.authenticated_rtsp_url(&cfg.rtsp_url);
-        let has_creds = main_url != cfg.rtsp_url;
+        // Resolve RTSP credentials
+        let username = cfg.effective_rtsp_username().to_string();
+        let password = cfg.effective_rtsp_password().to_string();
+        let has_creds = !username.is_empty();
 
         debug!("[{id}] Spawning subsystems: rtsp={}, auth={}, sub_rtsp={}, recording={:?}, onvif={}",
             cfg.rtsp_url,
-            if has_creds { "yes" } else { "no" },
+            if has_creds { format!("yes (user={})", username) } else { "no".into() },
             if cfg.sub_rtsp_url.is_empty() { "(using main)" } else { &cfg.sub_rtsp_url },
             cfg.recording_mode,
             cfg.onvif_enabled,
@@ -350,9 +351,11 @@ impl CameraManager {
         // ── Main stream capture ──────────────────────────────────────────
         let (main_capture, _main_rx) = CaptureSession::new(
             format!("{id}/main"),
-            main_url,
+            cfg.rtsp_url.clone(),
         );
-        let main_capture = main_capture.with_event_tx(self.event_tx.clone());
+        let main_capture = main_capture
+            .with_event_tx(self.event_tx.clone())
+            .with_credentials(username.clone(), password.clone());
         let main_sender = main_capture.sender().clone();
 
         // Register with live stream server
@@ -369,11 +372,11 @@ impl CameraManager {
 
         // ── Sub stream capture (optional, for motion detection) ──────────
         let motion_frame_rx = if !cfg.sub_rtsp_url.is_empty() {
-            let sub_url = cfg.authenticated_rtsp_url(&cfg.sub_rtsp_url);
             let (sub_capture, sub_rx) = CaptureSession::new(
                 format!("{id}/sub"),
-                sub_url,
+                cfg.sub_rtsp_url.clone(),
             );
+            let sub_capture = sub_capture.with_credentials(username.clone(), password.clone());
             let sub_handle = tokio::spawn(async move {
                 sub_capture.run().await;
             });

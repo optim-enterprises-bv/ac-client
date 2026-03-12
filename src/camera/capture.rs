@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use futures_util::StreamExt;
 use log::{debug, error, info, warn};
-use retina::client::{SessionGroup, SetupOptions};
+use retina::client::{Credentials, SessionGroup, SetupOptions};
 use retina::codec::CodecItem;
 use tokio::sync::broadcast;
 
@@ -34,8 +34,10 @@ pub struct VideoFrame {
 pub struct CaptureSession {
     /// Camera identifier.
     camera_id: String,
-    /// RTSP URL.
+    /// RTSP URL (without credentials).
     url: String,
+    /// Optional RTSP credentials (passed separately to retina).
+    creds: Option<Credentials>,
     /// Broadcast sender — multiple consumers (motion, recorder) subscribe.
     tx: broadcast::Sender<VideoFrame>,
     /// Event bus for connection status events.
@@ -49,7 +51,15 @@ impl CaptureSession {
     pub fn new(camera_id: String, url: String) -> (Self, broadcast::Receiver<VideoFrame>) {
         // Buffer 120 frames (~4 seconds at 30fps) to absorb consumer backpressure.
         let (tx, rx) = broadcast::channel(120);
-        (Self { camera_id, url, tx, event_tx: None }, rx)
+        (Self { camera_id, url, creds: None, tx, event_tx: None }, rx)
+    }
+
+    /// Set RTSP credentials for digest authentication.
+    pub fn with_credentials(mut self, username: String, password: String) -> Self {
+        if !username.is_empty() {
+            self.creds = Some(Credentials { username, password });
+        }
+        self
     }
 
     /// Set the event bus for emitting connection status events.
@@ -110,12 +120,11 @@ impl CaptureSession {
         let parsed_url = url::Url::parse(&self.url)?;
         let session_group = Arc::new(SessionGroup::default());
 
-        let mut session = retina::client::Session::describe(
-            parsed_url,
-            retina::client::SessionOptions::default()
-                .session_group(session_group),
-        )
-        .await?;
+        let opts = retina::client::SessionOptions::default()
+            .session_group(session_group)
+            .creds(self.creds.clone());
+
+        let mut session = retina::client::Session::describe(parsed_url, opts).await?;
 
         // Find the first video stream.
         let video_idx = session

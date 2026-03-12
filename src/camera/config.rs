@@ -181,30 +181,6 @@ impl CameraConfig {
         }
     }
 
-    /// Build an RTSP URL with credentials embedded if available.
-    /// `rtsp://host:port/path` → `rtsp://user:pass@host:port/path`
-    pub fn authenticated_rtsp_url(&self, base_url: &str) -> String {
-        let username = self.effective_rtsp_username();
-        if username.is_empty() {
-            return base_url.to_string();
-        }
-        let password = self.effective_rtsp_password();
-
-        // Insert credentials after the scheme://
-        if let Some(idx) = base_url.find("://") {
-            let scheme = &base_url[..idx + 3];
-            let rest = &base_url[idx + 3..];
-            // Strip existing credentials if present
-            let rest = if let Some(at) = rest.find('@') {
-                &rest[at + 1..]
-            } else {
-                rest
-            };
-            format!("{scheme}{username}:{password}@{rest}")
-        } else {
-            base_url.to_string()
-        }
-    }
 }
 
 /// Read a single UCI value, returning empty string on failure.
