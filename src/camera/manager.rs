@@ -17,6 +17,7 @@ use super::events::CameraEvent;
 use super::live_stream::LiveStreamServer;
 use super::motion::MotionDetector;
 use super::mqtt_bridge::MqttBridge;
+use super::mqtt_control::{MqttControl, CameraOnvifInfo};
 use super::onvif_discovery;
 
 /// Runtime state for a single camera.
@@ -221,6 +222,28 @@ impl CameraManager {
                 bridge.run().await;
             });
             info!("MQTT bridge started → {} ({} live streams)", self.global.mqtt_uri, cameras.len());
+
+            // Start MQTT control channel for PTZ commands
+            let control = MqttControl::new(
+                self.global.mqtt_topic_prefix.clone(),
+                self.global.mqtt_uri.clone(),
+            );
+
+            // Register cameras that have ONVIF enabled
+            for (id, sub) in cameras.iter() {
+                if sub.config.onvif_enabled && !sub.config.onvif_xaddr.is_empty() {
+                    control.add_camera(id.clone(), CameraOnvifInfo {
+                        onvif_xaddr: sub.config.onvif_xaddr.clone(),
+                        username: sub.config.effective_rtsp_username().to_string(),
+                        password: sub.config.effective_rtsp_password().to_string(),
+                    }).await;
+                }
+            }
+
+            tokio::spawn(async move {
+                control.run().await;
+            });
+            info!("MQTT control channel started for PTZ commands");
         }
 
         // ── Register cameras with NVR server ──────────────────────────

@@ -282,7 +282,7 @@ async fn publish_live_frames(
 }
 
 /// Parse mqtt://host:port or tcp://host:port into (host, port).
-fn parse_mqtt_uri(uri: &str) -> (String, u16) {
+pub fn parse_mqtt_uri(uri: &str) -> (String, u16) {
     let stripped = uri
         .trim_start_matches("mqtt://")
         .trim_start_matches("mqtts://")
