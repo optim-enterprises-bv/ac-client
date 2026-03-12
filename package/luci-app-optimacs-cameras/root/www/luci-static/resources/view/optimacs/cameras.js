@@ -287,6 +287,15 @@ return view.extend({
 		o.placeholder = 'rtsp://192.168.1.100:554/stream2';
 		o.optional = true;
 
+		o = s.taboption('general', form.Value, 'rtsp_username', _('RTSP Username'),
+			_('Username for RTSP authentication. If empty, falls back to ONVIF username.'));
+		o.optional = true;
+
+		o = s.taboption('general', form.Value, 'rtsp_password', _('RTSP Password'),
+			_('Password for RTSP authentication. If empty, falls back to ONVIF password.'));
+		o.password = true;
+		o.optional = true;
+
 		// ── Recording tab ────────────────────────────────────────────
 
 		o = s.taboption('recording', form.ListValue, 'recording_mode', _('Recording Mode'));

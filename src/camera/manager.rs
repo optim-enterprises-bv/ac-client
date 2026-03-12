@@ -329,19 +329,28 @@ impl CameraManager {
             anyhow::bail!("No RTSP URL configured for camera {id}");
         }
 
-        debug!("[{id}] Spawning subsystems: rtsp={}, sub_rtsp={}, recording={:?}, onvif={}",
+        // Build authenticated RTSP URLs
+        let main_url = cfg.authenticated_rtsp_url(&cfg.rtsp_url);
+        let has_creds = main_url != cfg.rtsp_url;
+
+        debug!("[{id}] Spawning subsystems: rtsp={}, auth={}, sub_rtsp={}, recording={:?}, onvif={}",
             cfg.rtsp_url,
+            if has_creds { "yes" } else { "no" },
             if cfg.sub_rtsp_url.is_empty() { "(using main)" } else { &cfg.sub_rtsp_url },
             cfg.recording_mode,
             cfg.onvif_enabled,
         );
+
+        if !has_creds {
+            warn!("[{id}] No RTSP credentials configured — authentication may fail");
+        }
 
         let (motion_tx, motion_rx) = watch::channel(false);
 
         // ── Main stream capture ──────────────────────────────────────────
         let (main_capture, _main_rx) = CaptureSession::new(
             format!("{id}/main"),
-            cfg.rtsp_url.clone(),
+            main_url,
         );
         let main_capture = main_capture.with_event_tx(self.event_tx.clone());
         let main_sender = main_capture.sender().clone();
@@ -360,9 +369,10 @@ impl CameraManager {
 
         // ── Sub stream capture (optional, for motion detection) ──────────
         let motion_frame_rx = if !cfg.sub_rtsp_url.is_empty() {
+            let sub_url = cfg.authenticated_rtsp_url(&cfg.sub_rtsp_url);
             let (sub_capture, sub_rx) = CaptureSession::new(
                 format!("{id}/sub"),
-                cfg.sub_rtsp_url.clone(),
+                sub_url,
             );
             let sub_handle = tokio::spawn(async move {
                 sub_capture.run().await;

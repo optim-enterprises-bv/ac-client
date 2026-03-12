@@ -105,6 +105,10 @@ pub struct CameraConfig {
     pub rtsp_url: String,
     /// Sub RTSP stream URL (low resolution, used for motion detection).
     pub sub_rtsp_url: String,
+    /// RTSP username (falls back to ONVIF username if empty).
+    pub rtsp_username: String,
+    /// RTSP password (falls back to ONVIF password if empty).
+    pub rtsp_password: String,
     /// ONVIF enabled.
     pub onvif_enabled: bool,
     /// ONVIF device service address.
@@ -137,6 +141,8 @@ impl Default for CameraConfig {
             enabled: true,
             rtsp_url: String::new(),
             sub_rtsp_url: String::new(),
+            rtsp_username: String::new(),
+            rtsp_password: String::new(),
             onvif_enabled: false,
             onvif_xaddr: String::new(),
             onvif_username: String::new(),
@@ -148,6 +154,55 @@ impl Default for CameraConfig {
             pixel_threshold: 150,
             auto_clean: true,
             max_storage_mb: 500,
+        }
+    }
+}
+
+impl CameraConfig {
+    /// Get the effective RTSP username (falls back to ONVIF username).
+    pub fn effective_rtsp_username(&self) -> &str {
+        if !self.rtsp_username.is_empty() {
+            &self.rtsp_username
+        } else if self.onvif_enabled && !self.onvif_username.is_empty() {
+            &self.onvif_username
+        } else {
+            ""
+        }
+    }
+
+    /// Get the effective RTSP password (falls back to ONVIF password).
+    pub fn effective_rtsp_password(&self) -> &str {
+        if !self.rtsp_password.is_empty() {
+            &self.rtsp_password
+        } else if self.onvif_enabled && !self.onvif_password.is_empty() {
+            &self.onvif_password
+        } else {
+            ""
+        }
+    }
+
+    /// Build an RTSP URL with credentials embedded if available.
+    /// `rtsp://host:port/path` → `rtsp://user:pass@host:port/path`
+    pub fn authenticated_rtsp_url(&self, base_url: &str) -> String {
+        let username = self.effective_rtsp_username();
+        if username.is_empty() {
+            return base_url.to_string();
+        }
+        let password = self.effective_rtsp_password();
+
+        // Insert credentials after the scheme://
+        if let Some(idx) = base_url.find("://") {
+            let scheme = &base_url[..idx + 3];
+            let rest = &base_url[idx + 3..];
+            // Strip existing credentials if present
+            let rest = if let Some(at) = rest.find('@') {
+                &rest[at + 1..]
+            } else {
+                rest
+            };
+            format!("{scheme}{username}:{password}@{rest}")
+        } else {
+            base_url.to_string()
         }
     }
 }
@@ -261,6 +316,8 @@ pub fn load_cameras() -> HashMap<String, CameraConfig> {
         cam.name = uci_get(&format!("{prefix}.name"));
         cam.rtsp_url = uci_get(&format!("{prefix}.rtsp_url"));
         cam.sub_rtsp_url = uci_get(&format!("{prefix}.sub_rtsp_url"));
+        cam.rtsp_username = uci_get(&format!("{prefix}.rtsp_username"));
+        cam.rtsp_password = uci_get(&format!("{prefix}.rtsp_password"));
 
         let onvif = uci_get(&format!("{prefix}.onvif_enabled"));
         cam.onvif_enabled = uci_bool(&onvif);
