@@ -40,6 +40,11 @@ PKG_MIRROR_HASH    := skip
 
 PKG_BUILD_PARALLEL := 1
 
+# ── Rust build options ─────────────────────────────────────────────────────────
+# Enable the camera feature for multi-camera surveillance support
+# (RTSP capture, motion detection, recording, MQTT events, live stream relay)
+RUST_PKG_FEATURES := camera
+
 # ── Includes ─────────────────────────────────────────────────────────────────
 include $(INCLUDE_DIR)/package.mk
 include $(TOPDIR)/feeds/packages/lang/rust/rust-package.mk
@@ -64,6 +69,9 @@ define Package/ac-client/description
     • Firmware upgrade via sysupgrade
     • ValueChange telemetry heartbeats (uptime, load, GPS, wireless, modem)
     • Axis IP-camera discovery and JPEG upload
+    • Multi-camera surveillance (RTSP capture, motion detection, recording)
+    • Kerberos Vault upload and MQTT camera events
+    • Live stream relay (H.264/MJPEG over HTTP)
 
   TLS uses TLS 1.3 with an X25519+ML-KEM-768 post-quantum hybrid KEM,
   matching the ac-server rustls-post-quantum configuration.
