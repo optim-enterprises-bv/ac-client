@@ -1,40 +1,29 @@
 //! Frame-differential motion detection.
 //!
 //! Compares consecutive frames by computing a simple pixel-difference metric
-//! on decoded grayscale thumbnails. When the metric exceeds the configured
-//! threshold, a motion event is emitted.
-//!
-//! This is intentionally simple — matching the Kerberos Agent's approach of
-//! pixel-level delta with a configurable threshold. More sophisticated
-//! algorithms (background subtraction, optical flow) can be added later.
+//! on raw NAL data. When the metric exceeds the configured threshold, a motion
+//! event is emitted on both the event bus (for MQTT) and the motion watch
+//! channel (for the recorder).
 
 use std::time::{Duration, Instant};
 
 use log::{debug, info, warn};
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, watch};
 
 use super::capture::VideoFrame;
-
-/// Motion event emitted when motion is detected or stops.
-#[derive(Debug, Clone)]
-pub struct MotionEvent {
-    pub camera_id: String,
-    pub started_at: Instant,
-    pub ended_at: Option<Instant>,
-    /// Peak change percentage during this event.
-    pub peak_change: f32,
-}
+use super::events::{CameraEvent, CameraEventKind};
 
 /// Lightweight motion detector operating on raw frame data.
 ///
-/// Since we receive raw NAL units (not decoded pixels), this detector uses
-/// a simple heuristic: compare the byte-level entropy/difference between
-/// consecutive frames. For proper pixel-level detection, frames would need
-/// to be decoded first — that's a future enhancement.
+/// Emits events to:
+/// - `event_tx` (broadcast) — for MQTT bridge, status tracking
+/// - `motion_tx` (watch) — for recorder trigger (true = motion active)
 pub struct MotionDetector {
     camera_id: String,
     rx: broadcast::Receiver<VideoFrame>,
     threshold: u32,
+    event_tx: broadcast::Sender<CameraEvent>,
+    motion_tx: watch::Sender<bool>,
 }
 
 impl MotionDetector {
@@ -42,22 +31,30 @@ impl MotionDetector {
         camera_id: String,
         rx: broadcast::Receiver<VideoFrame>,
         threshold: u32,
+        event_tx: broadcast::Sender<CameraEvent>,
+        motion_tx: watch::Sender<bool>,
     ) -> Self {
         Self {
             camera_id,
             rx,
             threshold,
+            event_tx,
+            motion_tx,
         }
     }
 
     /// Run the motion detection loop.
     pub async fn run(mut self) {
-        info!("[{}] Motion detector started (threshold={})", self.camera_id, self.threshold);
+        info!(
+            "[{}] Motion detector started (threshold={})",
+            self.camera_id, self.threshold
+        );
 
         let mut prev_frame: Option<Vec<u8>> = None;
         let mut in_motion = false;
         let mut motion_start = Instant::now();
         let mut last_motion = Instant::now();
+        let mut peak_change: f32 = 0.0;
         let cooldown = Duration::from_secs(3);
 
         loop {
@@ -70,20 +67,52 @@ impl MotionDetector {
                             if !in_motion {
                                 in_motion = true;
                                 motion_start = Instant::now();
+                                peak_change = change;
+
+                                // Notify recorder
+                                let _ = self.motion_tx.send(true);
+
+                                // Emit event
+                                let _ = self.event_tx.send(CameraEvent {
+                                    camera_id: self.camera_id.clone(),
+                                    kind: CameraEventKind::MotionStarted {
+                                        change_pct: change,
+                                    },
+                                });
+
                                 info!(
                                     "[{}] Motion started (change={:.1}%)",
                                     self.camera_id, change
                                 );
                             }
+                            if change > peak_change {
+                                peak_change = change;
+                            }
                             last_motion = Instant::now();
                         } else if in_motion && last_motion.elapsed() > cooldown {
                             in_motion = false;
                             let duration = motion_start.elapsed();
+
+                            // Notify recorder
+                            let _ = self.motion_tx.send(false);
+
+                            // Emit event
+                            let _ = self.event_tx.send(CameraEvent {
+                                camera_id: self.camera_id.clone(),
+                                kind: CameraEventKind::MotionStopped {
+                                    duration_secs: duration.as_secs_f64(),
+                                    peak_change,
+                                },
+                            });
+
                             info!(
-                                "[{}] Motion ended (duration={:.1}s)",
+                                "[{}] Motion ended (duration={:.1}s, peak={:.1}%)",
                                 self.camera_id,
-                                duration.as_secs_f64()
+                                duration.as_secs_f64(),
+                                peak_change
                             );
+
+                            peak_change = 0.0;
                         }
                     }
 
@@ -93,10 +122,16 @@ impl MotionDetector {
                     }
                 }
                 Err(broadcast::error::RecvError::Lagged(n)) => {
-                    warn!("[{}] Motion detector lagged, skipped {n} frames", self.camera_id);
+                    warn!(
+                        "[{}] Motion detector lagged, skipped {n} frames",
+                        self.camera_id
+                    );
                 }
                 Err(broadcast::error::RecvError::Closed) => {
-                    debug!("[{}] Capture channel closed, motion detector exiting", self.camera_id);
+                    debug!(
+                        "[{}] Capture channel closed, motion detector exiting",
+                        self.camera_id
+                    );
                     return;
                 }
             }

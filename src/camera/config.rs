@@ -52,6 +52,10 @@ pub struct CameraGlobalConfig {
     pub discovery_interval: u64,
     /// Local directory for recordings.
     pub recording_dir: String,
+    /// MQTT broker URI for camera events (e.g. "mqtt://emqx.optimacs:1883").
+    pub mqtt_uri: String,
+    /// Port for the live stream HTTP server (0 = disabled).
+    pub live_stream_port: u16,
 }
 
 impl Default for CameraGlobalConfig {
@@ -64,6 +68,8 @@ impl Default for CameraGlobalConfig {
             discovery_enabled: true,
             discovery_interval: 300,
             recording_dir: "/tmp/kerberos-agent/recordings".into(),
+            mqtt_uri: String::new(),
+            live_stream_port: 0,
         }
     }
 }
@@ -196,6 +202,15 @@ pub fn load_global_config() -> CameraGlobalConfig {
     let dir = uci_get("optimacs.camera_global.recording_dir");
     if !dir.is_empty() {
         cfg.recording_dir = dir;
+    }
+
+    let mqtt = uci_get("optimacs.camera_global.mqtt_uri");
+    if !mqtt.is_empty() {
+        cfg.mqtt_uri = mqtt;
+    }
+
+    if let Ok(port) = uci_get("optimacs.camera_global.live_stream_port").parse::<u16>() {
+        cfg.live_stream_port = port;
     }
 
     cfg

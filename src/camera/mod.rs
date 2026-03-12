@@ -23,8 +23,11 @@
 
 pub mod capture;
 pub mod config;
+pub mod events;
+pub mod live_stream;
 pub mod manager;
 pub mod motion;
+pub mod mqtt_bridge;
 pub mod onvif_discovery;
 pub mod recording;
 pub mod storage;

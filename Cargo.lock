@@ -26,6 +26,7 @@ dependencies = [
  "rustls-pemfile",
  "rustls-post-quantum",
  "serde",
+ "serde_json",
  "syslog",
  "thiserror 2.0.18",
  "tokio",
