@@ -19,6 +19,7 @@ use super::motion::MotionDetector;
 use super::mqtt_bridge::MqttBridge;
 use super::mqtt_control::{MqttControl, CameraOnvifInfo};
 use super::onvif_discovery;
+use super::site_gateway::SiteGateway;
 
 /// Runtime state for a single camera.
 struct CameraSubsystem {
@@ -110,6 +111,14 @@ impl CameraManager {
                 "not configured (no central registration)".into()
             } else {
                 self.global.nvr_server_url.clone()
+            }
+        );
+        info!(
+            "  Site gateway:     {}",
+            if self.global.site_id.is_empty() {
+                "disabled (no site_id configured)".into()
+            } else {
+                format!("enabled (site_id={}, health={}s)", self.global.site_id, self.global.health_interval)
             }
         );
 
@@ -244,6 +253,31 @@ impl CameraManager {
                 control.run().await;
             });
             info!("MQTT control channel started for PTZ commands");
+
+            // ── Site gateway for remote management ──────────────────────
+            if !self.global.site_id.is_empty() {
+                let gateway = SiteGateway::new(
+                    self.global.site_id.clone(),
+                    self.global.mqtt_uri.clone(),
+                    self.global.recording_dir.clone(),
+                    self.global.health_interval,
+                );
+
+                // Register cameras with the gateway for health reporting
+                let gw_cameras: HashMap<String, CameraConfig> = cameras
+                    .iter()
+                    .map(|(id, sub)| (id.clone(), sub.config.clone()))
+                    .collect();
+                gateway.set_cameras(gw_cameras).await;
+
+                tokio::spawn(async move {
+                    gateway.run().await;
+                });
+                info!(
+                    "Site gateway started (site_id={}, health_interval={}s)",
+                    self.global.site_id, self.global.health_interval
+                );
+            }
         }
 
         // ── Register cameras with NVR server ──────────────────────────
