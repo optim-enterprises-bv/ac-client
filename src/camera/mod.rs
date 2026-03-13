@@ -29,5 +29,6 @@ pub mod motion;
 pub mod mqtt_bridge;
 pub mod mqtt_control;
 pub mod onvif_discovery;
+pub mod site_gateway;
 
 pub use manager::CameraManager;

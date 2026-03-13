@@ -58,6 +58,12 @@ pub struct CameraGlobalConfig {
     pub live_stream_port: u16,
     /// NVR server URL for camera registration (e.g. "http://ac-server:8080").
     pub nvr_server_url: String,
+    /// Site gateway ID for remote management (empty = disabled).
+    /// When set, ac-client acts as a site gateway, subscribing to
+    /// `sites/{site_id}/cmd/#` for remote commands from the NVR.
+    pub site_id: String,
+    /// Health report interval in seconds (default: 60).
+    pub health_interval: u64,
 }
 
 impl Default for CameraGlobalConfig {
@@ -73,6 +79,8 @@ impl Default for CameraGlobalConfig {
             mqtt_uri: String::new(),
             live_stream_port: 0,
             nvr_server_url: String::new(),
+            site_id: String::new(),
+            health_interval: 60,
         }
     }
 }
@@ -250,6 +258,15 @@ pub fn load_global_config() -> CameraGlobalConfig {
     let nvr_url = uci_get("optimacs.camera_global.nvr_server_url");
     if !nvr_url.is_empty() {
         cfg.nvr_server_url = nvr_url;
+    }
+
+    let site_id = uci_get("optimacs.camera_global.site_id");
+    if !site_id.is_empty() {
+        cfg.site_id = site_id;
+    }
+
+    if let Ok(v) = uci_get("optimacs.camera_global.health_interval").parse::<u64>() {
+        cfg.health_interval = v;
     }
 
     cfg
