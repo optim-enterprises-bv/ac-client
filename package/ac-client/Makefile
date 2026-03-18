@@ -40,11 +40,6 @@ PKG_MIRROR_HASH    := skip
 
 PKG_BUILD_PARALLEL := 1
 
-# ── Rust build options ─────────────────────────────────────────────────────────
-# Enable the camera feature for multi-camera surveillance support
-# (RTSP capture, motion detection, recording, MQTT events, live stream relay)
-RUST_PKG_FEATURES := camera
-
 # ── Includes ─────────────────────────────────────────────────────────────────
 include $(INCLUDE_DIR)/package.mk
 include $(TOPDIR)/feeds/packages/lang/rust/rust-package.mk

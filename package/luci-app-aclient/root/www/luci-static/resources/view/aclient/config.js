@@ -15,7 +15,7 @@
  *                    controller endpoint ID, TLS server CN
  *  2. TLS          – CA cert, bootstrap cert+key, provisioned cert+key, cert dir
  *  3. Device       – MAC address, USP endpoint ID, CPU arch, device model
- *  4. Intervals    – status heartbeat, config-poll, camera-scan periods
+ *  4. Intervals    – status heartbeat, config-poll intervals
  *  5. GNSS / GPS   – serial device, baud rate (dropdown)
  *  6. Storage      – firmware dir, image dir, PID file
  *  7. Process      – syslog flag
@@ -210,13 +210,6 @@ return view.extend({
 		o.datatype    = 'uinteger';
 		o.placeholder = '60';
 
-		o = s.taboption('intervals', form.Value, 'cam_interval',
-			_('Camera Scan Interval (seconds)'),
-			_('How often ac-client runs the Axis IP-camera discovery and ' +
-			  'JPEG capture cycle. Set to 0 to disable camera support.'));
-		o.datatype    = 'uinteger';
-		o.placeholder = '360';
-
 		// ╔══════════════════════════════════════════════════════════════════════╗
 		// ║  TAB 5 — GNSS / GPS                                                  ║
 		// ╚══════════════════════════════════════════════════════════════════════╝
@@ -249,11 +242,6 @@ return view.extend({
 			  'the server before applying them via <code>sysupgrade</code>. ' +
 			  'Must have enough free space to hold a full firmware image.'));
 		o.placeholder = '/tmp/firmware';
-
-		o = s.taboption('paths', form.Value, 'img_dir',
-			_('Camera Image Directory'),
-			_('Directory where JPEG snapshots captured from Axis IP cameras are stored.'));
-		o.placeholder = '/var/apclient/images';
 
 		o = s.taboption('paths', form.Value, 'pid_file',
 			_('PID File'),

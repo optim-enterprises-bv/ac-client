@@ -43,9 +43,9 @@ define Package/luci-app-aclient/description
                       Connection   (server host, port, MTP, URLs, controller ID)
                       TLS          (CA cert, init cert+key, provisioned cert+key)
                       Device       (MAC, USP endpoint ID, arch, model)
-                      Intervals    (status heartbeat, config poll, camera scan)
+                      Intervals    (status heartbeat, config poll)
                       GNSS / GPS   (serial device, baud rate)
-                      Storage      (firmware dir, image dir, PID file)
+                      Storage      (firmware dir, PID file)
                       Process      (syslog flag)
 
   All settings are saved to /etc/config/optimacs via UCI and take effect
