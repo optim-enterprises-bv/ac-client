@@ -15,10 +15,10 @@ pub mod misc;
 pub mod security;
 pub mod wifi;
 
+use crate::config::ClientConfig;
+use log::{debug, info};
 use std::collections::HashMap;
 use std::sync::Mutex;
-use log::{debug, info};
-use crate::config::ClientConfig;
 
 pub type Params = HashMap<String, String>;
 
@@ -43,7 +43,7 @@ fn filter_delta(params: Params, force_full: bool) -> Params {
         update_cache(&params);
         return params;
     }
-    
+
     let cache = match get_cache() {
         Some(c) => c,
         None => {
@@ -52,11 +52,11 @@ fn filter_delta(params: Params, force_full: bool) -> Params {
             return params;
         }
     };
-    
+
     // Only return changed values
     let mut delta = Params::new();
     let mut changed_count = 0;
-    
+
     for (path, value) in &params {
         match cache.get(path) {
             Some(prev_value) if prev_value == value => {
@@ -70,16 +70,20 @@ fn filter_delta(params: Params, force_full: bool) -> Params {
             }
         }
     }
-    
+
     // Update cache with new values
     update_cache(&params);
-    
+
     if changed_count > 0 {
-        info!("Delta update: {} of {} parameters changed", changed_count, params.len());
+        info!(
+            "Delta update: {} of {} parameters changed",
+            changed_count,
+            params.len()
+        );
     } else {
         debug!("No parameter changes detected");
     }
-    
+
     delta
 }
 
@@ -91,7 +95,7 @@ const FULL_UPDATE_INTERVAL: u32 = 10; // Force full update every 10 requests
 ///
 /// `max_depth` limits how many levels below the requested path are returned.
 /// 0 means unlimited (TR-369 §6.1.2).
-/// 
+///
 /// Now implements delta tracking - only returns changed parameters
 /// unless force_full is true or periodic full update interval reached.
 pub async fn get_params(cfg: &ClientConfig, paths: &[String], max_depth: u32) -> Params {
@@ -107,16 +111,16 @@ pub async fn get_params(cfg: &ClientConfig, paths: &[String], max_depth: u32) ->
             }));
         }
     }
-    
+
     // Increment counter and check if we need a full update
     let counter = {
         let mut c = POLL_COUNTER.lock().unwrap();
         *c += 1;
         *c
     };
-    
+
     let force_full = counter % FULL_UPDATE_INTERVAL == 1; // First call and every Nth call
-    
+
     // Apply delta filtering
     filter_delta(result, force_full)
 }
@@ -131,15 +135,19 @@ pub async fn set_params(cfg: &ClientConfig, updates: &[(String, String)]) -> Res
 
 /// Handle an OPERATE command; returns output_args on success.
 pub async fn operate(
-    cfg:         &ClientConfig,
-    command:     &str,
-    input_args:  &HashMap<String, String>,
+    cfg: &ClientConfig,
+    command: &str,
+    input_args: &HashMap<String, String>,
 ) -> Result<HashMap<String, String>, String> {
     if command.starts_with("Device.X_OptimACS_Firmware.") && command.ends_with(".Download()") {
         firmware::operate_download(cfg, command, input_args).await
-    } else if command.starts_with("Device.X_OptimACS_Security.") && command.ends_with(".IssueCert()") {
+    } else if command.starts_with("Device.X_OptimACS_Security.")
+        && command.ends_with(".IssueCert()")
+    {
         security::operate_issue_cert(cfg, command, input_args).await
-    } else if command.starts_with("Device.X_OptimACS_Network.Bridge.") && command.ends_with(".Restart()") {
+    } else if command.starts_with("Device.X_OptimACS_Network.Bridge.")
+        && command.ends_with(".Restart()")
+    {
         bridge::operate(cfg, command, input_args).await
     } else {
         Err(format!("unknown command: {command}"))
@@ -157,22 +165,25 @@ async fn dispatch_get(cfg: &ClientConfig, path: &str) -> Params {
         dhcp::get(cfg, path).await
     } else if path.starts_with("Device.Hosts.") {
         hosts::get(cfg, path).await
-    } else if path.starts_with("Device.X_OptimACS_Network.Bridge.") || path.starts_with("Device.X_OptimACS_Network.Bridge") {
+    } else if path.starts_with("Device.X_OptimACS_Network.Bridge.")
+        || path.starts_with("Device.X_OptimACS_Network.Bridge")
+    {
         bridge::get(cfg, path).await
     } else if path.starts_with("Device.X_OptimACS_Firmware.") {
         firmware::get(cfg, path)
-    } else if path.starts_with("Device.IP.") || 
-              path.starts_with("Device.DNS.") ||
-              path.starts_with("Device.Routing.") ||
-              path.starts_with("Device.NAT.") ||
-              path.starts_with("Device.Firewall.") ||
-              path.starts_with("Device.QoS.") ||
-              path.starts_with("Device.WireGuard.") ||
-              path.starts_with("Device.X_TP_OpenVPN.") ||
-              path.starts_with("Device.Time.") ||
-              path.starts_with("Device.USB.") ||
-              path.starts_with("Device.Cellular.") ||
-              path.starts_with("Device.NeighborDiscovery.") {
+    } else if path.starts_with("Device.IP.")
+        || path.starts_with("Device.DNS.")
+        || path.starts_with("Device.Routing.")
+        || path.starts_with("Device.NAT.")
+        || path.starts_with("Device.Firewall.")
+        || path.starts_with("Device.QoS.")
+        || path.starts_with("Device.WireGuard.")
+        || path.starts_with("Device.X_TP_OpenVPN.")
+        || path.starts_with("Device.Time.")
+        || path.starts_with("Device.USB.")
+        || path.starts_with("Device.Cellular.")
+        || path.starts_with("Device.NeighborDiscovery.")
+    {
         misc::get(cfg, path).await
     } else {
         // Silently return empty for unsupported paths to reduce log noise
@@ -193,7 +204,9 @@ async fn dispatch_set(cfg: &ClientConfig, path: &str, value: &str) -> Result<(),
         dhcp::set(cfg, path, value).await
     } else if path.starts_with("Device.Hosts.") {
         hosts::set(cfg, path, value).await
-    } else if path.starts_with("Device.X_OptimACS_Network.Bridge.") || path.starts_with("Device.X_OptimACS_Network.Bridge") {
+    } else if path.starts_with("Device.X_OptimACS_Network.Bridge.")
+        || path.starts_with("Device.X_OptimACS_Network.Bridge")
+    {
         bridge::set(cfg, path, value).await
     } else if path.starts_with("Device.X_OptimACS_Security.") {
         security::set(cfg, path, value).await

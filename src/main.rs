@@ -23,11 +23,18 @@ use log::{debug, error, info, LevelFilter};
 // ── CLI ───────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Parser)]
-#[command(name = "ac-client", about = "USP Agent (TR-369) — OptimACS access-point client")]
+#[command(
+    name = "ac-client",
+    about = "USP Agent (TR-369) — OptimACS access-point client"
+)]
 struct Cli {
     /// Path to the flat key=value configuration file.
     /// Ignored when --uci is set.
-    #[arg(short = 'c', long = "config", default_value = "/etc/apclient/ac_client.conf")]
+    #[arg(
+        short = 'c',
+        long = "config",
+        default_value = "/etc/apclient/ac_client.conf"
+    )]
     config: PathBuf,
 
     /// Read configuration from UCI (/etc/config/optimacs) instead of the
@@ -88,7 +95,10 @@ async fn main() {
     // Install the post-quantum TLS provider (must happen before any TLS use).
     debug!("Installing post-quantum TLS provider...");
     if let Err(e) = rustls_post_quantum::provider().install_default() {
-        error!("FATAL: post-quantum TLS provider failed to initialise: {:?}", e);
+        error!(
+            "FATAL: post-quantum TLS provider failed to initialise: {:?}",
+            e
+        );
         error!("Ensure the binary was compiled for the correct CPU architecture.");
         process::exit(1);
     }
@@ -113,7 +123,10 @@ async fn main() {
             process::exit(1);
         }
         info!("auto-detected MAC address: {mac}");
-        config::ClientConfig { mac_addr: mac, ..cfg }
+        config::ClientConfig {
+            mac_addr: mac,
+            ..cfg
+        }
     } else {
         debug!("Using configured MAC address: {}", cfg.mac_addr);
         cfg
@@ -167,11 +180,11 @@ fn setup_logging(use_syslog: bool, verbose: u8) -> anyhow::Result<()> {
         let formatter = syslog::Formatter3164 {
             facility: syslog::Facility::LOG_DAEMON,
             hostname: None,
-            process:  "ac-client".into(),
-            pid:      process::id(),
+            process: "ac-client".into(),
+            pid: process::id(),
         };
-        let logger = syslog::unix(formatter)
-            .map_err(|e| anyhow::anyhow!("syslog connect failed: {e}"))?;
+        let logger =
+            syslog::unix(formatter).map_err(|e| anyhow::anyhow!("syslog connect failed: {e}"))?;
         log::set_boxed_logger(Box::new(syslog::BasicLogger::new(logger)))
             .map(|()| log::set_max_level(level))
             .map_err(|e| anyhow::anyhow!("set_logger: {e}"))?;
@@ -180,7 +193,7 @@ fn setup_logging(use_syslog: bool, verbose: u8) -> anyhow::Result<()> {
             .filter_level(level)
             .init();
     }
-    
+
     info!("Logging initialized at level: {:?}", level);
     Ok(())
 }

@@ -1,10 +1,12 @@
 //! TR-181 Device.X_OptimACS_Network.Bridge.* — vendor extension for bridge configuration
 //! Maps to UCI /etc/config/network bridge interfaces like br-wan
 
-use std::collections::HashMap;
-use log::{info, warn};
+#![allow(clippy::all)]
+
 use crate::config::ClientConfig;
-use crate::usp::tp469::uci_backend::{uci_get, uci_set, uci_commit};
+use crate::usp::tp469::uci_backend::{uci_commit, uci_get, uci_set};
+use log::{info, warn};
+use std::collections::HashMap;
 
 pub type Params = HashMap<String, String>;
 
@@ -17,22 +19,22 @@ fn find_bridge_section(bridge_name: &str) -> Option<(String, usize)> {
         .ok()
         .and_then(|o| String::from_utf8(o.stdout).ok())
         .unwrap_or_default();
-    
+
     let mut current_section: Option<(String, usize)> = None;
-    
+
     for line in out.lines() {
         // Check for device section start
         if line.starts_with("network.@device[") {
             // Parse section index from network.@device[N].name
             if let Some(start) = line.find('[') {
                 if let Some(end) = line.find(']') {
-                    if let Ok(idx) = line[start+1..end].parse::<usize>() {
+                    if let Ok(idx) = line[start + 1..end].parse::<usize>() {
                         current_section = Some(("device".to_string(), idx));
                     }
                 }
             }
         }
-        
+
         // Check if this section has the matching name
         if let Some((_, idx)) = current_section {
             let name_key = format!("network.@device[{}].name", idx);
@@ -46,7 +48,7 @@ fn find_bridge_section(bridge_name: &str) -> Option<(String, usize)> {
             }
         }
     }
-    
+
     None
 }
 
@@ -63,18 +65,18 @@ fn get_uci_path(bridge_name: &str, option: &str) -> String {
 /// Get bridge configuration from UCI network config
 pub async fn get(_cfg: &ClientConfig, path: &str) -> Params {
     let mut result = Params::new();
-    
+
     // Parse bridge index from path like "Device.X_OptimACS_Network.Bridge.1.Name"
     let bridge_idx = parse_bridge_index(path).unwrap_or(1);
     let bridge_name = get_bridge_name_by_index(bridge_idx);
-    
+
     // Check if this is a query for bridge count
     if path.ends_with("BridgeNumberOfEntries") || path.contains("BridgeNumberOfEntries") {
         let count = count_bridges();
         result.insert(path.to_string(), count.to_string());
         return result;
     }
-    
+
     // Check if requesting all bridge parameters
     if path.ends_with(".") || path.ends_with("*") || path == "Device.X_OptimACS_Network.Bridge." {
         // Return all bridge parameters
@@ -85,12 +87,12 @@ pub async fn get(_cfg: &ClientConfig, path: &str) -> Params {
         }
         return result;
     }
-    
+
     // Specific parameter request
     let param = path.split('.').last().unwrap_or("");
     let value = get_bridge_param(&bridge_name, param).await;
     result.insert(path.to_string(), value);
-    
+
     result
 }
 
@@ -99,9 +101,12 @@ pub async fn set(_cfg: &ClientConfig, path: &str, value: &str) -> Result<(), Str
     let bridge_idx = parse_bridge_index(path).unwrap_or(1);
     let bridge_name = get_bridge_name_by_index(bridge_idx);
     let param = path.split('.').last().unwrap_or("");
-    
-    info!("Setting bridge config: {}.{} = {}", bridge_name, param, value);
-    
+
+    info!(
+        "Setting bridge config: {}.{} = {}",
+        bridge_name, param, value
+    );
+
     match param {
         "Enable" => {
             // For devices, we can't easily disable them via UCI
@@ -165,11 +170,14 @@ pub async fn set(_cfg: &ClientConfig, path: &str, value: &str) -> Result<(), Str
             return Err(format!("Unknown bridge parameter: {}", param));
         }
     }
-    
+
     // Commit the changes
     uci_commit("network")?;
-    
-    info!("Bridge config updated successfully: {}.{} = {}", bridge_name, param, value);
+
+    info!(
+        "Bridge config updated successfully: {}.{} = {}",
+        bridge_name, param, value
+    );
     Ok(())
 }
 
@@ -195,9 +203,9 @@ fn parse_bridge_index(path: &str) -> Option<usize> {
 /// Index 1 = br-wan (WAN bridge), Index 2+ = other bridges
 fn get_bridge_name_by_index(idx: usize) -> String {
     match idx {
-        1 => "br-wan".to_string(),  // First bridge is WAN
-        2 => "br-lan".to_string(),  // Second bridge is LAN
-        n => format!("br{}", n),     // Others
+        1 => "br-wan".to_string(), // First bridge is WAN
+        2 => "br-lan".to_string(), // Second bridge is LAN
+        n => format!("br{}", n),   // Others
     }
 }
 
@@ -209,7 +217,7 @@ fn find_interface_using_bridge(bridge_name: &str) -> Option<String> {
         .ok()
         .and_then(|o| String::from_utf8(o.stdout).ok())
         .unwrap_or_default();
-    
+
     for line in out.lines() {
         // Look for interface sections (not device sections)
         if line.starts_with("network.") && !line.starts_with("network.@device[") {
@@ -223,7 +231,10 @@ fn find_interface_using_bridge(bridge_name: &str) -> Option<String> {
                         if parts.len() >= 2 {
                             let section = parts[1];
                             // Skip if it's a device section or globals
-                            if section != "globals" && section != "switch" && !section.starts_with('@') {
+                            if section != "globals"
+                                && section != "switch"
+                                && !section.starts_with('@')
+                            {
                                 return Some(section.to_string());
                             }
                         }
@@ -232,7 +243,7 @@ fn find_interface_using_bridge(bridge_name: &str) -> Option<String> {
             }
         }
     }
-    
+
     None
 }
 
@@ -244,41 +255,47 @@ fn count_bridges() -> usize {
         .ok()
         .and_then(|o| String::from_utf8(o.stdout).ok())
         .unwrap_or_default();
-    
+
     let mut count = 0;
-    
+
     for line in out.lines() {
         if line.starts_with("network.@device[") && line.contains(".name=") {
             count += 1;
         }
     }
-    
+
     count.max(2) // Report at least 2 (br-lan and br-wan)
 }
 
 /// Get all parameters for a bridge
 async fn get_bridge_params(bridge_name: &str) -> Params {
     let mut params = Params::new();
-    
+
     // Check if bridge section exists
     let section_info = find_bridge_section(bridge_name);
     if section_info.is_none() {
         warn!("Bridge {} not found in UCI", bridge_name);
         return params;
     }
-    
+
     // Get name from UCI
     let name_path = get_uci_path(bridge_name, "name");
     let name = uci_get(&name_path);
-    params.insert("Name".to_string(), 
-        if name.is_empty() { bridge_name.to_string() } else { name });
-    
+    params.insert(
+        "Name".to_string(),
+        if name.is_empty() {
+            bridge_name.to_string()
+        } else {
+            name
+        },
+    );
+
     // Type is always bridge for device sections
     params.insert("Type".to_string(), "bridge".to_string());
-    
+
     // Find interface using this bridge
     let iface = find_interface_using_bridge(bridge_name);
-    
+
     if let Some(iface_name) = iface {
         // Get ports from interface
         let ports = uci_get(&format!("network.{}.ports", iface_name));
@@ -290,8 +307,14 @@ async fn get_bridge_params(bridge_name: &str) -> Params {
 
         // Get proto from interface
         let proto = uci_get(&format!("network.{}.proto", iface_name));
-        params.insert("Proto".to_string(),
-            if proto.is_empty() { "none".to_string() } else { proto.clone() });
+        params.insert(
+            "Proto".to_string(),
+            if proto.is_empty() {
+                "none".to_string()
+            } else {
+                proto.clone()
+            },
+        );
 
         // Get IP/netmask/gateway from UCI first, then fall back to runtime state
         let mut ipaddr = uci_get(&format!("network.{}.ipaddr", iface_name));
@@ -303,13 +326,19 @@ async fn get_bridge_params(bridge_name: &str) -> Params {
         if ipaddr.is_empty() || (proto == "dhcp" || proto == "dhcpv6" || proto == "pppoe") {
             let rt = get_ubus_interface_status(&iface_name);
             if let Some(ip) = rt.get("ipaddr") {
-                if !ip.is_empty() { ipaddr = ip.clone(); }
+                if !ip.is_empty() {
+                    ipaddr = ip.clone();
+                }
             }
             if let Some(mask) = rt.get("netmask") {
-                if !mask.is_empty() { netmask = mask.clone(); }
+                if !mask.is_empty() {
+                    netmask = mask.clone();
+                }
             }
             if let Some(gw) = rt.get("gateway") {
-                if !gw.is_empty() { gateway = gw.clone(); }
+                if !gw.is_empty() {
+                    gateway = gw.clone();
+                }
             }
             if let Some(d) = rt.get("dns") {
                 dns = d.clone();
@@ -325,8 +354,14 @@ async fn get_bridge_params(bridge_name: &str) -> Params {
 
         // Enable - check if interface is disabled
         let enabled = uci_get(&format!("network.{}.enabled", iface_name));
-        params.insert("Enable".to_string(),
-            if enabled == "0" { "false".to_string() } else { "true".to_string() });
+        params.insert(
+            "Enable".to_string(),
+            if enabled == "0" {
+                "false".to_string()
+            } else {
+                "true".to_string()
+            },
+        );
     } else {
         // No interface found using this bridge
         params.insert("Ports".to_string(), "".to_string());
@@ -336,11 +371,11 @@ async fn get_bridge_params(bridge_name: &str) -> Params {
         params.insert("Gateway".to_string(), "".to_string());
         params.insert("Enable".to_string(), "false".to_string());
     }
-    
+
     // Determine status from interface state
     let status = get_interface_status(bridge_name).await;
     params.insert("Status".to_string(), status);
-    
+
     params
 }
 
@@ -356,7 +391,11 @@ fn get_ubus_interface_status(iface_name: &str) -> HashMap<String, String> {
     let mut result = HashMap::new();
 
     let out = std::process::Command::new("ubus")
-        .args(["call", &format!("network.interface.{}", iface_name), "status"])
+        .args([
+            "call",
+            &format!("network.interface.{}", iface_name),
+            "status",
+        ])
         .output()
         .ok()
         .and_then(|o| String::from_utf8(o.stdout).ok())
@@ -421,7 +460,9 @@ fn get_ubus_interface_status(iface_name: &str) -> HashMap<String, String> {
                 let arr = &chunk[arr_start..arr_start + arr_end];
                 let servers: Vec<&str> = arr
                     .split('"')
-                    .filter(|s| !s.is_empty() && !s.contains('[') && !s.contains(',') && s.trim() != ",")
+                    .filter(|s| {
+                        !s.is_empty() && !s.contains('[') && !s.contains(',') && s.trim() != ","
+                    })
                     .filter(|s| s.contains('.') || s.contains(':'))
                     .collect();
                 if !servers.is_empty() {
@@ -469,7 +510,7 @@ async fn get_interface_status(bridge_name: &str) -> String {
         .ok()
         .and_then(|o| String::from_utf8(o.stdout).ok())
         .unwrap_or_default();
-    
+
     if out.contains("state UP") || out.contains("UP") {
         "up".to_string()
     } else if out.contains("state DOWN") || out.contains("DOWN") {
@@ -486,28 +527,29 @@ pub async fn operate(
     _input_args: &HashMap<String, String>,
 ) -> Result<HashMap<String, String>, String> {
     let mut output = HashMap::new();
-    
+
     if command.ends_with(".Restart()") {
         let bridge_idx = parse_bridge_index(command).unwrap_or(1);
         let bridge_name = get_bridge_name_by_index(bridge_idx);
-        
+
         info!("Restarting bridge interface: {}", bridge_name);
-        
+
         // Use ifdown/ifup via the interface name
         let iface = find_interface_using_bridge(&bridge_name);
         if let Some(iface_name) = iface {
             let _ = std::process::Command::new("ifdown")
                 .arg(&iface_name)
                 .output();
-            
-            let result = std::process::Command::new("ifup")
-                .arg(&iface_name)
-                .output();
-            
+
+            let result = std::process::Command::new("ifup").arg(&iface_name).output();
+
             match result {
                 Ok(_) => {
                     output.insert("status".to_string(), "success".to_string());
-                    output.insert("message".to_string(), format!("Bridge {} restarted via {}", bridge_name, iface_name));
+                    output.insert(
+                        "message".to_string(),
+                        format!("Bridge {} restarted via {}", bridge_name, iface_name),
+                    );
                 }
                 Err(e) => {
                     return Err(format!("Failed to restart bridge {}: {}", bridge_name, e));
@@ -519,6 +561,6 @@ pub async fn operate(
     } else {
         return Err(format!("Unknown bridge command: {}", command));
     }
-    
+
     Ok(output)
 }

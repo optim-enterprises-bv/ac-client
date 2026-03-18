@@ -1,5 +1,7 @@
 //! Miscellaneous utilities: MAC detection, IP retrieval, PID file, etc.
 
+#![allow(dead_code)]
+
 use std::fs;
 use std::io::{self, Write};
 use std::net::{IpAddr, Ipv4Addr, UdpSocket};
@@ -195,7 +197,7 @@ pub fn get_local_ip() -> String {
         for line in text.lines() {
             if line.contains("inet ") {
                 // Parse line like: "    inet 192.168.1.100/24 brd 192.168.1.255 scope global eth0"
-                if let Some(ip_part) = line.trim().split_whitespace().nth(1) {
+                if let Some(ip_part) = line.split_whitespace().nth(1) {
                     // Remove CIDR suffix (/24)
                     return ip_part.split('/').next().unwrap_or("").to_string();
                 }
@@ -206,12 +208,7 @@ pub fn get_local_ip() -> String {
     // Fallback: try hostname command
     if let Ok(output) = std::process::Command::new("hostname").arg("-I").output() {
         let text = String::from_utf8_lossy(&output.stdout);
-        return text
-            .trim()
-            .split_whitespace()
-            .next()
-            .unwrap_or("")
-            .to_string();
+        return text.split_whitespace().next().unwrap_or("").to_string();
     }
 
     String::new()

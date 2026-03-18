@@ -1,11 +1,8 @@
 fn main() {
     // Compile the USP message payload protobuf schema.
     // Proto files define USP message payloads for device communication.
-    prost_build::compile_protos(
-        &["proto/acp.proto"],
-        &["proto/"],
-    )
-    .expect("prost-build: failed to compile acp.proto");
+    prost_build::compile_protos(&["proto/acp.proto"], &["proto/"])
+        .expect("prost-build: failed to compile acp.proto");
 
     // TR-369 / USP wire protocol.
     prost_build::compile_protos(

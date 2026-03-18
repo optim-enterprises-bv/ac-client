@@ -17,6 +17,6 @@ pub mod uci_backend;
 pub mod tests;
 
 // Re-export commonly used items
-pub use add_delete::{AddResult, DeleteResult, handle_add, handle_delete};
+pub use add_delete::{handle_add, handle_delete, AddResult, DeleteResult};
 pub use get_instances::handle_get_instances;
 pub use get_supported_dm::handle_get_supported_dm;

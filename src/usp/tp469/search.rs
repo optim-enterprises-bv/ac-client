@@ -6,5 +6,5 @@
 /// Device.WiFi.SSID.1 -> 1
 pub fn extract_instance_number(path: &str) -> Option<u32> {
     // Find the last numeric segment
-    path.split('.').last()?.parse().ok()
+    path.split('.').next_back()?.parse().ok()
 }

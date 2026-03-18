@@ -8,13 +8,14 @@
 
 use std::fs;
 use std::io::Cursor;
-use std::path::Path;
 use std::sync::Arc;
 
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::crypto::{verify_tls13_signature, CryptoProvider};
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
-use rustls::{ClientConfig, DigitallySignedStruct, Error as TlsError, RootCertStore, SignatureScheme};
+use rustls::{
+    ClientConfig, DigitallySignedStruct, Error as TlsError, RootCertStore, SignatureScheme,
+};
 use rustls_pemfile::{certs, private_key};
 
 use crate::error::{AcError, Result};
@@ -30,7 +31,7 @@ use log::{debug, trace, warn};
 #[derive(Debug)]
 struct UspServerVerifier {
     /// Delegates all chain + revocation verification to the standard WebPki verifier.
-    inner:    Arc<dyn ServerCertVerifier>,
+    inner: Arc<dyn ServerCertVerifier>,
     provider: Arc<CryptoProvider>,
 }
 
@@ -50,15 +51,18 @@ impl UspServerVerifier {
 impl ServerCertVerifier for UspServerVerifier {
     fn verify_server_cert(
         &self,
-        end_entity:    &CertificateDer<'_>,
+        end_entity: &CertificateDer<'_>,
         intermediates: &[CertificateDer<'_>],
-        server_name:   &ServerName<'_>,
+        server_name: &ServerName<'_>,
         ocsp_response: &[u8],
-        now:           UnixTime,
+        now: UnixTime,
     ) -> std::result::Result<ServerCertVerified, TlsError> {
         trace!("Verifying server certificate for {:?}", server_name);
-        trace!("Certificate chain: {} certificate(s)", intermediates.len() + 1);
-        
+        trace!(
+            "Certificate chain: {} certificate(s)",
+            intermediates.len() + 1
+        );
+
         match self.inner.verify_server_cert(
             end_entity,
             intermediates,
@@ -91,8 +95,8 @@ impl ServerCertVerifier for UspServerVerifier {
     fn verify_tls12_signature(
         &self,
         _message: &[u8],
-        _cert:    &CertificateDer<'_>,
-        _dss:     &DigitallySignedStruct,
+        _cert: &CertificateDer<'_>,
+        _dss: &DigitallySignedStruct,
     ) -> std::result::Result<HandshakeSignatureValid, TlsError> {
         // TLS 1.2 is disabled — this should never be called.
         Err(TlsError::General("TLS 1.2 not supported".into()))
@@ -101,8 +105,8 @@ impl ServerCertVerifier for UspServerVerifier {
     fn verify_tls13_signature(
         &self,
         message: &[u8],
-        cert:    &CertificateDer<'_>,
-        dss:     &DigitallySignedStruct,
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
     ) -> std::result::Result<HandshakeSignatureValid, TlsError> {
         verify_tls13_signature(
             message,
@@ -113,7 +117,9 @@ impl ServerCertVerifier for UspServerVerifier {
     }
 
     fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
-        self.provider.signature_verification_algorithms.supported_schemes()
+        self.provider
+            .signature_verification_algorithms
+            .supported_schemes()
     }
 }
 
@@ -126,7 +132,7 @@ impl ServerCertVerifier for UspServerVerifier {
 /// for unprovisioned devices.
 pub fn build_tls_config(cfg: &crate::config::ClientConfig) -> Result<Arc<ClientConfig>> {
     debug!("Building TLS config for WebSocket connection");
-    
+
     let provider = CryptoProvider::get_default()
         .expect("call rustls_post_quantum::provider().install_default() first")
         .clone();
@@ -159,15 +165,16 @@ pub fn build_tls_config(cfg: &crate::config::ClientConfig) -> Result<Arc<ClientC
     // ── Client certificate chain ──────────────────────────────────────────────
     debug!("Loading client certificate from: {}", cert_file.display());
     let cert_pem = fs::read(cert_file)?;
-    let cert_chain: Vec<CertificateDer<'static>> = certs(&mut Cursor::new(cert_pem))
-        .collect::<std::io::Result<Vec<_>>>()?;
+    let cert_chain: Vec<CertificateDer<'static>> =
+        certs(&mut Cursor::new(cert_pem)).collect::<std::io::Result<Vec<_>>>()?;
     debug!("Loaded {} client certificate(s) in chain", cert_chain.len());
 
     // ── Client private key ────────────────────────────────────────────────────
     debug!("Loading private key from: {}", key_file.display());
     let key_pem = fs::read(key_file)?;
-    let private_key = private_key(&mut Cursor::new(key_pem))?
-        .ok_or_else(|| AcError::Config(format!("no private key found in {}", key_file.display())))?;
+    let private_key = private_key(&mut Cursor::new(key_pem))?.ok_or_else(|| {
+        AcError::Config(format!("no private key found in {}", key_file.display()))
+    })?;
     debug!("Private key loaded successfully");
 
     // ── TLS 1.3-only client config with custom chain verifier ─────────────────
@@ -181,7 +188,7 @@ pub fn build_tls_config(cfg: &crate::config::ClientConfig) -> Result<Arc<ClientC
         .with_custom_certificate_verifier(verifier)
         .with_client_auth_cert(cert_chain, private_key)
         .map_err(AcError::Tls)?;
-    
+
     debug!("TLS configuration built successfully (TLS 1.3 only, mutual TLS enabled, post-quantum)");
     Ok(Arc::new(tls_config))
 }

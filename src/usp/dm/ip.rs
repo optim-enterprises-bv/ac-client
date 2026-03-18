@@ -1,37 +1,37 @@
 //! TR-181 Device.IP.Interface.* — reads/writes via UCI with multi-interface support.
 
-use std::collections::HashMap;
-use log::{info, warn};
 use crate::config::ClientConfig;
-use crate::usp::tp469::uci_backend::{uci_get, uci_set, uci_commit};
+use crate::usp::tp469::uci_backend::{uci_commit, uci_get, uci_set};
+use log::{info, warn};
+use std::collections::HashMap;
 
 /// Get all network interface sections from UCI
 fn get_network_interfaces() -> Vec<(String, String)> {
     // Returns vec of (section_name, network_name) tuples
     let mut interfaces = Vec::new();
-    
+
     let out = std::process::Command::new("uci")
         .args(["show", "network"])
         .output()
         .ok()
         .and_then(|o| String::from_utf8(o.stdout).ok())
         .unwrap_or_default();
-    
+
     // Look for sections that have proto= (indicating they're interfaces)
     let mut current_section = String::new();
     let mut has_proto = false;
-    
+
     for line in out.lines() {
         if line.starts_with("network.") {
             let parts: Vec<&str> = line.split('.').collect();
             if parts.len() >= 2 {
                 let section = parts[1].to_string();
-                
+
                 // Skip non-interface sections
                 if section == "globals" || section == "switch" || section == "loopback" {
                     continue;
                 }
-                
+
                 if line.contains(".proto=") {
                     // Check if this is a new section
                     if section != current_section {
@@ -45,22 +45,22 @@ fn get_network_interfaces() -> Vec<(String, String)> {
             }
         }
     }
-    
+
     // Don't forget the last section
     if !current_section.is_empty() && has_proto {
         interfaces.push((current_section.clone(), current_section.clone()));
     }
-    
+
     // Filter out @named sections (aliases) and ensure common interfaces are present
     let common_interfaces = vec!["lan", "wan", "wan6"];
     let mut filtered = Vec::new();
-    
+
     for (section, name) in interfaces {
         if !section.starts_with('@') {
             filtered.push((section, name));
         }
     }
-    
+
     // Ensure common interfaces exist even if not found
     for iface in &common_interfaces {
         if !filtered.iter().any(|(s, _)| s == *iface) {
@@ -71,7 +71,7 @@ fn get_network_interfaces() -> Vec<(String, String)> {
             }
         }
     }
-    
+
     filtered
 }
 
@@ -92,11 +92,14 @@ fn parse_interface_index(path: &str) -> Option<usize> {
 pub async fn get(_cfg: &ClientConfig, path: &str) -> HashMap<String, String> {
     let mut m = HashMap::new();
     let interfaces = get_network_interfaces();
-    
+
     // Check if this is a specific interface request or a general request
     let specific_idx = parse_interface_index(path);
-    
-    if path == "Device.IP.Interface." || path.ends_with("IPv4Address.") || path.ends_with("IPv4Address.1.") {
+
+    if path == "Device.IP.Interface."
+        || path.ends_with("IPv4Address.")
+        || path.ends_with("IPv4Address.1.")
+    {
         // Return all interfaces
         for (idx, (section, _name)) in interfaces.iter().enumerate() {
             let iface_idx = idx + 1;
@@ -111,21 +114,40 @@ pub async fn get(_cfg: &ClientConfig, path: &str) -> HashMap<String, String> {
             // For DHCP/dynamic protocols, get runtime state from ubus
             if ip.is_empty() || proto == "dhcp" || proto == "dhcpv6" || proto == "pppoe" {
                 let rt = get_ubus_interface_status(section);
-                if let Some(v) = rt.get("ipaddr") { if !v.is_empty() { ip = v.clone(); } }
-                if let Some(v) = rt.get("netmask") { if !v.is_empty() { mask = v.clone(); } }
-                if let Some(v) = rt.get("gateway") { if !v.is_empty() { gateway = v.clone(); } }
-                if let Some(v) = rt.get("dns") { if !v.is_empty() { dns = v.clone(); } }
+                if let Some(v) = rt.get("ipaddr") {
+                    if !v.is_empty() {
+                        ip = v.clone();
+                    }
+                }
+                if let Some(v) = rt.get("netmask") {
+                    if !v.is_empty() {
+                        mask = v.clone();
+                    }
+                }
+                if let Some(v) = rt.get("gateway") {
+                    if !v.is_empty() {
+                        gateway = v.clone();
+                    }
+                }
+                if let Some(v) = rt.get("dns") {
+                    if !v.is_empty() {
+                        dns = v.clone();
+                    }
+                }
             }
-            
+
             // Get interface name and stats
             let bridge_name = format!("br-{section}");
             let stats = get_interface_stats(&bridge_name).await;
             let mac = get_interface_mac(&bridge_name).await;
             let status = get_interface_status(&bridge_name).await;
-            
+
             // Insert name
-            m.insert(format!("Device.IP.Interface.{iface_idx}.X_OptimACS_Name"), section.clone());
-            
+            m.insert(
+                format!("Device.IP.Interface.{iface_idx}.X_OptimACS_Name"),
+                section.clone(),
+            );
+
             if !ip.is_empty() {
                 m.insert(format!("{base}IPAddress"), ip);
             }
@@ -136,10 +158,16 @@ pub async fn get(_cfg: &ClientConfig, path: &str) -> HashMap<String, String> {
                 m.insert(format!("{base}AddressingType"), proto.clone());
             }
             if !gateway.is_empty() {
-                m.insert(format!("Device.IP.Interface.{iface_idx}.X_OptimACS_Gateway"), gateway.clone());
+                m.insert(
+                    format!("Device.IP.Interface.{iface_idx}.X_OptimACS_Gateway"),
+                    gateway.clone(),
+                );
             }
             if !dns.is_empty() {
-                m.insert(format!("Device.IP.Interface.{iface_idx}.X_OptimACS_DNS"), dns);
+                m.insert(
+                    format!("Device.IP.Interface.{iface_idx}.X_OptimACS_DNS"),
+                    dns,
+                );
             }
             if !mac.is_empty() {
                 m.insert(format!("Device.IP.Interface.{iface_idx}.MACAddress"), mac);
@@ -148,7 +176,10 @@ pub async fn get(_cfg: &ClientConfig, path: &str) -> HashMap<String, String> {
 
             // Upstream flag: true for wan/wan6 interfaces
             let is_upstream = section.starts_with("wan");
-            m.insert(format!("Device.IP.Interface.{iface_idx}.X_OptimACS_Upstream"), is_upstream.to_string());
+            m.insert(
+                format!("Device.IP.Interface.{iface_idx}.X_OptimACS_Upstream"),
+                is_upstream.to_string(),
+            );
 
             // Friendly protocol name
             let proto_friendly = match proto.as_str() {
@@ -161,37 +192,64 @@ pub async fn get(_cfg: &ClientConfig, path: &str) -> HashMap<String, String> {
                 "none" => "Unmanaged",
                 other => other,
             };
-            m.insert(format!("Device.IP.Interface.{iface_idx}.X_OptimACS_Protocol"), proto_friendly.to_string());
+            m.insert(
+                format!("Device.IP.Interface.{iface_idx}.X_OptimACS_Protocol"),
+                proto_friendly.to_string(),
+            );
 
             // GatewayIPv4 alias for Gateway
             if !gateway.is_empty() {
-                m.insert(format!("Device.IP.Interface.{iface_idx}.X_OptimACS_GatewayIPv4"), gateway.clone());
+                m.insert(
+                    format!("Device.IP.Interface.{iface_idx}.X_OptimACS_GatewayIPv4"),
+                    gateway.clone(),
+                );
             }
 
             // Add stats if available
             if let Some(rx_bytes) = stats.get("rx_bytes") {
-                m.insert(format!("Device.IP.Interface.{iface_idx}.X_OptimACS_RXBytes"), rx_bytes.clone());
+                m.insert(
+                    format!("Device.IP.Interface.{iface_idx}.X_OptimACS_RXBytes"),
+                    rx_bytes.clone(),
+                );
             }
             if let Some(rx_packets) = stats.get("rx_packets") {
-                m.insert(format!("Device.IP.Interface.{iface_idx}.X_OptimACS_RXPackets"), rx_packets.clone());
+                m.insert(
+                    format!("Device.IP.Interface.{iface_idx}.X_OptimACS_RXPackets"),
+                    rx_packets.clone(),
+                );
             }
             if let Some(tx_bytes) = stats.get("tx_bytes") {
-                m.insert(format!("Device.IP.Interface.{iface_idx}.X_OptimACS_TXBytes"), tx_bytes.clone());
+                m.insert(
+                    format!("Device.IP.Interface.{iface_idx}.X_OptimACS_TXBytes"),
+                    tx_bytes.clone(),
+                );
             }
             if let Some(tx_packets) = stats.get("tx_packets") {
-                m.insert(format!("Device.IP.Interface.{iface_idx}.X_OptimACS_TXPackets"), tx_packets.clone());
+                m.insert(
+                    format!("Device.IP.Interface.{iface_idx}.X_OptimACS_TXPackets"),
+                    tx_packets.clone(),
+                );
             }
             if let Some(uptime) = stats.get("uptime") {
-                m.insert(format!("Device.IP.Interface.{iface_idx}.X_OptimACS_Uptime"), uptime.clone());
+                m.insert(
+                    format!("Device.IP.Interface.{iface_idx}.X_OptimACS_Uptime"),
+                    uptime.clone(),
+                );
             }
 
             // IPv6 — always from runtime state
             let rt6 = get_ubus_interface_status(section);
             if let Some(v6) = rt6.get("ipv6addr") {
                 if !v6.is_empty() {
-                    m.insert(format!("Device.IP.Interface.{iface_idx}.IPv6Address.1.IPAddress"), v6.clone());
+                    m.insert(
+                        format!("Device.IP.Interface.{iface_idx}.IPv6Address.1.IPAddress"),
+                        v6.clone(),
+                    );
                     if let Some(prefix) = rt6.get("ipv6prefix") {
-                        m.insert(format!("Device.IP.Interface.{iface_idx}.IPv6Address.1.PrefixLength"), prefix.clone());
+                        m.insert(
+                            format!("Device.IP.Interface.{iface_idx}.IPv6Address.1.PrefixLength"),
+                            prefix.clone(),
+                        );
                     }
                 }
             }
@@ -212,18 +270,37 @@ pub async fn get(_cfg: &ClientConfig, path: &str) -> HashMap<String, String> {
             // For DHCP/dynamic protocols, get runtime state from ubus
             if ip.is_empty() || proto == "dhcp" || proto == "dhcpv6" || proto == "pppoe" {
                 let rt = get_ubus_interface_status(section);
-                if let Some(v) = rt.get("ipaddr") { if !v.is_empty() { ip = v.clone(); } }
-                if let Some(v) = rt.get("netmask") { if !v.is_empty() { mask = v.clone(); } }
-                if let Some(v) = rt.get("gateway") { if !v.is_empty() { gateway = v.clone(); } }
-                if let Some(v) = rt.get("dns") { if !v.is_empty() { dns = v.clone(); } }
+                if let Some(v) = rt.get("ipaddr") {
+                    if !v.is_empty() {
+                        ip = v.clone();
+                    }
+                }
+                if let Some(v) = rt.get("netmask") {
+                    if !v.is_empty() {
+                        mask = v.clone();
+                    }
+                }
+                if let Some(v) = rt.get("gateway") {
+                    if !v.is_empty() {
+                        gateway = v.clone();
+                    }
+                }
+                if let Some(v) = rt.get("dns") {
+                    if !v.is_empty() {
+                        dns = v.clone();
+                    }
+                }
             }
             let stats = get_interface_stats(&bridge_name).await;
             let mac = get_interface_mac(&bridge_name).await;
             let status = get_interface_status(&bridge_name).await;
-            
+
             // Insert name
-            m.insert(format!("Device.IP.Interface.{idx}.X_OptimACS_Name"), section.clone());
-            
+            m.insert(
+                format!("Device.IP.Interface.{idx}.X_OptimACS_Name"),
+                section.clone(),
+            );
+
             if path.ends_with(".IPAddress") {
                 m.insert(format!("{base}IPAddress"), ip);
             } else if path.ends_with(".SubnetMask") {
@@ -242,7 +319,10 @@ pub async fn get(_cfg: &ClientConfig, path: &str) -> HashMap<String, String> {
                     m.insert(format!("{base}AddressingType"), proto.clone());
                 }
                 if !gateway.is_empty() {
-                    m.insert(format!("Device.IP.Interface.{idx}.X_OptimACS_Gateway"), gateway.clone());
+                    m.insert(
+                        format!("Device.IP.Interface.{idx}.X_OptimACS_Gateway"),
+                        gateway.clone(),
+                    );
                 }
                 if !dns.is_empty() {
                     m.insert(format!("Device.IP.Interface.{idx}.X_OptimACS_DNS"), dns);
@@ -254,7 +334,10 @@ pub async fn get(_cfg: &ClientConfig, path: &str) -> HashMap<String, String> {
 
                 // Upstream flag
                 let is_upstream = section.starts_with("wan");
-                m.insert(format!("Device.IP.Interface.{idx}.X_OptimACS_Upstream"), is_upstream.to_string());
+                m.insert(
+                    format!("Device.IP.Interface.{idx}.X_OptimACS_Upstream"),
+                    is_upstream.to_string(),
+                );
 
                 // Friendly protocol name
                 let proto_friendly = match proto.as_str() {
@@ -267,37 +350,64 @@ pub async fn get(_cfg: &ClientConfig, path: &str) -> HashMap<String, String> {
                     "none" => "Unmanaged",
                     other => other,
                 };
-                m.insert(format!("Device.IP.Interface.{idx}.X_OptimACS_Protocol"), proto_friendly.to_string());
+                m.insert(
+                    format!("Device.IP.Interface.{idx}.X_OptimACS_Protocol"),
+                    proto_friendly.to_string(),
+                );
 
                 // GatewayIPv4 alias
                 if !gateway.is_empty() {
-                    m.insert(format!("Device.IP.Interface.{idx}.X_OptimACS_GatewayIPv4"), gateway.clone());
+                    m.insert(
+                        format!("Device.IP.Interface.{idx}.X_OptimACS_GatewayIPv4"),
+                        gateway.clone(),
+                    );
                 }
 
                 // Add stats if available
                 if let Some(rx_bytes) = stats.get("rx_bytes") {
-                    m.insert(format!("Device.IP.Interface.{idx}.X_OptimACS_RXBytes"), rx_bytes.clone());
+                    m.insert(
+                        format!("Device.IP.Interface.{idx}.X_OptimACS_RXBytes"),
+                        rx_bytes.clone(),
+                    );
                 }
                 if let Some(rx_packets) = stats.get("rx_packets") {
-                    m.insert(format!("Device.IP.Interface.{idx}.X_OptimACS_RXPackets"), rx_packets.clone());
+                    m.insert(
+                        format!("Device.IP.Interface.{idx}.X_OptimACS_RXPackets"),
+                        rx_packets.clone(),
+                    );
                 }
                 if let Some(tx_bytes) = stats.get("tx_bytes") {
-                    m.insert(format!("Device.IP.Interface.{idx}.X_OptimACS_TXBytes"), tx_bytes.clone());
+                    m.insert(
+                        format!("Device.IP.Interface.{idx}.X_OptimACS_TXBytes"),
+                        tx_bytes.clone(),
+                    );
                 }
                 if let Some(tx_packets) = stats.get("tx_packets") {
-                    m.insert(format!("Device.IP.Interface.{idx}.X_OptimACS_TXPackets"), tx_packets.clone());
+                    m.insert(
+                        format!("Device.IP.Interface.{idx}.X_OptimACS_TXPackets"),
+                        tx_packets.clone(),
+                    );
                 }
                 if let Some(uptime) = stats.get("uptime") {
-                    m.insert(format!("Device.IP.Interface.{idx}.X_OptimACS_Uptime"), uptime.clone());
+                    m.insert(
+                        format!("Device.IP.Interface.{idx}.X_OptimACS_Uptime"),
+                        uptime.clone(),
+                    );
                 }
 
                 // IPv6 — always from runtime state
                 let rt6 = get_ubus_interface_status(section);
                 if let Some(v6) = rt6.get("ipv6addr") {
                     if !v6.is_empty() {
-                        m.insert(format!("Device.IP.Interface.{idx}.IPv6Address.1.IPAddress"), v6.clone());
+                        m.insert(
+                            format!("Device.IP.Interface.{idx}.IPv6Address.1.IPAddress"),
+                            v6.clone(),
+                        );
                         if let Some(prefix) = rt6.get("ipv6prefix") {
-                            m.insert(format!("Device.IP.Interface.{idx}.IPv6Address.1.PrefixLength"), prefix.clone());
+                            m.insert(
+                                format!("Device.IP.Interface.{idx}.IPv6Address.1.PrefixLength"),
+                                prefix.clone(),
+                            );
                         }
                     }
                 }
@@ -310,18 +420,21 @@ pub async fn get(_cfg: &ClientConfig, path: &str) -> HashMap<String, String> {
 
 pub async fn set(_cfg: &ClientConfig, path: &str, value: &str) -> Result<(), String> {
     let interfaces = get_network_interfaces();
-    
+
     // Parse the interface index from the path
     let idx = parse_interface_index(path)
         .ok_or_else(|| format!("Cannot parse interface index from path: {path}"))?;
-    
+
     if idx == 0 || idx > interfaces.len() {
-        return Err(format!("Interface index {idx} out of range (max: {})", interfaces.len()));
+        return Err(format!(
+            "Interface index {idx} out of range (max: {})",
+            interfaces.len()
+        ));
     }
-    
+
     let (section, _name) = &interfaces[idx - 1];
     info!("Setting IP parameter for interface {idx} (section: {section}): {path} = {value}");
-    
+
     if path.ends_with(".IPAddress") {
         uci_set(&format!("network.{section}.ipaddr"), value)?;
     } else if path.ends_with(".SubnetMask") {
@@ -336,12 +449,12 @@ pub async fn set(_cfg: &ClientConfig, path: &str, value: &str) -> Result<(), Str
         warn!("Unknown IP parameter in path: {path}");
         return Err(format!("Unknown IP parameter: {path}"));
     }
-    
+
     uci_commit("network")?;
-    
+
     // Reload network
     reload_network().await?;
-    
+
     Ok(())
 }
 
@@ -353,12 +466,12 @@ async fn reload_network() -> Result<(), String> {
         vec!["/etc/init.d/network", "restart"],
         vec!["killall", "-HUP", "netifd"],
     ];
-    
+
     for args in &methods {
         let status = std::process::Command::new(args[0])
             .args(&args[1..])
             .status();
-        
+
         if let Ok(s) = status {
             if s.success() {
                 info!("Network configuration reloaded");
@@ -366,7 +479,7 @@ async fn reload_network() -> Result<(), String> {
             }
         }
     }
-    
+
     warn!("Network reload command failed, changes will apply on reboot");
     Ok(()) // Don't fail the operation
 }
@@ -377,7 +490,11 @@ fn get_ubus_interface_status(iface_name: &str) -> HashMap<String, String> {
     let mut result = HashMap::new();
 
     let out = std::process::Command::new("ubus")
-        .args(["call", &format!("network.interface.{}", iface_name), "status"])
+        .args([
+            "call",
+            &format!("network.interface.{}", iface_name),
+            "status",
+        ])
         .output()
         .ok()
         .and_then(|o| String::from_utf8(o.stdout).ok())
@@ -438,7 +555,9 @@ fn get_ubus_interface_status(iface_name: &str) -> HashMap<String, String> {
                 let arr = &chunk[arr_start..arr_start + arr_end];
                 let servers: Vec<&str> = arr
                     .split('"')
-                    .filter(|s| !s.is_empty() && !s.contains('[') && !s.contains(',') && s.trim() != ",")
+                    .filter(|s| {
+                        !s.is_empty() && !s.contains('[') && !s.contains(',') && s.trim() != ","
+                    })
                     .filter(|s| s.contains('.') || s.contains(':'))
                     .collect();
                 if !servers.is_empty() {
@@ -507,7 +626,7 @@ fn cidr_to_netmask(cidr: u32) -> String {
 /// Get interface statistics from /proc/net/dev
 async fn get_interface_stats(iface: &str) -> HashMap<String, String> {
     let mut stats = HashMap::new();
-    
+
     // Read /proc/net/dev
     if let Ok(content) = tokio::fs::read_to_string("/proc/net/dev").await {
         for line in content.lines() {
@@ -532,25 +651,31 @@ async fn get_interface_stats(iface: &str) -> HashMap<String, String> {
             }
         }
     }
-    
+
     // Get interface uptime from /sys/class/net/{iface}/operstate or similar
-    if let Ok(content) = tokio::fs::read_to_string(format!("/sys/class/net/{}/operstate", iface)).await {
+    if let Ok(content) =
+        tokio::fs::read_to_string(format!("/sys/class/net/{}/operstate", iface)).await
+    {
         let state = content.trim();
         if state == "up" {
             // Try to get carrier uptime if available
-            if let Ok(carrier) = tokio::fs::read_to_string(format!("/sys/class/net/{}/carrier_up_time", iface)).await {
+            if let Ok(carrier) =
+                tokio::fs::read_to_string(format!("/sys/class/net/{}/carrier_up_time", iface)).await
+            {
                 let seconds = carrier.trim().parse::<u64>().unwrap_or(0);
                 stats.insert("uptime".to_string(), format_duration(seconds));
             }
         }
     }
-    
+
     stats
 }
 
 /// Get MAC address from /sys/class/net/{iface}/address
 async fn get_interface_mac(iface: &str) -> String {
-    if let Ok(content) = tokio::fs::read_to_string(format!("/sys/class/net/{}/address", iface)).await {
+    if let Ok(content) =
+        tokio::fs::read_to_string(format!("/sys/class/net/{}/address", iface)).await
+    {
         content.trim().to_string()
     } else {
         String::new()
@@ -559,12 +684,15 @@ async fn get_interface_mac(iface: &str) -> String {
 
 /// Get interface operational status
 async fn get_interface_status(iface: &str) -> String {
-    if let Ok(content) = tokio::fs::read_to_string(format!("/sys/class/net/{}/operstate", iface)).await {
+    if let Ok(content) =
+        tokio::fs::read_to_string(format!("/sys/class/net/{}/operstate", iface)).await
+    {
         match content.trim() {
             "up" => "Up",
             "down" => "Down",
             _ => "Unknown",
-        }.to_string()
+        }
+        .to_string()
     } else {
         "Down".to_string()
     }
@@ -586,7 +714,7 @@ fn format_duration(seconds: u64) -> String {
     let hours = (seconds % 86400) / 3600;
     let mins = (seconds % 3600) / 60;
     let secs = seconds % 60;
-    
+
     if days > 0 {
         format!("{}d {}h {}m {}s", days, hours, mins, secs)
     } else if hours > 0 {

@@ -3,9 +3,9 @@
 //! Implements GetInstances request/response per TR-369 §6.1.6
 
 use super::search::extract_instance_number;
-use crate::usp::usp_msg;
-use crate::usp::dm;
 use crate::config::ClientConfig;
+use crate::usp::dm;
+use crate::usp::usp_msg;
 
 /// Handle GetInstances request and return response message
 pub async fn handle_get_instances(
@@ -15,10 +15,10 @@ pub async fn handle_get_instances(
     first_level_only: bool,
 ) -> Option<usp_msg::Msg> {
     let mut path_results = Vec::new();
-    
+
     for path in obj_paths {
         let instances = get_instances_for_path(cfg, path, first_level_only).await;
-        
+
         // Convert to CurrInstance type
         let curr_insts: Vec<usp_msg::get_instances_resp::CurrInstance> = instances
             .into_iter()
@@ -27,8 +27,9 @@ pub async fn handle_get_instances(
                     obj_path: path,
                     unique_keys: std::collections::HashMap::new(), // Would populate from schema
                 }
-            }).collect();
-        
+            })
+            .collect();
+
         path_results.push(usp_msg::get_instances_resp::RequestedPathResult {
             requested_path: path.clone(),
             err_code: 0,
@@ -36,7 +37,7 @@ pub async fn handle_get_instances(
             curr_insts,
         });
     }
-    
+
     Some(usp_msg::Msg {
         header: Some(usp_msg::Header {
             msg_id: msg_id.into(),
@@ -60,14 +61,14 @@ async fn get_instances_for_path(
     first_level_only: bool,
 ) -> Vec<(String, u32)> {
     let mut instances = Vec::new();
-    
+
     // Get all parameters under this path
     let max_depth = if first_level_only { 1 } else { 0 };
     let params = dm::get_params(cfg, &[path.into()], max_depth).await;
-    
+
     // Extract unique instance numbers from parameter paths
     let mut seen_instances = std::collections::HashSet::new();
-    
+
     for (param_path, _) in params {
         if let Some(instance) = extract_instance_number(&param_path) {
             if seen_instances.insert(instance) {
@@ -79,6 +80,6 @@ async fn get_instances_for_path(
             }
         }
     }
-    
+
     instances
 }

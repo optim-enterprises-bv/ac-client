@@ -20,13 +20,12 @@ use crate::util;
 
 use super::{
     dm,
-    tp469,
     endpoint::EndpointId,
     message::{
-        build_boot_notify, build_error, build_operate_resp,
-        build_set_resp, decode_msg, encode_msg, build_value_change_notify,
+        build_boot_notify, build_error, build_operate_resp, build_set_resp,
+        build_value_change_notify, decode_msg, encode_msg,
     },
-    mtp,
+    mtp, tp469,
     usp_msg::{body::MsgBody, header::MessageType},
 };
 
@@ -35,12 +34,9 @@ use tokio::sync::mpsc;
 const _STATUS_SUBSCRIPTION_ID: &str = "status";
 
 /// Run the USP agent.  Called from main after config is loaded.
-pub async fn run(
-    cfg:  Arc<ClientConfig>,
-    gnss: Arc<std::sync::Mutex<Option<GnssPosition>>>,
-) {
+pub async fn run(cfg: Arc<ClientConfig>, gnss: Arc<std::sync::Mutex<Option<GnssPosition>>>) {
     debug!("Initializing USP Agent...");
-    
+
     let agent_id = if cfg.usp_endpoint_id.is_empty() {
         // Build from vendor OUI (00005A = placeholder) + MAC
         debug!("Building endpoint ID from MAC: {}", cfg.mac_addr);
@@ -56,13 +52,13 @@ pub async fn run(
     // Create channel for status heartbeat messages (sends encoded USP records)
     let (status_tx, status_rx) = mpsc::channel::<Vec<u8>>(10);
     let status_rx = Arc::new(Mutex::new(status_rx));
-    
+
     // Spawn status heartbeat task
     {
         debug!("Spawning status heartbeat task");
         let cfg2 = Arc::clone(&cfg);
         let agent2 = agent_id.clone();
-        let gnss2  = Arc::clone(&gnss);
+        let gnss2 = Arc::clone(&gnss);
         let status_tx2 = status_tx.clone();
         tokio::spawn(async move {
             debug!("Status heartbeat task started");
@@ -77,18 +73,18 @@ pub async fn run(
             debug!("Starting WebSocket MTP");
             mtp::websocket::run(cfg, agent_id, status_rx).await
         }
-        MtpType::Mqtt      => {
+        MtpType::Mqtt => {
             debug!("Starting MQTT MTP");
             mtp::mqtt::run(cfg, agent_id, status_rx).await
         }
-        MtpType::Both      => {
+        MtpType::Both => {
             debug!("Starting both WebSocket and MQTT MTP");
-            let cfg2     = Arc::clone(&cfg);
-            let agent2   = agent_id.clone();
+            let cfg2 = Arc::clone(&cfg);
+            let agent2 = agent_id.clone();
             let status_rx2 = Arc::clone(&status_rx);
-            tokio::spawn(async move { 
+            tokio::spawn(async move {
                 debug!("Starting MQTT MTP in background task");
-                mtp::mqtt::run(cfg2, agent2, status_rx2).await; 
+                mtp::mqtt::run(cfg2, agent2, status_rx2).await;
             });
             mtp::websocket::run(cfg, agent_id, status_rx).await;
         }
@@ -101,28 +97,38 @@ pub async fn run(
 /// `negotiated_ver` is updated when a `GetSupportedProtoResp` is received
 /// (TR-369 §6.2.1 version negotiation).
 pub async fn handle_incoming(
-    cfg:            Arc<ClientConfig>,
-    _agent_id:       EndpointId,
-    msg_bytes:      &[u8],
+    cfg: Arc<ClientConfig>,
+    _agent_id: EndpointId,
+    msg_bytes: &[u8],
     negotiated_ver: Arc<Mutex<String>>,
 ) -> Option<Vec<u8>> {
     trace!("handle_incoming called with {} bytes", msg_bytes.len());
-    trace!("Raw message bytes (first 64): {:?}", &msg_bytes[..msg_bytes.len().min(64)]);
-    
+    trace!(
+        "Raw message bytes (first 64): {:?}",
+        &msg_bytes[..msg_bytes.len().min(64)]
+    );
+
     let msg = decode_msg(msg_bytes)
         .map_err(|e| {
             error!("Failed to decode USP message: {}", e);
-            trace!("Failed message bytes (first 128): {:?}", &msg_bytes[..msg_bytes.len().min(128)]);
+            trace!(
+                "Failed message bytes (first 128): {:?}",
+                &msg_bytes[..msg_bytes.len().min(128)]
+            );
             e
         })
         .ok()?;
     debug!("Successfully decoded USP message");
 
     let header = msg.header.as_ref()?;
-    let msg_id   = header.msg_id.clone();
+    let msg_id = header.msg_id.clone();
     let msg_type = MessageType::try_from(header.msg_type).ok()?;
-    
-    info!("Received {} message (msg_id={})", msg_type.as_str_name(), msg_id);
+
+    info!(
+        "Received {} message (msg_id={})",
+        msg_type.as_str_name(),
+        msg_id
+    );
     trace!("Message type: {:?}, ID: {}", msg_type, msg_id);
 
     let body = msg.body.as_ref()?;
@@ -135,7 +141,9 @@ pub async fn handle_incoming(
                     if let Some(super::usp_msg::request::ReqType::Get(g)) = &req.req_type {
                         debug!("GET paths: {:?}, max_depth={}", g.param_paths, g.max_depth);
                         (g.param_paths.clone(), g.max_depth)
-                    } else { (vec![], 0) }
+                    } else {
+                        (vec![], 0)
+                    }
                 }
                 _ => (vec![], 0),
             };
@@ -146,16 +154,20 @@ pub async fn handle_incoming(
 
         MessageType::Set => {
             debug!("Handling SET request (msg_id={})", msg_id);
-            let updates   = extract_set_updates(&body);
+            let updates = extract_set_updates(&body);
             let obj_paths = extract_set_obj_paths(&body);
-            debug!("SET: {} parameter(s) to update in {} object path(s)", updates.len(), obj_paths.len());
+            debug!(
+                "SET: {} parameter(s) to update in {} object path(s)",
+                updates.len(),
+                obj_paths.len()
+            );
             trace!("SET updates: {:?}", updates);
             match dm::set_params(&cfg, &updates).await {
-                Ok(())  => {
+                Ok(()) => {
                     debug!("SET completed successfully (msg_id={})", msg_id);
                     Some(build_set_resp(&msg_id, &obj_paths))
                 }
-                Err(e)  => {
+                Err(e) => {
                     error!("SET failed (msg_id={}): {}", msg_id, e);
                     Some(build_error(&msg_id, 7200, &e))
                 }
@@ -173,7 +185,7 @@ pub async fn handle_incoming(
                     trace!("OPERATE output: {:?}", output);
                     Some(build_operate_resp(&msg_id, &command, &command_key, output))
                 }
-                Err(e)     => {
+                Err(e) => {
                     error!("OPERATE failed (msg_id={}): {}", msg_id, e);
                     Some(build_error(&msg_id, 7800, &e))
                 }
@@ -181,7 +193,10 @@ pub async fn handle_incoming(
         }
 
         MessageType::NotifyResp => {
-            debug!("Received NotifyResp (msg_id={}) - controller acknowledged notify", msg_id);
+            debug!(
+                "Received NotifyResp (msg_id={}) - controller acknowledged notify",
+                msg_id
+            );
             None
         }
 
@@ -203,9 +218,9 @@ pub async fn handle_incoming(
 
         // TR-369 §6.1.5: GetSupportedDM - return supported data model
         MessageType::GetSupportedDm => {
-            let (obj_paths, first_level_only, include_commands, include_events) = 
+            let (obj_paths, first_level_only, include_commands, include_events) =
                 extract_get_supported_dm_args(&body);
-            
+
             tp469::handle_get_supported_dm(
                 &msg_id,
                 &obj_paths,
@@ -214,33 +229,28 @@ pub async fn handle_incoming(
                 include_events,
             )
         }
-        
+
         // TR-369 §6.1.6: GetInstances - enumerate object instances
         MessageType::GetInstances => {
             let (obj_paths, first_level_only) = extract_get_instances_args(&body);
-            
-            tp469::handle_get_instances(
-                &cfg,
-                &msg_id,
-                &obj_paths,
-                first_level_only,
-            ).await
+
+            tp469::handle_get_instances(&cfg, &msg_id, &obj_paths, first_level_only).await
         }
-        
+
         // TR-369 §6.1.3: Add - create new object instances
         MessageType::Add => {
             let (create_objs, allow_partial) = extract_add_args(&body);
             let results = tp469::handle_add(&cfg, &create_objs, allow_partial).await;
-            
+
             // Build ADD_RESP
             Some(build_add_resp(&msg_id, results))
         }
-        
+
         // TR-369 §6.1.4: Delete - remove object instances
         MessageType::Delete => {
             let (obj_paths, allow_partial) = extract_delete_args(&body);
             let results = tp469::handle_delete(&cfg, &obj_paths, allow_partial).await;
-            
+
             // Build DELETE_RESP
             Some(build_delete_resp(&msg_id, results))
         }
@@ -258,7 +268,7 @@ pub async fn handle_incoming(
 
 fn collect_boot_params(cfg: &ClientConfig) -> HashMap<String, String> {
     let mut m = HashMap::new();
-    
+
     // Device.DeviceInfo parameters - TR-181 compliant
     let device_model = util::read_device_model();
     let device_arch = util::read_device_arch();
@@ -266,39 +276,66 @@ fn collect_boot_params(cfg: &ClientConfig) -> HashMap<String, String> {
     let oui = util::read_manufacturer_oui(&cfg.mac_addr);
     let description = util::read_device_description();
     let kernel_version = util::read_kernel_version();
-    
+
     // Core DeviceInfo parameters
-    m.insert("Device.DeviceInfo.Manufacturer".into(),              "OpenWrt".into());
-    m.insert("Device.DeviceInfo.ManufacturerOUI".into(),           oui);
-    m.insert("Device.DeviceInfo.ModelName".into(),                 device_model.clone());
-    m.insert("Device.DeviceInfo.Description".into(),               description);
-    m.insert("Device.DeviceInfo.ProductClass".into(),              "Gateway".into());
-    m.insert("Device.DeviceInfo.SerialNumber".into(),              cfg.mac_addr.clone());
-    m.insert("Device.DeviceInfo.BaseMacAddress".into(),            cfg.mac_addr.clone());
-    m.insert("Device.DeviceInfo.HardwareVersion".into(),           device_arch.clone());
-    m.insert("Device.DeviceInfo.SoftwareVersion".into(),           util::read_fw_version());
-    m.insert("Device.DeviceInfo.AdditionalSoftwareVersion".into(), kernel_version);
-    m.insert("Device.DeviceInfo.DeviceStatus".into(),              util::read_device_status());
-    m.insert("Device.DeviceInfo.UpTime".into(),                    util::read_uptime());
-    m.insert("Device.DeviceInfo.HostName".into(),                  hostname);
-    
+    m.insert("Device.DeviceInfo.Manufacturer".into(), "OpenWrt".into());
+    m.insert("Device.DeviceInfo.ManufacturerOUI".into(), oui);
+    m.insert("Device.DeviceInfo.ModelName".into(), device_model.clone());
+    m.insert("Device.DeviceInfo.Description".into(), description);
+    m.insert("Device.DeviceInfo.ProductClass".into(), "Gateway".into());
+    m.insert(
+        "Device.DeviceInfo.SerialNumber".into(),
+        cfg.mac_addr.clone(),
+    );
+    m.insert(
+        "Device.DeviceInfo.BaseMacAddress".into(),
+        cfg.mac_addr.clone(),
+    );
+    m.insert(
+        "Device.DeviceInfo.HardwareVersion".into(),
+        device_arch.clone(),
+    );
+    m.insert(
+        "Device.DeviceInfo.SoftwareVersion".into(),
+        util::read_fw_version(),
+    );
+    m.insert(
+        "Device.DeviceInfo.AdditionalSoftwareVersion".into(),
+        kernel_version,
+    );
+    m.insert(
+        "Device.DeviceInfo.DeviceStatus".into(),
+        util::read_device_status(),
+    );
+    m.insert("Device.DeviceInfo.UpTime".into(), util::read_uptime());
+    m.insert("Device.DeviceInfo.HostName".into(), hostname);
+
     // Custom OptimACS extensions
-    m.insert("Device.DeviceInfo.X_OptimACS_LoadAvg".into(),        util::read_load_avg());
-    m.insert("Device.DeviceInfo.X_OptimACS_FreeMem".into(),         util::read_free_mem());
-    
+    m.insert(
+        "Device.DeviceInfo.X_OptimACS_LoadAvg".into(),
+        util::read_load_avg(),
+    );
+    m.insert(
+        "Device.DeviceInfo.X_OptimACS_FreeMem".into(),
+        util::read_free_mem(),
+    );
+
     // IP Address
     let local_ip = util::get_local_ip();
     if !local_ip.is_empty() {
         m.insert("Device.IP.Interface.1.IPAddress".into(), local_ip);
     }
-    
+
     // TR-181 §9.3.6 required Boot! event parameters
-    m.insert("Cause".into(),           "LocalReboot".into());
+    m.insert("Cause".into(), "LocalReboot".into());
     m.insert("FirmwareUpdated".into(), "false".into());
 
     // OptimACS claim token — links device to a tenant account
     if !cfg.claim_token.is_empty() {
-        m.insert("Device.X_OptimACS.ClaimToken".into(), cfg.claim_token.clone());
+        m.insert(
+            "Device.X_OptimACS.ClaimToken".into(),
+            cfg.claim_token.clone(),
+        );
     }
 
     m
@@ -310,53 +347,53 @@ fn collect_boot_params(cfg: &ClientConfig) -> HashMap<String, String> {
 pub type StatusSender = mpsc::Sender<Vec<u8>>;
 
 async fn status_loop(
-    cfg:      Arc<ClientConfig>,
+    cfg: Arc<ClientConfig>,
     agent_id: EndpointId,
-    _gnss:     Arc<std::sync::Mutex<Option<GnssPosition>>>,
-    tx:       StatusSender,
+    _gnss: Arc<std::sync::Mutex<Option<GnssPosition>>>,
+    tx: StatusSender,
 ) {
     let interval = Duration::from_secs(cfg.status_interval);
     let controller_id = cfg.controller_id.clone();
-    
+
     // Store previous values for delta tracking
     let mut prev_uptime = String::new();
     let mut prev_load = String::new();
     let mut prev_mem = String::new();
-    
+
     loop {
         tokio::time::sleep(interval).await;
-        
+
         // Read current values
         let uptime = util::read_uptime();
         let load = util::read_load_avg();
         let mem = util::read_free_mem();
-        
+
         // Only send changed values (delta updates)
         let mut params_to_send: Vec<(&str, String)> = Vec::new();
-        
+
         if uptime != prev_uptime {
             params_to_send.push(("Device.DeviceInfo.UpTime", uptime.clone()));
             prev_uptime = uptime;
         }
-        
+
         if load != prev_load {
             params_to_send.push(("Device.DeviceInfo.X_OptimACS_LoadAvg", load.clone()));
             prev_load = load;
         }
-        
+
         if mem != prev_mem {
             params_to_send.push(("Device.DeviceInfo.X_OptimACS_FreeMem", mem.clone()));
             prev_mem = mem;
         }
-        
+
         // Send only changed parameters
         if !params_to_send.is_empty() {
             for (path, val) in &params_to_send {
                 info!("USP status (delta): {path} = {val}");
-                
+
                 // Build ValueChange Notify message
                 let msg = build_value_change_notify("status", path, val);
-                
+
                 // Encode to USP record
                 match encode_msg(&msg) {
                     Ok(msg_bytes) => {
@@ -364,12 +401,15 @@ async fn status_loop(
                             agent_id.as_str(),
                             &controller_id,
                             msg_bytes,
-                            "1.3"
+                            "1.3",
                         );
-                        
+
                         match super::record::encode_record(&record) {
                             Ok(record_bytes) => {
-                                info!("Sending delta update ({} bytes): {path} = {val}", record_bytes.len());
+                                info!(
+                                    "Sending delta update ({} bytes): {path} = {val}",
+                                    record_bytes.len()
+                                );
                                 if let Err(e) = tx.send(record_bytes).await {
                                     warn!("Failed to send status update: {e}");
                                 }
@@ -392,7 +432,7 @@ fn build_get_resp(msg_id: &str, params: HashMap<String, String>) -> Option<super
     use super::usp_msg::{get_resp::*, *};
     Some(super::usp_msg::Msg {
         header: Some(Header {
-            msg_id:   msg_id.into(),
+            msg_id: msg_id.into(),
             msg_type: MessageType::GetResp as i32,
         }),
         body: Some(Body {
@@ -454,7 +494,11 @@ fn extract_set_obj_paths(body: &super::usp_msg::Body) -> Vec<String> {
 fn extract_operate(body: &super::usp_msg::Body) -> (String, String, HashMap<String, String>) {
     if let Some(MsgBody::Request(req)) = &body.msg_body {
         if let Some(super::usp_msg::request::ReqType::Operate(op)) = &req.req_type {
-            return (op.command.clone(), op.command_key.clone(), op.input_args.clone());
+            return (
+                op.command.clone(),
+                op.command_key.clone(),
+                op.input_args.clone(),
+            );
         }
     }
     (String::new(), String::new(), HashMap::new())
@@ -462,8 +506,14 @@ fn extract_operate(body: &super::usp_msg::Body) -> (String, String, HashMap<Stri
 
 fn extract_supported_versions(body: &super::usp_msg::Body) -> Vec<String> {
     if let Some(MsgBody::Response(resp)) = &body.msg_body {
-        if let Some(super::usp_msg::response::RespType::GetSupportedProtoResp(r)) = &resp.resp_type {
-            return r.agent_supported_versions.split(',').map(str::trim).map(String::from).collect();
+        if let Some(super::usp_msg::response::RespType::GetSupportedProtoResp(r)) = &resp.resp_type
+        {
+            return r
+                .agent_supported_versions
+                .split(',')
+                .map(str::trim)
+                .map(String::from)
+                .collect();
         }
     }
     vec![]
@@ -518,27 +568,38 @@ fn extract_delete_args(body: &super::usp_msg::Body) -> (Vec<String>, bool) {
 
 fn build_add_resp(msg_id: &str, results: Vec<tp469::AddResult>) -> super::usp_msg::Msg {
     use super::usp_msg::{add_resp::*, *};
-    
-    let created_obj_results = results.into_iter().map(|r| {
-        let oper_status = if r.success {
-            Some(created_object_result::OperStatus::OperSuccess(created_object_result::OperSuccess {
-                instantiated_path: format!("{}.{}", r.obj_path.trim_end_matches('.'), r.instance),
-                param_errs: vec![],
-                unique_keys: std::collections::HashMap::new(),
-            }))
-        } else {
-            Some(created_object_result::OperStatus::OperFailure(created_object_result::OperFailure {
-                err_code: r.err_code.map(|e| e.as_u32()).unwrap_or(7200),
-                err_msg: r.err_msg.unwrap_or_default(),
-            }))
-        };
-        
-        CreatedObjectResult {
-            requested_path: r.obj_path,
-            oper_status,
-        }
-    }).collect();
-    
+
+    let created_obj_results = results
+        .into_iter()
+        .map(|r| {
+            let oper_status = if r.success {
+                Some(created_object_result::OperStatus::OperSuccess(
+                    created_object_result::OperSuccess {
+                        instantiated_path: format!(
+                            "{}.{}",
+                            r.obj_path.trim_end_matches('.'),
+                            r.instance
+                        ),
+                        param_errs: vec![],
+                        unique_keys: std::collections::HashMap::new(),
+                    },
+                ))
+            } else {
+                Some(created_object_result::OperStatus::OperFailure(
+                    created_object_result::OperFailure {
+                        err_code: r.err_code.map(|e| e.as_u32()).unwrap_or(7200),
+                        err_msg: r.err_msg.unwrap_or_default(),
+                    },
+                ))
+            };
+
+            CreatedObjectResult {
+                requested_path: r.obj_path,
+                oper_status,
+            }
+        })
+        .collect();
+
     super::usp_msg::Msg {
         header: Some(Header {
             msg_id: msg_id.into(),
@@ -556,26 +617,33 @@ fn build_add_resp(msg_id: &str, results: Vec<tp469::AddResult>) -> super::usp_ms
 
 fn build_delete_resp(msg_id: &str, results: Vec<tp469::DeleteResult>) -> super::usp_msg::Msg {
     use super::usp_msg::{delete_resp::*, *};
-    
-    let deleted_obj_results = results.into_iter().map(|r| {
-        let oper_status = if r.success {
-            Some(deleted_object_result::OperStatus::OperSuccess(deleted_object_result::OperSuccess {
-                affected_paths: vec![],
-            }))
-        } else {
-            Some(deleted_object_result::OperStatus::OperFailure(deleted_object_result::OperFailure {
-                err_code: r.err_code.map(|e| e.as_u32()).unwrap_or(7200),
-                err_msg: r.err_msg.unwrap_or_default(),
-                unaffected_path_errs: vec![],
-            }))
-        };
-        
-        DeletedObjectResult {
-            requested_path: r.obj_path,
-            oper_status,
-        }
-    }).collect();
-    
+
+    let deleted_obj_results = results
+        .into_iter()
+        .map(|r| {
+            let oper_status = if r.success {
+                Some(deleted_object_result::OperStatus::OperSuccess(
+                    deleted_object_result::OperSuccess {
+                        affected_paths: vec![],
+                    },
+                ))
+            } else {
+                Some(deleted_object_result::OperStatus::OperFailure(
+                    deleted_object_result::OperFailure {
+                        err_code: r.err_code.map(|e| e.as_u32()).unwrap_or(7200),
+                        err_msg: r.err_msg.unwrap_or_default(),
+                        unaffected_path_errs: vec![],
+                    },
+                ))
+            };
+
+            DeletedObjectResult {
+                requested_path: r.obj_path,
+                oper_status,
+            }
+        })
+        .collect();
+
     super::usp_msg::Msg {
         header: Some(Header {
             msg_id: msg_id.into(),

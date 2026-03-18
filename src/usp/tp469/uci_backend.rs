@@ -733,22 +733,3 @@ pub fn set_system_hostname(hostname: &str) -> UciResult {
 pub fn get_system_hostname() -> String {
     uci_get("system.@system[0].hostname")
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-

@@ -16,7 +16,7 @@ pub fn handle_get_supported_dm(
 ) -> Option<usp_msg::Msg> {
     // Simplified implementation - return empty supported objects
     let path_results: Vec<usp_msg::get_supported_dm_resp::RequestedObjectResult> = vec![];
-    
+
     Some(usp_msg::Msg {
         header: Some(usp_msg::Header {
             msg_id: msg_id.into(),

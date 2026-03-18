@@ -27,28 +27,28 @@ pub async fn handle_add(
 ) -> Vec<AddResult> {
     let mut results = Vec::new();
     let mut has_failure = false;
-    
+
     for create_obj in create_objs {
         let result = create_object_instance(create_obj).await;
-        
+
         if !result.success {
             has_failure = true;
         }
-        
+
         results.push(result);
-        
+
         // If allow_partial is false and we had a failure, stop processing
         if !allow_partial && has_failure {
             break;
         }
     }
-    
+
     results
 }
 
 async fn create_object_instance(create_obj: &usp_msg::add::CreateObject) -> AddResult {
     let obj_path = &create_obj.obj_path;
-    
+
     // Determine the object type and dispatch to appropriate handler
     if obj_path.contains("DHCP") || obj_path.contains("dhcp") {
         add_dhcp_static_lease(create_obj).await
@@ -72,7 +72,7 @@ async fn add_dhcp_static_lease(create_obj: &usp_msg::add::CreateObject) -> AddRe
     let mut mac = String::new();
     let mut ip = String::new();
     let mut hostname = None;
-    
+
     for param in &create_obj.param_settings {
         match param.param.as_str() {
             "Chaddr" => mac = param.value.clone(),
@@ -81,7 +81,7 @@ async fn add_dhcp_static_lease(create_obj: &usp_msg::add::CreateObject) -> AddRe
             _ => {}
         }
     }
-    
+
     if mac.is_empty() || ip.is_empty() {
         return AddResult {
             obj_path: create_obj.obj_path.clone(),
@@ -91,10 +91,10 @@ async fn add_dhcp_static_lease(create_obj: &usp_msg::add::CreateObject) -> AddRe
             err_msg: Some("MAC address (Chaddr) and IP (Yiaddr) are required".into()),
         };
     }
-    
+
     // Call UCI backend to add the lease
     let result = uci_backend::add_dhcp_lease(&mac, &ip, hostname.as_deref());
-    
+
     convert_uci_result(&create_obj.obj_path, result)
 }
 
@@ -104,7 +104,7 @@ async fn add_wifi_interface(create_obj: &usp_msg::add::CreateObject) -> AddResul
     let mut encryption = None;
     let mut key = None;
     let mut device = None;
-    
+
     for param in &create_obj.param_settings {
         match param.param.as_str() {
             "SSID" => ssid = param.value.clone(),
@@ -114,7 +114,7 @@ async fn add_wifi_interface(create_obj: &usp_msg::add::CreateObject) -> AddResul
             _ => {}
         }
     }
-    
+
     if ssid.is_empty() {
         return AddResult {
             obj_path: create_obj.obj_path.clone(),
@@ -124,7 +124,7 @@ async fn add_wifi_interface(create_obj: &usp_msg::add::CreateObject) -> AddResul
             err_msg: Some("SSID is required".into()),
         };
     }
-    
+
     // Call UCI backend
     let result = uci_backend::add_wifi_interface(
         &ssid,
@@ -132,7 +132,7 @@ async fn add_wifi_interface(create_obj: &usp_msg::add::CreateObject) -> AddResul
         key.as_deref(),
         device.as_deref(),
     );
-    
+
     convert_uci_result(&create_obj.obj_path, result)
 }
 
@@ -140,7 +140,7 @@ async fn add_static_host(create_obj: &usp_msg::add::CreateObject) -> AddResult {
     // Extract parameters
     let mut ip = String::new();
     let mut hostname = String::new();
-    
+
     for param in &create_obj.param_settings {
         match param.param.as_str() {
             "IPAddress" => ip = param.value.clone(),
@@ -148,7 +148,7 @@ async fn add_static_host(create_obj: &usp_msg::add::CreateObject) -> AddResult {
             _ => {}
         }
     }
-    
+
     if ip.is_empty() || hostname.is_empty() {
         return AddResult {
             obj_path: create_obj.obj_path.clone(),
@@ -158,10 +158,10 @@ async fn add_static_host(create_obj: &usp_msg::add::CreateObject) -> AddResult {
             err_msg: Some("IP address and hostname are required".into()),
         };
     }
-    
+
     // Call UCI backend
     let result = uci_backend::add_static_host(&ip, &hostname);
-    
+
     convert_uci_result(&create_obj.obj_path, result)
 }
 
@@ -193,22 +193,22 @@ pub async fn handle_delete(
 ) -> Vec<DeleteResult> {
     let mut results = Vec::new();
     let mut has_failure = false;
-    
+
     for obj_path in obj_paths {
         let result = delete_object_instance(obj_path).await;
-        
+
         if !result.success {
             has_failure = true;
         }
-        
+
         results.push(result);
-        
+
         // If allow_partial is false and we had a failure, stop processing
         if !allow_partial && has_failure {
             break;
         }
     }
-    
+
     results
 }
 
@@ -217,16 +217,19 @@ async fn delete_object_instance(obj_path: &str) -> DeleteResult {
     // Format: Device.DHCPv4.Server.Pool.1.StaticAddress.1
     // We need to extract the instance number (the last numeric segment)
     let instance = extract_instance_from_path(obj_path);
-    
+
     if instance == 0 {
         return DeleteResult {
             obj_path: obj_path.to_string(),
             success: false,
             err_code: Some(ErrorCode::InvalidInstanceIdentifier),
-            err_msg: Some(format!("Could not extract instance number from {}", obj_path)),
+            err_msg: Some(format!(
+                "Could not extract instance number from {}",
+                obj_path
+            )),
         };
     }
-    
+
     // Determine object type and dispatch
     if obj_path.contains("DHCP") || obj_path.contains("dhcp") {
         delete_dhcp_static_lease(obj_path, instance).await
@@ -246,9 +249,9 @@ async fn delete_object_instance(obj_path: &str) -> DeleteResult {
 
 async fn delete_dhcp_static_lease(obj_path: &str, instance: u32) -> DeleteResult {
     info!("Deleting DHCP static lease instance {}", instance);
-    
+
     let result = uci_backend::delete_dhcp_lease(instance);
-    
+
     DeleteResult {
         obj_path: obj_path.to_string(),
         success: result.success,
@@ -259,9 +262,9 @@ async fn delete_dhcp_static_lease(obj_path: &str, instance: u32) -> DeleteResult
 
 async fn delete_wifi_interface(obj_path: &str, instance: u32) -> DeleteResult {
     info!("Deleting WiFi interface instance {}", instance);
-    
+
     let result = uci_backend::delete_wifi_interface(instance);
-    
+
     DeleteResult {
         obj_path: obj_path.to_string(),
         success: result.success,
@@ -272,9 +275,9 @@ async fn delete_wifi_interface(obj_path: &str, instance: u32) -> DeleteResult {
 
 async fn delete_static_host(obj_path: &str, instance: u32) -> DeleteResult {
     info!("Deleting static host instance {}", instance);
-    
+
     let result = uci_backend::delete_static_host(instance);
-    
+
     DeleteResult {
         obj_path: obj_path.to_string(),
         success: result.success,

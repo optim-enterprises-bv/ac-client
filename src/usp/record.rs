@@ -3,13 +3,12 @@
 //! USP Records are the binary envelope framing USP Messages over any MTP.
 //! They are serialised with prost (protobuf 3).
 
-#![allow(dead_code, clippy::all)]
+#![allow(dead_code, clippy::all, unused_imports)]
 
 use prost::Message;
 
 use super::usp_record::{
-    record::RecordType, DisconnectRecord, MqttConnectRecord, NoSessionContextRecord, Record,
-    WebSocketConnectRecord,
+    record::RecordType, MqttConnectRecord, NoSessionContextRecord, Record, WebSocketConnectRecord,
 };
 use super::{Result, UspError};
 
