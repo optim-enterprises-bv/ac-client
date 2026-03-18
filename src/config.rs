@@ -13,7 +13,6 @@ use log::{debug, error, info, trace};
 // Default interval constants (seconds)
 const PORT: u16 = 3490;
 const STATUS_INTERVAL: u64 = 300;
-const CAM_INTERVAL: u64 = 360;
 const UPDATE_INTERVAL: u64 = 60;
 
 /// MTP selection for the USP Agent.
@@ -33,10 +32,10 @@ impl Default for MtpType {
 /// Full client configuration.
 #[derive(Debug, Clone)]
 pub struct ClientConfig {
-    // ── Legacy ACP / TLS fields (kept for TLS cert paths) ─────────────────────
-    /// ACP server hostname or IP address (kept for SNI / backward compat).
+    // ── Server connection settings ────────────────────────────────────────────
+    /// USP Controller server hostname or IP address.
     pub server_host: String,
-    /// ACP server port (default 3490).
+    /// USP Controller server port (default 3490).
     pub server_port: u16,
     /// Expected TLS CN of the server cert (used for SNI).
     pub server_cn: String,
@@ -65,10 +64,8 @@ pub struct ClientConfig {
     // ── Intervals ─────────────────────────────────────────────────────────────
     pub update_interval: u64,
     pub status_interval: u64,
-    pub cam_interval: u64,
     // ── Directories ───────────────────────────────────────────────────────────
     pub fw_dir: PathBuf,
-    pub img_dir: PathBuf,
     // ── Process ───────────────────────────────────────────────────────────────
     pub pid_file: PathBuf,
     pub daemonize: bool,
@@ -107,9 +104,7 @@ impl Default for ClientConfig {
             gnss_baud: 9600,
             update_interval: UPDATE_INTERVAL,
             status_interval: STATUS_INTERVAL,
-            cam_interval: CAM_INTERVAL,
             fw_dir: PathBuf::from("/tmp/firmware"),
-            img_dir: PathBuf::from("/tmp/cam"),
             pid_file: PathBuf::from("/var/run/apclient.pid"),
             daemonize: false,
             log_syslog: true,
@@ -223,17 +218,9 @@ pub fn load_config(path: &Path) -> Result<ClientConfig> {
                 cfg.status_interval = val.parse().unwrap_or(STATUS_INTERVAL);
                 debug!("Config: status_interval = {}", cfg.status_interval);
             }
-            "cam_interval" => {
-                cfg.cam_interval = val.parse().unwrap_or(CAM_INTERVAL);
-                debug!("Config: cam_interval = {}", cfg.cam_interval);
-            }
             "fw_dir" => {
                 cfg.fw_dir = PathBuf::from(&val);
                 debug!("Config: fw_dir = {}", cfg.fw_dir.display());
-            }
-            "img_dir" => {
-                cfg.img_dir = PathBuf::from(&val);
-                debug!("Config: img_dir = {}", cfg.img_dir.display());
             }
             "pid_file" => {
                 cfg.pid_file = PathBuf::from(&val);
@@ -395,14 +382,8 @@ pub fn load_config_uci() -> Result<ClientConfig> {
     if let Some(v) = uci_get_str("status_interval") {
         cfg.status_interval = v.parse().unwrap_or(STATUS_INTERVAL);
     }
-    if let Some(v) = uci_get_str("cam_interval") {
-        cfg.cam_interval = v.parse().unwrap_or(CAM_INTERVAL);
-    }
     if let Some(v) = uci_get_str("fw_dir") {
         cfg.fw_dir = PathBuf::from(v);
-    }
-    if let Some(v) = uci_get_str("img_dir") {
-        cfg.img_dir = PathBuf::from(v);
     }
     if let Some(v) = uci_get_str("pid_file") {
         cfg.pid_file = PathBuf::from(v);

@@ -6,7 +6,6 @@
 #![allow(dead_code)]
 
 pub mod bridge;
-pub mod cameras;
 pub mod device_info;
 pub mod dhcp;
 pub mod firmware;
@@ -136,9 +135,7 @@ pub async fn operate(
     command:     &str,
     input_args:  &HashMap<String, String>,
 ) -> Result<HashMap<String, String>, String> {
-    if command.starts_with("Device.X_OptimACS_Camera.") && command.ends_with(".Capture()") {
-        cameras::operate_capture(cfg, command, input_args).await
-    } else if command.starts_with("Device.X_OptimACS_Firmware.") && command.ends_with(".Download()") {
+    if command.starts_with("Device.X_OptimACS_Firmware.") && command.ends_with(".Download()") {
         firmware::operate_download(cfg, command, input_args).await
     } else if command.starts_with("Device.X_OptimACS_Security.") && command.ends_with(".IssueCert()") {
         security::operate_issue_cert(cfg, command, input_args).await
@@ -162,8 +159,6 @@ async fn dispatch_get(cfg: &ClientConfig, path: &str) -> Params {
         hosts::get(cfg, path).await
     } else if path.starts_with("Device.X_OptimACS_Network.Bridge.") || path.starts_with("Device.X_OptimACS_Network.Bridge") {
         bridge::get(cfg, path).await
-    } else if path.starts_with("Device.X_OptimACS_Camera.") {
-        cameras::get(cfg, path).await
     } else if path.starts_with("Device.X_OptimACS_Firmware.") {
         firmware::get(cfg, path)
     } else if path.starts_with("Device.IP.") || 

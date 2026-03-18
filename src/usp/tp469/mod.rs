@@ -10,10 +10,7 @@ pub mod add_delete;
 pub mod error_codes;
 pub mod get_instances;
 pub mod get_supported_dm;
-mod notifications;
-mod search;
-mod subscriptions;
-pub mod supported_dm_schema;
+pub mod search;
 pub mod uci_backend;
 
 #[cfg(test)]

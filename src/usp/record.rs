@@ -86,22 +86,6 @@ pub fn mqtt_connect_record(from_id: &str, to_id: &str, subscribed_topic: &str) -
     }
 }
 
-/// Build a `DisconnectRecord`.
-pub fn disconnect_record(from_id: &str, to_id: &str, reason: &str) -> Record {
-    Record {
-        version: "1.3".into(),
-        to_id: to_id.into(),
-        from_id: from_id.into(),
-        payload_security: 0,
-        mac_signature: vec![],
-        sender_cert: vec![],
-        record_type: Some(RecordType::Disconnect(DisconnectRecord {
-            reason: reason.into(),
-            reason_code: 0,
-        })),
-    }
-}
-
 /// Extract the serialised `Msg` payload bytes from a Record, regardless of
 /// whether it uses NoSessionContext or SessionContext framing.
 pub fn extract_msg_payload(record: &Record) -> Option<&[u8]> {

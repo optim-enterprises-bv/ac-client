@@ -32,26 +32,6 @@ message StatusRequest {
   int32  wireless_status = 17;
 }
 
-/// Single camera entry within an ACP_CAM_INFO message.
-message CameraInfo {
-  uint32 idx = 1;
-  string ip  = 2;
-  string mac = 3;
-}
-
-/// Body of an ACP_CAM_INFO message — list of cameras reported by the AP.
-message CamInfoRequest {
-  repeated CameraInfo cameras = 1;
-}
-
-/// Header body of an ACP_CAM_IMG message — metadata for the image to follow.
-message CamImgRequest {
-  string mac           = 1;
-  string checksum      = 2;
-  int64  size          = 3;
-  string sdcard_status = 4;
-}
-
 // ── Outgoing response bodies ──────────────────────────────────────────────────
 
 /// Sent as the body of an ACP_CERT response to a newly-provisioned device.
@@ -128,19 +108,6 @@ message DhcpHostEntry {
   string ip  = 2;
 }
 
-/// Camera configuration entry within a SystemConfig.
-message CameraConfig {
-  string          mac          = 1;
-  string          ip           = 2;
-  int32           idx          = 3;
-  optional string username     = 4;
-  optional string password     = 5;
-  optional string resolution   = 6;
-  int32           cam_interval = 7;
-  optional string image_url    = 8;
-  optional string stream_url   = 9;
-}
-
 /// Full AP configuration — body of an ACP_ACK response to GET_CONFIG.
 message SystemConfig {
   string                    hostname        = 1;
@@ -151,7 +118,6 @@ message SystemConfig {
   repeated WifiDeviceConfig wifi_devices    = 6;
   repeated HostEntry        hosts           = 7;
   repeated DhcpHostEntry    dhcp_hosts      = 8;
-  repeated CameraConfig     cameras         = 9;
 }
 
 /// Minimal identity-only config for the meshconnect schema.

@@ -1,6 +1,6 @@
 fn main() {
-    // Compile the shared ACP protobuf schema.
-    // Proto files are vendored in proto/ (previously shared with ac-server).
+    // Compile the USP message payload protobuf schema.
+    // Proto files define USP message payloads for device communication.
     prost_build::compile_protos(
         &["proto/acp.proto"],
         &["proto/"],

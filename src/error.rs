@@ -1,4 +1,4 @@
-//! Error types for the ACP client.
+//! Error types for the USP Agent (TR-369).
 
 use thiserror::Error;
 

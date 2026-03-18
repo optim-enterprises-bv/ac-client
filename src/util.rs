@@ -184,37 +184,6 @@ pub fn write_pid_file(path: &Path) -> io::Result<()> {
     Ok(())
 }
 
-// ── ARP table parsing ─────────────────────────────────────────────────────────
-
-/// An entry from `/proc/net/arp`.
-#[derive(Debug, Clone)]
-pub struct ArpEntry {
-    pub ip: String,
-    pub mac: String,
-}
-
-/// Parse `/proc/net/arp` and return all complete entries.
-pub fn read_arp_table() -> Vec<ArpEntry> {
-    let content = match fs::read_to_string("/proc/net/arp") {
-        Ok(c) => c,
-        Err(_) => return Vec::new(),
-    };
-    let mut entries = Vec::new();
-    for line in content.lines().skip(1) {
-        let fields: Vec<&str> = line.split_whitespace().collect();
-        // IP address | HW type | Flags | HW address | Mask | Device
-        if fields.len() >= 4 {
-            let ip = fields[0].to_string();
-            let mac = fields[3].to_string();
-            // Skip incomplete entries (00:00:00:00:00:00)
-            if mac != "00:00:00:00:00:00" {
-                entries.push(ArpEntry { ip, mac });
-            }
-        }
-    }
-    entries
-}
-
 /// Get the primary local IP address
 pub fn get_local_ip() -> String {
     // Try to get IP from network interface using ip command
