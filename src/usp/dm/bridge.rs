@@ -512,11 +512,11 @@ async fn get_interface_status(bridge_name: &str) -> String {
         .unwrap_or_default();
 
     if out.contains("state UP") || out.contains("UP") {
-        "up".to_string()
+        "Up".to_string()
     } else if out.contains("state DOWN") || out.contains("DOWN") {
-        "down".to_string()
+        "Down".to_string()
     } else {
-        "unknown".to_string()
+        "Down".to_string()
     }
 }
 

@@ -250,84 +250,45 @@ pub fn read_device_model() -> String {
     String::new()
 }
 
-/// Get OpenWrt architecture/target (like LuCI shows)
+/// Get the processor architecture as a TR-181 enumeration value.
+///
+/// TR-181 `Device.DeviceInfo.ProcessorArchitecture` is an enumeration:
+/// `"x86"`, `"x86_64"`, `"ARM_32"`, `"ARM_64"`, `"MIPS_32"`, `"MIPS_64"`,
+/// `"x86_32"`, `"PowerPC"`.
+///
+/// We derive the value from `uname -m` and map it to the correct enum string.
 pub fn read_device_arch() -> String {
-    // Read CPU architecture from /proc/cpuinfo (same as LuCI)
-    if let Ok(cpuinfo) = fs::read_to_string("/proc/cpuinfo") {
-        // Look for "model name" (ARM/x86) or "cpu model" (MIPS)
-        for line in cpuinfo.lines() {
-            if let Some(idx) = line.find("model name") {
-                if let Some(start) = line[idx..].find(':').map(|i| idx + i + 1) {
-                    let arch = line[start..].trim();
-                    if !arch.is_empty() {
-                        return arch.to_string();
-                    }
-                }
-            }
-            // MIPS uses "cpu model" instead
-            if let Some(idx) = line.find("cpu model") {
-                if let Some(start) = line[idx..].find(':').map(|i| idx + i + 1) {
-                    let arch = line[start..].trim();
-                    if !arch.is_empty() {
-                        return arch.to_string();
-                    }
-                }
-            }
-        }
-        // Fallback: look for "Processor" (older ARM format)
-        for line in cpuinfo.lines() {
-            if let Some(idx) = line.find("Processor") {
-                if let Some(start) = line[idx..].find(':').map(|i| idx + i + 1) {
-                    let arch = line[start..].trim();
-                    if !arch.is_empty() && arch != "ARMv7" && arch != "ARMv8" {
-                        return arch.to_string();
-                    }
-                }
-            }
-        }
-    }
-
-    // Try ubus call system board for target info
-    if let Ok(output) = std::process::Command::new("ubus")
-        .args(["call", "system", "board"])
+    // uname -m gives the OS-level machine type (e.g. "mips", "aarch64", "x86_64")
+    let machine = std::process::Command::new("uname")
+        .arg("-m")
         .output()
-    {
-        let text = String::from_utf8_lossy(&output.stdout);
-        for line in text.lines() {
-            // Look for "system" field which often contains CPU info
-            if let Some(idx) = line.find("\"system\":") {
-                if let Some(start) = line[idx..].find('"').map(|i| idx + i + 1) {
-                    if let Some(end) = line[start..].find('"') {
-                        let system = &line[start..start + end];
-                        if !system.is_empty() && system != "target" {
-                            return system.to_string();
-                        }
-                    }
-                }
-            }
-        }
-    }
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|s| s.trim().to_lowercase())
+        .unwrap_or_default();
 
-    // Final fallback: use uname -m
-    if let Ok(output) = std::process::Command::new("uname").arg("-m").output() {
-        return String::from_utf8_lossy(&output.stdout).trim().to_string();
+    match machine.as_str() {
+        "x86_64" | "amd64" => "x86_64",
+        "i386" | "i486" | "i586" | "i686" => "x86_32",
+        "aarch64" | "arm64" => "ARM_64",
+        "armv7l" | "armv7" | "armv6l" | "armv5tel" | "arm" => "ARM_32",
+        "mips64" | "mips64el" => "MIPS_64",
+        "mips" | "mipsel" | "mipseb" => "MIPS_32",
+        "powerpc" | "ppc" | "ppc64" => "PowerPC",
+        _ => "x86", // broadest safe fallback per TR-181
     }
-
-    String::new()
+    .to_string()
 }
 
-/// Get Manufacturer OUI from MAC address (first 3 bytes)
+/// Get Manufacturer OUI from MAC address (first 3 bytes).
+///
+/// TR-181 requires the format "XXXXXX" — 6 uppercase hexadecimal digits, no
+/// colons or separators.  Example: "AABBCC".
 pub fn read_manufacturer_oui(mac_addr: &str) -> String {
-    // Extract first 3 octets from MAC address
-    let clean_mac: String = mac_addr.chars().filter(|c| c.is_alphanumeric()).collect();
+    // Strip any separators (colons, hyphens) to get raw hex digits.
+    let clean_mac: String = mac_addr.chars().filter(|c| c.is_ascii_hexdigit()).collect();
     if clean_mac.len() >= 6 {
-        // Format as XX:XX:XX
-        format!(
-            "{}:{}:{}",
-            &clean_mac[0..2],
-            &clean_mac[2..4],
-            &clean_mac[4..6]
-        )
+        clean_mac[0..6].to_uppercase()
     } else {
         String::new()
     }
@@ -361,7 +322,25 @@ pub fn read_kernel_version() -> String {
     String::new()
 }
 
-/// Get device status - always returns "Up" if agent is running
+/// Get device operational status as a TR-181 enum value.
+///
+/// TR-181 `Device.DeviceInfo.DeviceStatus` values: `"Up"`, `"Initializing"`,
+/// `"Error"`, `"Disabled"`.
+///
+/// We report `"Initializing"` if the system has been up less than 60 seconds,
+/// otherwise `"Up"`.  There is no reliable cross-platform way to detect
+/// `"Error"` or `"Disabled"` without hardware-specific probes, so those
+/// states are left for higher-level logic to set if needed.
 pub fn read_device_status() -> String {
-    "Up".to_string()
+    let content = fs::read_to_string("/proc/uptime").unwrap_or_default();
+    let uptime_secs: f64 = content
+        .split_whitespace()
+        .next()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0.0);
+    if uptime_secs < 60.0 {
+        "Initializing".to_string()
+    } else {
+        "Up".to_string()
+    }
 }

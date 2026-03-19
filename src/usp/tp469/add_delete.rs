@@ -56,6 +56,12 @@ async fn create_object_instance(create_obj: &usp_msg::add::CreateObject) -> AddR
         add_static_host(create_obj).await
     } else if obj_path.contains("WiFi") || obj_path.contains("wifi") {
         add_wifi_interface(create_obj).await
+    } else if obj_path.contains("PortMapping") {
+        add_port_mapping(create_obj).await
+    } else if obj_path.contains("Firewall") && obj_path.contains("Rule") {
+        add_firewall_rule(create_obj).await
+    } else if obj_path.contains("Subscription") {
+        add_subscription(create_obj).await
     } else {
         AddResult {
             obj_path: obj_path.clone(),
@@ -237,6 +243,12 @@ async fn delete_object_instance(obj_path: &str) -> DeleteResult {
         delete_static_host(obj_path, instance).await
     } else if obj_path.contains("WiFi") || obj_path.contains("wifi") {
         delete_wifi_interface(obj_path, instance).await
+    } else if obj_path.contains("PortMapping") {
+        delete_port_mapping(obj_path, instance).await
+    } else if obj_path.contains("Firewall") && obj_path.contains("Rule") {
+        delete_firewall_rule(obj_path, instance).await
+    } else if obj_path.contains("Subscription") {
+        delete_subscription(obj_path, instance).await
     } else {
         DeleteResult {
             obj_path: obj_path.to_string(),
@@ -278,6 +290,131 @@ async fn delete_static_host(obj_path: &str, instance: u32) -> DeleteResult {
 
     let result = uci_backend::delete_static_host(instance);
 
+    DeleteResult {
+        obj_path: obj_path.to_string(),
+        success: result.success,
+        err_code: result.err_code,
+        err_msg: result.err_msg,
+    }
+}
+
+async fn add_port_mapping(create_obj: &usp_msg::add::CreateObject) -> AddResult {
+    let mut proto = "tcp".to_string();
+    let mut src_dport = String::new();
+    let mut dest_port = String::new();
+    let mut dest_ip = String::new();
+    let mut name = String::new();
+
+    for param in &create_obj.param_settings {
+        match param.param.as_str() {
+            "Protocol" => proto = param.value.clone(),
+            "ExternalPort" => src_dport = param.value.clone(),
+            "InternalPort" => dest_port = param.value.clone(),
+            "InternalClient" => dest_ip = param.value.clone(),
+            "Description" => name = param.value.clone(),
+            _ => {}
+        }
+    }
+
+    if src_dport.is_empty() || dest_ip.is_empty() {
+        return AddResult {
+            obj_path: create_obj.obj_path.clone(),
+            instance: 0,
+            success: false,
+            err_code: Some(ErrorCode::RequiredParameterMissing),
+            err_msg: Some("ExternalPort and InternalClient are required".into()),
+        };
+    }
+
+    if dest_port.is_empty() {
+        dest_port = src_dport.clone();
+    }
+
+    let result = uci_backend::add_port_mapping(&proto, &src_dport, &dest_port, &dest_ip, &name);
+    convert_uci_result(&create_obj.obj_path, result)
+}
+
+async fn add_firewall_rule(create_obj: &usp_msg::add::CreateObject) -> AddResult {
+    let mut name = String::new();
+    let mut target = "REJECT".to_string();
+    let mut proto = "tcp".to_string();
+    let mut src_port = String::new();
+    let mut dest_port = String::new();
+
+    for param in &create_obj.param_settings {
+        match param.param.as_str() {
+            "Description" => name = param.value.clone(),
+            "Target" => target = param.value.clone(),
+            "Protocol" => proto = param.value.clone(),
+            "SourcePort" => src_port = param.value.clone(),
+            "DestPort" => dest_port = param.value.clone(),
+            _ => {}
+        }
+    }
+
+    let result = uci_backend::add_firewall_rule(&name, &target, &proto, &src_port, &dest_port);
+    convert_uci_result(&create_obj.obj_path, result)
+}
+
+async fn add_subscription(create_obj: &usp_msg::add::CreateObject) -> AddResult {
+    let mut enable = true;
+    let mut notif_type = String::new();
+    let mut reference_list = String::new();
+
+    for param in &create_obj.param_settings {
+        match param.param.as_str() {
+            "Enable" => enable = param.value == "true" || param.value == "1",
+            "NotifType" => notif_type = param.value.clone(),
+            "ReferenceList" => reference_list = param.value.clone(),
+            _ => {}
+        }
+    }
+
+    let instance =
+        crate::usp::dm::local_agent::add_subscription(enable, &notif_type, &reference_list);
+
+    AddResult {
+        obj_path: create_obj.obj_path.clone(),
+        instance,
+        success: true,
+        err_code: None,
+        err_msg: None,
+    }
+}
+
+async fn delete_subscription(obj_path: &str, instance: u32) -> DeleteResult {
+    info!("Deleting subscription instance {}", instance);
+    let ok = crate::usp::dm::local_agent::delete_subscription(instance);
+    DeleteResult {
+        obj_path: obj_path.to_string(),
+        success: ok,
+        err_code: if ok {
+            None
+        } else {
+            Some(ErrorCode::ObjectNotFound)
+        },
+        err_msg: if ok {
+            None
+        } else {
+            Some(format!("Subscription instance {} not found", instance))
+        },
+    }
+}
+
+async fn delete_port_mapping(obj_path: &str, instance: u32) -> DeleteResult {
+    info!("Deleting port mapping instance {}", instance);
+    let result = uci_backend::delete_port_mapping(instance);
+    DeleteResult {
+        obj_path: obj_path.to_string(),
+        success: result.success,
+        err_code: result.err_code,
+        err_msg: result.err_msg,
+    }
+}
+
+async fn delete_firewall_rule(obj_path: &str, instance: u32) -> DeleteResult {
+    info!("Deleting firewall rule instance {}", instance);
+    let result = uci_backend::delete_firewall_rule(instance);
     DeleteResult {
         obj_path: obj_path.to_string(),
         success: result.success,

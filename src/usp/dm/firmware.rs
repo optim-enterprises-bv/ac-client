@@ -7,12 +7,30 @@ use std::collections::HashMap;
 
 pub fn get(_cfg: &ClientConfig, path: &str) -> HashMap<String, String> {
     let mut m = HashMap::new();
-    if path.ends_with("AvailableVersion") || path.ends_with("Device.X_OptimACS_Firmware.") {
+
+    // CurrentVersion: the running firmware version (same as Device.DeviceInfo.SoftwareVersion).
+    if path.ends_with("CurrentVersion") || path.ends_with("Device.X_OptimACS_Firmware.") {
         m.insert(
-            "Device.X_OptimACS_Firmware.AvailableVersion".into(),
+            "Device.X_OptimACS_Firmware.CurrentVersion".into(),
             util::read_fw_version(),
         );
     }
+
+    // AvailableVersion: the version of firmware available for upgrade.
+    // This is set by the controller via SET before triggering an upgrade;
+    // we read it from a well-known file written by the upgrade workflow,
+    // or return empty string when no upgrade is staged.
+    if path.ends_with("AvailableVersion") || path.ends_with("Device.X_OptimACS_Firmware.") {
+        let available = std::fs::read_to_string("/tmp/firmware_available_version")
+            .ok()
+            .map(|s| s.trim().to_string())
+            .unwrap_or_default();
+        m.insert(
+            "Device.X_OptimACS_Firmware.AvailableVersion".into(),
+            available,
+        );
+    }
+
     m
 }
 

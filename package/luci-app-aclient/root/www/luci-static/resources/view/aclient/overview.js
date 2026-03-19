@@ -3,7 +3,6 @@
 'require rpc';
 'require uci';
 'require ui';
-'require poll';
 
 // ── rpcd helpers ──────────────────────────────────────────────────────────────
 
@@ -114,18 +113,22 @@ return view.extend({
 
 		/* Read current UCI settings for the connection summary. */
 		var serverHost     = uci.get('optimacs', 'agent', 'server_host')     || '—';
-		var serverPort     = uci.get('optimacs', 'agent', 'server_port')     || '3490';
+		var serverPort     = uci.get('optimacs', 'agent', 'server_port')     || '3491';
 		var mtp            = uci.get('optimacs', 'agent', 'mtp')             || 'websocket';
 		var wsUrl          = uci.get('optimacs', 'agent', 'ws_url')          || '';
 		var mqttUrl        = uci.get('optimacs', 'agent', 'mqtt_url')        || '';
-		var controllerID   = uci.get('optimacs', 'agent', 'controller_id')   || 'oui:00005A:OptimACS-Controller-1';
+		var stompUrl       = uci.get('optimacs', 'agent', 'stomp_url')       || '';
+		var coapUrl        = uci.get('optimacs', 'agent', 'coap_url')        || '';
+		var controllerID   = uci.get('optimacs', 'agent', 'controller_id')   || 'OptimACS-Controller-1';
+		var secondaryCtrls = uci.get('optimacs', 'agent', 'secondary_controllers') || '';
 		var endpointID     = uci.get('optimacs', 'agent', 'usp_endpoint_id') || _('(auto from MAC)');
 		var statusInterval = uci.get('optimacs', 'agent', 'status_interval') || '300';
 		var updateInterval = uci.get('optimacs', 'agent', 'update_interval') || '60';
+		var bulkInterval   = uci.get('optimacs', 'agent', 'bulk_data_interval') || '0';
 
 		/* Derive display URL. */
 		var displayWsUrl = wsUrl ||
-			(serverHost !== '—' ? 'wss://' + serverHost + ':3491/usp' : '—');
+			(serverHost !== '—' ? 'wss://' + serverHost + ':' + serverPort + '/usp' : '—');
 
 		/* ── Status badge ── */
 		var statusBadge = E('span', {
@@ -149,7 +152,10 @@ return view.extend({
 		var mtpLabels = {
 			'websocket': 'WebSocket (WSS)',
 			'mqtt':      'MQTT',
-			'both':      'WebSocket + MQTT'
+			'stomp':     'STOMP',
+			'coap':      'CoAP',
+			'both':      'WebSocket + MQTT',
+			'all':       'All (WS + MQTT + STOMP + CoAP)'
 		};
 		var mtpDisplay = mtpLabels[mtp] || mtp.toUpperCase();
 
@@ -206,13 +212,25 @@ return view.extend({
 						(mtp === 'websocket' || mtp === 'both')
 							? row(_('WebSocket URL'),  displayWsUrl)
 							: '',
-						(mtp === 'mqtt' || mtp === 'both')
+						(mtp === 'mqtt' || mtp === 'both' || mtp === 'all')
 							? row(_('MQTT Broker'),    mqttUrl || '—')
 							: '',
+						(mtp === 'stomp' || mtp === 'all')
+							? row(_('STOMP Broker'),   stompUrl || '—')
+							: '',
+						(mtp === 'coap' || mtp === 'all')
+							? row(_('CoAP Endpoint'),  coapUrl || '—')
+							: '',
 						row(_('Controller Endpoint ID'), controllerID),
+						secondaryCtrls
+							? row(_('Secondary Controllers'), secondaryCtrls)
+							: '',
 						row(_('Agent Endpoint ID'),   endpointID),
 						row(_('Status Heartbeat'),    statusInterval + ' s'),
-						row(_('Config Poll'),         updateInterval + ' s')
+						row(_('Config Poll'),         updateInterval + ' s'),
+						bulkInterval !== '0'
+							? row(_('Bulk Data Interval'), bulkInterval + ' s')
+							: ''
 					])
 				])
 			]),

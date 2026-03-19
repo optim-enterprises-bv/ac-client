@@ -8,7 +8,8 @@
 use prost::Message;
 
 use super::usp_record::{
-    record::RecordType, MqttConnectRecord, NoSessionContextRecord, Record, WebSocketConnectRecord,
+    record::RecordType, MqttConnectRecord, NoSessionContextRecord, Record,
+    StompConnectRecord, WebSocketConnectRecord,
 };
 use super::{Result, UspError};
 
@@ -81,6 +82,22 @@ pub fn mqtt_connect_record(from_id: &str, to_id: &str, subscribed_topic: &str) -
         record_type: Some(RecordType::MqttConnect(MqttConnectRecord {
             version: 0, // V3_1_1
             subscribed_topic: subscribed_topic.into(),
+        })),
+    }
+}
+
+/// Build a `StompConnectRecord`.
+pub fn stomp_connect_record(from_id: &str, to_id: &str, subscribed_destination: &str) -> Record {
+    Record {
+        version: "1.3".into(),
+        to_id: to_id.into(),
+        from_id: from_id.into(),
+        payload_security: 0,
+        mac_signature: vec![],
+        sender_cert: vec![],
+        record_type: Some(RecordType::StompConnect(StompConnectRecord {
+            version: 0, // V1_2
+            subscribed_destination: subscribed_destination.into(),
         })),
     }
 }

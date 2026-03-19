@@ -6,13 +6,35 @@
 #![allow(dead_code)]
 
 pub mod bridge;
+pub mod bridging;
+pub mod bulk_data;
 pub mod device_info;
 pub mod dhcp;
+pub mod dhcpv6;
+pub mod diagnostics;
+pub mod dsl;
+pub mod dslite;
+pub mod ethernet;
+pub mod firewall_dm;
 pub mod firmware;
 pub mod hosts;
+pub mod ieee8021x;
+pub mod interface_stack;
 pub mod ip;
+pub mod ipv6rd;
+pub mod local_agent;
+pub mod management_server;
 pub mod misc;
+pub mod nat;
+pub mod optical;
+pub mod ppp;
+pub mod qos;
+pub mod router_adv;
 pub mod security;
+pub mod software;
+pub mod upnp;
+pub mod users;
+pub mod voip;
 pub mod wifi;
 
 use crate::config::ClientConfig;
@@ -149,22 +171,74 @@ pub async fn operate(
         && command.ends_with(".Restart()")
     {
         bridge::operate(cfg, command, input_args).await
+    } else if command == "Device.IP.Diagnostics.IPPing()" {
+        diagnostics::operate_ping(cfg, input_args).await
+    } else if command == "Device.IP.Diagnostics.TraceRoute()" {
+        diagnostics::operate_traceroute(cfg, input_args).await
+    } else if command == "Device.SoftwareModules.InstallDU()" {
+        software::operate_install(cfg, input_args).await
+    } else if command == "Device.SoftwareModules.UninstallDU()" {
+        software::operate_uninstall(cfg, input_args).await
     } else {
         Err(format!("unknown command: {command}"))
     }
 }
 
 async fn dispatch_get(cfg: &ClientConfig, path: &str) -> Params {
-    if path.starts_with("Device.DeviceInfo.") {
+    if path.starts_with("Device.LocalAgent.") {
+        local_agent::get(cfg, path)
+    } else if path.starts_with("Device.ManagementServer.") {
+        management_server::get(cfg, path)
+    } else if path.starts_with("Device.DeviceInfo.") {
         device_info::get(cfg, path)
+    } else if path.starts_with("Device.InterfaceStack") {
+        interface_stack::get(cfg, path).await
     } else if path.starts_with("Device.WiFi.") {
         wifi::get(cfg, path).await
+    } else if path.starts_with("Device.Ethernet.") {
+        ethernet::get(cfg, path).await
+    } else if path.starts_with("Device.Bridging.") {
+        bridging::get(cfg, path).await
+    } else if path.starts_with("Device.IP.Diagnostics.") {
+        diagnostics::get(cfg, path).await
     } else if path.starts_with("Device.IP.Interface.") {
         ip::get(cfg, path).await
     } else if path.starts_with("Device.DHCPv4.") {
         dhcp::get(cfg, path).await
+    } else if path.starts_with("Device.DHCPv6.") {
+        dhcpv6::get(cfg, path).await
     } else if path.starts_with("Device.Hosts.") {
         hosts::get(cfg, path).await
+    } else if path.starts_with("Device.NAT.") {
+        nat::get(cfg, path).await
+    } else if path.starts_with("Device.Firewall.") {
+        firewall_dm::get(cfg, path).await
+    } else if path.starts_with("Device.PPP.") {
+        ppp::get(cfg, path).await
+    } else if path.starts_with("Device.Users.") {
+        users::get(cfg, path).await
+    } else if path.starts_with("Device.SoftwareModules.") {
+        software::get(cfg, path).await
+    } else if path.starts_with("Device.RouterAdvertisement.") {
+        router_adv::get(cfg, path).await
+    } else if path.starts_with("Device.IPv6rd.") {
+        ipv6rd::get(cfg, path).await
+    } else if path.starts_with("Device.DSLite.") {
+        dslite::get(cfg, path).await
+    } else if path.starts_with("Device.QoS.") {
+        qos::get(cfg, path).await
+    } else if path.starts_with("Device.UPnP.") {
+        upnp::get(cfg, path).await
+    } else if path.starts_with("Device.BulkData.") {
+        bulk_data::get(cfg, path).await
+    } else if path.starts_with("Device.DSL.") {
+        dsl::get(cfg, path).await
+    } else if path.starts_with("Device.Optical.") {
+        optical::get(cfg, path).await
+    } else if path.starts_with("Device.IEEE8021x.") {
+        ieee8021x::get(cfg, path).await
+    } else if path.starts_with("Device.Services.") {
+        voip::get(cfg, path).await
     } else if path.starts_with("Device.X_OptimACS_Network.Bridge.")
         || path.starts_with("Device.X_OptimACS_Network.Bridge")
     {
@@ -174,9 +248,6 @@ async fn dispatch_get(cfg: &ClientConfig, path: &str) -> Params {
     } else if path.starts_with("Device.IP.")
         || path.starts_with("Device.DNS.")
         || path.starts_with("Device.Routing.")
-        || path.starts_with("Device.NAT.")
-        || path.starts_with("Device.Firewall.")
-        || path.starts_with("Device.QoS.")
         || path.starts_with("Device.WireGuard.")
         || path.starts_with("Device.X_TP_OpenVPN.")
         || path.starts_with("Device.Time.")
@@ -186,30 +257,55 @@ async fn dispatch_get(cfg: &ClientConfig, path: &str) -> Params {
     {
         misc::get(cfg, path).await
     } else {
-        // Silently return empty for unsupported paths to reduce log noise
-        // The controller will see empty values and can decide how to handle them
         debug!("DM GET: unimplemented path: {path}");
         Params::new()
     }
 }
 
 async fn dispatch_set(cfg: &ClientConfig, path: &str, value: &str) -> Result<(), String> {
-    if path.starts_with("Device.DeviceInfo.") {
+    if path.starts_with("Device.LocalAgent.") {
+        local_agent::set(cfg, path, value)
+    } else if path.starts_with("Device.DeviceInfo.") {
         device_info::set(cfg, path, value)
     } else if path.starts_with("Device.WiFi.") {
         wifi::set(cfg, path, value).await
+    } else if path.starts_with("Device.Ethernet.") {
+        ethernet::set(cfg, path, value).await
+    } else if path.starts_with("Device.Bridging.") {
+        bridging::set(cfg, path, value).await
+    } else if path.starts_with("Device.IP.Diagnostics.") {
+        diagnostics::set(cfg, path, value).await
     } else if path.starts_with("Device.IP.Interface.") {
         ip::set(cfg, path, value).await
     } else if path.starts_with("Device.DHCPv4.") {
         dhcp::set(cfg, path, value).await
+    } else if path.starts_with("Device.DHCPv6.") {
+        dhcpv6::set(cfg, path, value).await
     } else if path.starts_with("Device.Hosts.") {
         hosts::set(cfg, path, value).await
+    } else if path.starts_with("Device.NAT.") {
+        nat::set(cfg, path, value).await
+    } else if path.starts_with("Device.Firewall.") {
+        firewall_dm::set(cfg, path, value).await
+    } else if path.starts_with("Device.PPP.") {
+        ppp::set(cfg, path, value).await
+    } else if path.starts_with("Device.Users.") {
+        users::set(cfg, path, value).await
+    } else if path.starts_with("Device.SoftwareModules.") {
+        software::set(cfg, path, value).await
     } else if path.starts_with("Device.X_OptimACS_Network.Bridge.")
         || path.starts_with("Device.X_OptimACS_Network.Bridge")
     {
         bridge::set(cfg, path, value).await
+    } else if path.starts_with("Device.BulkData.") {
+        bulk_data::set(cfg, path, value).await
     } else if path.starts_with("Device.X_OptimACS_Security.") {
         security::set(cfg, path, value).await
+    } else if path.starts_with("Device.DNS.")
+        || path.starts_with("Device.Routing.")
+        || path.starts_with("Device.Time.")
+    {
+        misc::set(cfg, path, value).await
     } else {
         Err(format!("read-only or unknown path: {path}"))
     }

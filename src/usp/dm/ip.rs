@@ -136,16 +136,20 @@ pub async fn get(_cfg: &ClientConfig, path: &str) -> HashMap<String, String> {
                 }
             }
 
-            // Get interface name and stats
-            let bridge_name = format!("br-{section}");
-            let stats = get_interface_stats(&bridge_name).await;
-            let mac = get_interface_mac(&bridge_name).await;
-            let status = get_interface_status(&bridge_name).await;
+            // Resolve the OS-level interface name: try br-{section} first
+            // (LAN bridges), fall back to plain section name (WAN/PPP/etc).
+            let os_iface = resolve_os_iface(section);
+            let stats = get_interface_stats(&os_iface).await;
+            let status = get_interface_status(&os_iface).await;
 
-            // Insert name
+            // Insert name (vendor extension — standard TR-181 Name is the OS iface name)
             m.insert(
                 format!("Device.IP.Interface.{iface_idx}.X_OptimACS_Name"),
                 section.clone(),
+            );
+            m.insert(
+                format!("Device.IP.Interface.{iface_idx}.Name"),
+                os_iface.clone(),
             );
 
             if !ip.is_empty() {
@@ -155,7 +159,14 @@ pub async fn get(_cfg: &ClientConfig, path: &str) -> HashMap<String, String> {
                 m.insert(format!("{base}SubnetMask"), mask);
             }
             if !proto.is_empty() {
-                m.insert(format!("{base}AddressingType"), proto.clone());
+                // TR-181 AddressingType enum: "DHCP", "Static", "AutoIP", "IKEv2"
+                let addressing_type = match proto.as_str() {
+                    "dhcp" | "dhcpv6" => "DHCP",
+                    "static" => "Static",
+                    "pppoe" | "pptp" | "l2tp" => "DHCP", // dynamic, controller-assigned
+                    _ => "Static",
+                };
+                m.insert(format!("{base}AddressingType"), addressing_type.to_string());
             }
             if !gateway.is_empty() {
                 m.insert(
@@ -169,8 +180,16 @@ pub async fn get(_cfg: &ClientConfig, path: &str) -> HashMap<String, String> {
                     dns,
                 );
             }
+            let mac = get_interface_mac(&os_iface).await;
             if !mac.is_empty() {
-                m.insert(format!("Device.IP.Interface.{iface_idx}.MACAddress"), mac);
+                m.insert(
+                    format!("Device.IP.Interface.{iface_idx}.X_OptimACS_MACAddress"),
+                    mac.clone(),
+                );
+                m.insert(
+                    format!("Device.IP.Interface.{iface_idx}.MACAddress"),
+                    mac,
+                );
             }
             m.insert(format!("Device.IP.Interface.{iface_idx}.Status"), status);
 
@@ -205,37 +224,8 @@ pub async fn get(_cfg: &ClientConfig, path: &str) -> HashMap<String, String> {
                 );
             }
 
-            // Add stats if available
-            if let Some(rx_bytes) = stats.get("rx_bytes") {
-                m.insert(
-                    format!("Device.IP.Interface.{iface_idx}.X_OptimACS_RXBytes"),
-                    rx_bytes.clone(),
-                );
-            }
-            if let Some(rx_packets) = stats.get("rx_packets") {
-                m.insert(
-                    format!("Device.IP.Interface.{iface_idx}.X_OptimACS_RXPackets"),
-                    rx_packets.clone(),
-                );
-            }
-            if let Some(tx_bytes) = stats.get("tx_bytes") {
-                m.insert(
-                    format!("Device.IP.Interface.{iface_idx}.X_OptimACS_TXBytes"),
-                    tx_bytes.clone(),
-                );
-            }
-            if let Some(tx_packets) = stats.get("tx_packets") {
-                m.insert(
-                    format!("Device.IP.Interface.{iface_idx}.X_OptimACS_TXPackets"),
-                    tx_packets.clone(),
-                );
-            }
-            if let Some(uptime) = stats.get("uptime") {
-                m.insert(
-                    format!("Device.IP.Interface.{iface_idx}.X_OptimACS_Uptime"),
-                    uptime.clone(),
-                );
-            }
+            // Standard TR-181 Stats + vendor extensions (dual paths, same data)
+            insert_interface_stats(&stats, iface_idx, &mut m);
 
             // IPv6 — always from runtime state
             let rt6 = get_ubus_interface_status(section);
@@ -259,7 +249,6 @@ pub async fn get(_cfg: &ClientConfig, path: &str) -> HashMap<String, String> {
         if idx > 0 && idx <= interfaces.len() {
             let (section, _name) = &interfaces[idx - 1];
             let base = format!("Device.IP.Interface.{idx}.IPv4Address.1.");
-            let bridge_name = format!("br-{section}");
 
             let mut ip = uci_get(&format!("network.{section}.ipaddr"));
             let mut mask = uci_get(&format!("network.{section}.netmask"));
@@ -291,22 +280,31 @@ pub async fn get(_cfg: &ClientConfig, path: &str) -> HashMap<String, String> {
                     }
                 }
             }
-            let stats = get_interface_stats(&bridge_name).await;
-            let mac = get_interface_mac(&bridge_name).await;
-            let status = get_interface_status(&bridge_name).await;
+            let os_iface = resolve_os_iface(section);
+            let stats = get_interface_stats(&os_iface).await;
+            let mac = get_interface_mac(&os_iface).await;
+            let status = get_interface_status(&os_iface).await;
 
             // Insert name
             m.insert(
                 format!("Device.IP.Interface.{idx}.X_OptimACS_Name"),
                 section.clone(),
             );
+            m.insert(format!("Device.IP.Interface.{idx}.Name"), os_iface.clone());
+
+            let addressing_type = match proto.as_str() {
+                "dhcp" | "dhcpv6" => "DHCP",
+                "static" => "Static",
+                "pppoe" | "pptp" | "l2tp" => "DHCP",
+                _ => "Static",
+            };
 
             if path.ends_with(".IPAddress") {
                 m.insert(format!("{base}IPAddress"), ip);
             } else if path.ends_with(".SubnetMask") {
                 m.insert(format!("{base}SubnetMask"), mask);
             } else if path.ends_with(".AddressingType") {
-                m.insert(format!("{base}AddressingType"), proto);
+                m.insert(format!("{base}AddressingType"), addressing_type.to_string());
             } else {
                 // Return all parameters for this interface
                 if !ip.is_empty() {
@@ -316,7 +314,7 @@ pub async fn get(_cfg: &ClientConfig, path: &str) -> HashMap<String, String> {
                     m.insert(format!("{base}SubnetMask"), mask);
                 }
                 if !proto.is_empty() {
-                    m.insert(format!("{base}AddressingType"), proto.clone());
+                    m.insert(format!("{base}AddressingType"), addressing_type.to_string());
                 }
                 if !gateway.is_empty() {
                     m.insert(
@@ -328,7 +326,14 @@ pub async fn get(_cfg: &ClientConfig, path: &str) -> HashMap<String, String> {
                     m.insert(format!("Device.IP.Interface.{idx}.X_OptimACS_DNS"), dns);
                 }
                 if !mac.is_empty() {
-                    m.insert(format!("Device.IP.Interface.{idx}.MACAddress"), mac);
+                    m.insert(
+                        format!("Device.IP.Interface.{idx}.X_OptimACS_MACAddress"),
+                        mac.clone(),
+                    );
+                    m.insert(
+                        format!("Device.IP.Interface.{idx}.MACAddress"),
+                        mac,
+                    );
                 }
                 m.insert(format!("Device.IP.Interface.{idx}.Status"), status);
 
@@ -363,37 +368,8 @@ pub async fn get(_cfg: &ClientConfig, path: &str) -> HashMap<String, String> {
                     );
                 }
 
-                // Add stats if available
-                if let Some(rx_bytes) = stats.get("rx_bytes") {
-                    m.insert(
-                        format!("Device.IP.Interface.{idx}.X_OptimACS_RXBytes"),
-                        rx_bytes.clone(),
-                    );
-                }
-                if let Some(rx_packets) = stats.get("rx_packets") {
-                    m.insert(
-                        format!("Device.IP.Interface.{idx}.X_OptimACS_RXPackets"),
-                        rx_packets.clone(),
-                    );
-                }
-                if let Some(tx_bytes) = stats.get("tx_bytes") {
-                    m.insert(
-                        format!("Device.IP.Interface.{idx}.X_OptimACS_TXBytes"),
-                        tx_bytes.clone(),
-                    );
-                }
-                if let Some(tx_packets) = stats.get("tx_packets") {
-                    m.insert(
-                        format!("Device.IP.Interface.{idx}.X_OptimACS_TXPackets"),
-                        tx_packets.clone(),
-                    );
-                }
-                if let Some(uptime) = stats.get("uptime") {
-                    m.insert(
-                        format!("Device.IP.Interface.{idx}.X_OptimACS_Uptime"),
-                        uptime.clone(),
-                    );
-                }
+                // Standard TR-181 Stats + vendor extensions (dual paths, same data)
+                insert_interface_stats(&stats, idx, &mut m);
 
                 // IPv6 — always from runtime state
                 let rt6 = get_ubus_interface_status(section);
@@ -646,6 +622,13 @@ async fn get_interface_stats(iface: &str) -> HashMap<String, String> {
                     if let Ok(tx_packets) = parts[10].parse::<u64>() {
                         stats.insert("tx_packets".to_string(), format_number(tx_packets));
                     }
+                    // /proc/net/dev columns: rx_bytes rx_packets rx_errs rx_drop ... tx_bytes tx_packets tx_errs tx_drop
+                    if let Ok(rx_errors) = parts[3].parse::<u64>() {
+                        stats.insert("rx_errors".to_string(), format_number(rx_errors));
+                    }
+                    if let Ok(tx_errors) = parts[11].parse::<u64>() {
+                        stats.insert("tx_errors".to_string(), format_number(tx_errors));
+                    }
                 }
                 break;
             }
@@ -695,6 +678,65 @@ async fn get_interface_status(iface: &str) -> String {
         .to_string()
     } else {
         "Down".to_string()
+    }
+}
+
+/// Resolve the real OS-level network interface name for a UCI section.
+/// For LAN sections the kernel bridge is typically `br-{section}`.
+/// For WAN/PPP sections the actual interface is the section name itself or
+/// the ifname configured in UCI (e.g. `eth1`, `pppoe-wan`).
+fn resolve_os_iface(section: &str) -> String {
+    // Check if br-{section} exists first (LAN bridge)
+    let bridge = format!("br-{section}");
+    if std::path::Path::new(&format!("/sys/class/net/{bridge}")).exists() {
+        return bridge;
+    }
+    // Try section name directly (WAN, loopback, etc.)
+    if std::path::Path::new(&format!("/sys/class/net/{section}")).exists() {
+        return section.to_string();
+    }
+    // Try pppoe-{section} (PPPoE WAN)
+    let pppoe = format!("pppoe-{section}");
+    if std::path::Path::new(&format!("/sys/class/net/{pppoe}")).exists() {
+        return pppoe;
+    }
+    // Fall back to section name even if it doesn't exist yet
+    section.to_string()
+}
+
+/// Insert both standard TR-181 Stats and vendor extension stats for an interface.
+fn insert_interface_stats(
+    stats: &HashMap<String, String>,
+    iface_idx: usize,
+    m: &mut HashMap<String, String>,
+) {
+    let sb = format!("Device.IP.Interface.{iface_idx}.Stats.");
+    let vb = format!("Device.IP.Interface.{iface_idx}.");
+
+    if let Some(v) = stats.get("rx_bytes") {
+        m.insert(format!("{sb}BytesReceived"), v.clone());
+        m.insert(format!("{vb}X_OptimACS_RXBytes"), v.clone());
+    }
+    if let Some(v) = stats.get("tx_bytes") {
+        m.insert(format!("{sb}BytesSent"), v.clone());
+        m.insert(format!("{vb}X_OptimACS_TXBytes"), v.clone());
+    }
+    if let Some(v) = stats.get("rx_packets") {
+        m.insert(format!("{sb}PacketsReceived"), v.clone());
+        m.insert(format!("{vb}X_OptimACS_RXPackets"), v.clone());
+    }
+    if let Some(v) = stats.get("tx_packets") {
+        m.insert(format!("{sb}PacketsSent"), v.clone());
+        m.insert(format!("{vb}X_OptimACS_TXPackets"), v.clone());
+    }
+    if let Some(v) = stats.get("rx_errors") {
+        m.insert(format!("{sb}ErrorsReceived"), v.clone());
+    }
+    if let Some(v) = stats.get("tx_errors") {
+        m.insert(format!("{sb}ErrorsSent"), v.clone());
+    }
+    if let Some(v) = stats.get("uptime") {
+        m.insert(format!("{vb}X_OptimACS_Uptime"), v.clone());
     }
 }
 

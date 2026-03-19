@@ -11,7 +11,7 @@ use crate::error::{AcError, Result};
 use log::{debug, error, info, trace};
 
 // Default interval constants (seconds)
-const PORT: u16 = 3490;
+const PORT: u16 = 3491;
 const STATUS_INTERVAL: u64 = 300;
 const UPDATE_INTERVAL: u64 = 60;
 
@@ -20,7 +20,10 @@ const UPDATE_INTERVAL: u64 = 60;
 pub enum MtpType {
     WebSocket,
     Mqtt,
+    Stomp,
+    CoAP,
     Both,
+    All,
 }
 
 impl Default for MtpType {
@@ -35,7 +38,7 @@ pub struct ClientConfig {
     // ── Server connection settings ────────────────────────────────────────────
     /// USP Controller server hostname or IP address.
     pub server_host: String,
-    /// USP Controller server port (default 3490).
+    /// USP Controller server port (default 3491).
     pub server_port: u16,
     /// Expected TLS CN of the server cert (used for SNI).
     pub server_cn: String,
@@ -81,6 +84,22 @@ pub struct ClientConfig {
     pub ws_url: Option<String>,
     /// MQTT broker URL (e.g. `mqtt://emqx:1883`).
     pub mqtt_url: Option<String>,
+    /// MQTT client identifier sent to the broker.  When empty the agent
+    /// auto-derives one from the USP endpoint ID.
+    pub mqtt_client_id: Option<String>,
+    /// STOMP broker URL (e.g. `stomp://broker:61613`).
+    pub stomp_url: Option<String>,
+    /// STOMP destination prefix for agent topics.
+    pub stomp_destination: Option<String>,
+    /// CoAP server URL (e.g. `coap://controller:5683/usp`).
+    pub coap_url: Option<String>,
+    /// Additional controller endpoint IDs (multi-controller support).
+    /// The primary controller is `controller_id`; these are secondary.
+    pub secondary_controllers: Vec<String>,
+    /// Bulk data collection interval (seconds, 0 = disabled).
+    pub bulk_data_interval: u64,
+    /// Bulk data HTTP upload URL (if configured).
+    pub bulk_data_url: Option<String>,
     /// Which MTP(s) to use.
     pub mtp: MtpType,
 }
@@ -91,7 +110,7 @@ impl Default for ClientConfig {
             server_host: String::new(),
             server_port: PORT,
             server_cn: "ac-server".to_string(),
-            ca_file: PathBuf::from("/etc/apclient/ca.crt"),
+            ca_file: PathBuf::from("/etc/apclient/init/ca.crt"),
             cert_file: PathBuf::from("/etc/apclient/client.crt"),
             key_file: PathBuf::from("/etc/apclient/client.key"),
             init_cert: PathBuf::from("/etc/apclient/init/client.crt"),
@@ -113,6 +132,13 @@ impl Default for ClientConfig {
             claim_token: String::new(),
             ws_url: None,
             mqtt_url: None,
+            mqtt_client_id: None,
+            stomp_url: None,
+            stomp_destination: None,
+            coap_url: None,
+            secondary_controllers: Vec::new(),
+            bulk_data_interval: 0,
+            bulk_data_url: None,
             mtp: MtpType::WebSocket,
         }
     }
@@ -255,15 +281,55 @@ pub fn load_config(path: &Path) -> Result<ClientConfig> {
                 cfg.mqtt_url = Some(val.clone());
                 debug!("Config: mqtt_url = {}", val);
             }
+            "mqtt_client_id" => {
+                cfg.mqtt_client_id = Some(val.clone());
+                debug!("Config: mqtt_client_id = {}", val);
+            }
+            "stomp_url" => {
+                cfg.stomp_url = Some(val.clone());
+                debug!("Config: stomp_url = {}", val);
+            }
+            "stomp_destination" => {
+                cfg.stomp_destination = Some(val.clone());
+                debug!("Config: stomp_destination = {}", val);
+            }
+            "coap_url" => {
+                cfg.coap_url = Some(val.clone());
+                debug!("Config: coap_url = {}", val);
+            }
+            "secondary_controllers" => {
+                cfg.secondary_controllers = val.split(',').map(|s| s.trim().to_string()).collect();
+                debug!("Config: secondary_controllers = {:?}", cfg.secondary_controllers);
+            }
+            "bulk_data_interval" => {
+                cfg.bulk_data_interval = val.parse().unwrap_or(0);
+                debug!("Config: bulk_data_interval = {}", cfg.bulk_data_interval);
+            }
+            "bulk_data_url" => {
+                cfg.bulk_data_url = Some(val.clone());
+                debug!("Config: bulk_data_url = {}", val);
+            }
             "mtp" => {
                 cfg.mtp = match val.to_ascii_lowercase().as_str() {
                     "mqtt" => {
                         debug!("Config: mtp = mqtt");
                         MtpType::Mqtt
                     }
+                    "stomp" => {
+                        debug!("Config: mtp = stomp");
+                        MtpType::Stomp
+                    }
+                    "coap" => {
+                        debug!("Config: mtp = coap");
+                        MtpType::CoAP
+                    }
                     "both" => {
                         debug!("Config: mtp = both");
                         MtpType::Both
+                    }
+                    "all" => {
+                        debug!("Config: mtp = all");
+                        MtpType::All
                     }
                     _ => {
                         debug!("Config: mtp = websocket (default)");
@@ -406,10 +472,34 @@ pub fn load_config_uci() -> Result<ClientConfig> {
     if let Some(v) = uci_get_str("mqtt_url") {
         cfg.mqtt_url = Some(v);
     }
+    if let Some(v) = uci_get_str("mqtt_client_id") {
+        cfg.mqtt_client_id = Some(v);
+    }
+    if let Some(v) = uci_get_str("stomp_url") {
+        cfg.stomp_url = Some(v);
+    }
+    if let Some(v) = uci_get_str("stomp_destination") {
+        cfg.stomp_destination = Some(v);
+    }
+    if let Some(v) = uci_get_str("coap_url") {
+        cfg.coap_url = Some(v);
+    }
+    if let Some(v) = uci_get_str("secondary_controllers") {
+        cfg.secondary_controllers = v.split(',').map(|s| s.trim().to_string()).collect();
+    }
+    if let Some(v) = uci_get_str("bulk_data_interval") {
+        cfg.bulk_data_interval = v.parse().unwrap_or(0);
+    }
+    if let Some(v) = uci_get_str("bulk_data_url") {
+        cfg.bulk_data_url = Some(v);
+    }
     if let Some(v) = uci_get_str("mtp") {
         cfg.mtp = match v.to_ascii_lowercase().as_str() {
             "mqtt" => MtpType::Mqtt,
+            "stomp" => MtpType::Stomp,
+            "coap" => MtpType::CoAP,
             "both" => MtpType::Both,
+            "all" => MtpType::All,
             _ => MtpType::WebSocket,
         };
     }
@@ -443,6 +533,27 @@ pub fn validate_config(cfg: &ClientConfig) -> Result<()> {
         MtpType::Mqtt => {
             if cfg.mqtt_url.is_none() {
                 return Err(AcError::Config("mqtt_url is required for MQTT MTP".into()));
+            }
+        }
+        MtpType::Stomp => {
+            if cfg.stomp_url.is_none() {
+                return Err(AcError::Config("stomp_url is required for STOMP MTP".into()));
+            }
+        }
+        MtpType::CoAP => {
+            if cfg.coap_url.is_none() {
+                return Err(AcError::Config("coap_url is required for CoAP MTP".into()));
+            }
+        }
+        MtpType::All => {
+            // At least one MTP URL must be configured
+            if cfg.ws_url.is_none() && cfg.mqtt_url.is_none()
+                && cfg.stomp_url.is_none() && cfg.coap_url.is_none()
+                && cfg.server_host.is_empty()
+            {
+                return Err(AcError::Config(
+                    "At least one MTP URL must be configured for 'all' mode".into(),
+                ));
             }
         }
     }

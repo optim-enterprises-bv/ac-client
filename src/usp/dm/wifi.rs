@@ -208,7 +208,7 @@ pub async fn get(_cfg: &ClientConfig, path: &str) -> HashMap<String, String> {
             let ap_idx = idx + 1;
             let enc = uci_get(&format!("wireless.{iface}.encryption"));
             let key = uci_get(&format!("wireless.{iface}.key"));
-            let mode = uci_get(&format!("wireless.{iface}.mode"));
+            let _mode = uci_get(&format!("wireless.{iface}.mode"));
             let disabled = uci_get(&format!("wireless.{iface}.disabled"));
             let enabled = disabled != "1";
 
@@ -233,14 +233,15 @@ pub async fn get(_cfg: &ClientConfig, path: &str) -> HashMap<String, String> {
                     key,
                 );
             }
-            if !mode.is_empty() {
-                m.insert(format!("Device.WiFi.AccessPoint.{ap_idx}.Mode"), mode);
-            }
-
-            // AccessPoint Status
+            // AccessPoint.Enable (required boolean)
+            m.insert(
+                format!("Device.WiFi.AccessPoint.{ap_idx}.Enable"),
+                enabled.to_string(),
+            );
+            // AccessPoint.Status: TR-181 IfOperStatus enum — "Up"/"Down"/etc.
             m.insert(
                 format!("Device.WiFi.AccessPoint.{ap_idx}.Status"),
-                if enabled { "Enabled" } else { "Disabled" }.to_string(),
+                if enabled { "Up" } else { "Down" }.to_string(),
             );
 
             // BSSID for this AccessPoint (from the corresponding wireless interface)
@@ -273,9 +274,7 @@ pub async fn get(_cfg: &ClientConfig, path: &str) -> HashMap<String, String> {
             if ap_bssid.is_empty() && !ap_device.is_empty() {
                 ap_bssid = uci_get(&format!("wireless.{ap_device}.macaddr"));
             }
-            if !ap_bssid.is_empty() {
-                m.insert(format!("Device.WiFi.AccessPoint.{ap_idx}.BSSID"), ap_bssid);
-            }
+            // Note: BSSID lives on Device.WiFi.SSID.{i}.BSSID, not AccessPoint.
 
             // SSIDAdvertisementEnabled (inverse of UCI hidden flag)
             let hidden = uci_get(&format!("wireless.{iface}.hidden"));
@@ -295,8 +294,9 @@ pub async fn get(_cfg: &ClientConfig, path: &str) -> HashMap<String, String> {
                 "none" | "" => "None",
                 other => other,
             };
+            // ModesSupported is the standard TR-181 read-only param for the current mode.
             m.insert(
-                format!("Device.WiFi.AccessPoint.{ap_idx}.Security.WPAEncryptionModes"),
+                format!("Device.WiFi.AccessPoint.{ap_idx}.Security.ModesSupported"),
                 wpa_modes.to_string(),
             );
 
@@ -376,16 +376,19 @@ pub async fn get(_cfg: &ClientConfig, path: &str) -> HashMap<String, String> {
                 );
             }
             if !htmode.is_empty() {
+                // TR-181 OperatingChannelBandwidth is an enumeration:
+                // "20MHz", "40MHz", "80MHz", "160MHz", "320MHz", "Auto"
+                let bw_tr181 = htmode_to_bandwidth_enum(&htmode);
                 m.insert(
                     format!("Device.WiFi.Radio.{radio_idx}.OperatingChannelBandwidth"),
-                    htmode.clone(),
+                    bw_tr181,
                 );
-                // Derive MaxBitRate from htmode and band
-                let max_bitrate = estimate_max_bitrate(&htmode, &band);
-                if !max_bitrate.is_empty() {
+                // MaxBitRate: TR-181 type is unsignedInt (Mbps) — no unit string.
+                let max_bitrate = estimate_max_bitrate_mbps(&htmode, &band);
+                if max_bitrate > 0 {
                     m.insert(
                         format!("Device.WiFi.Radio.{radio_idx}.MaxBitRate"),
-                        max_bitrate,
+                        max_bitrate.to_string(),
                     );
                 }
             }
@@ -433,9 +436,10 @@ pub async fn get(_cfg: &ClientConfig, path: &str) -> HashMap<String, String> {
                 gi_value.to_string(),
             );
 
-            // IEEE 802.11h (DFS/TPC) — enabled by default on 5GHz
-            let band_val = uci_get(&format!("wireless.{device}.band"));
-            let ieee80211h = band_val == "5g" || band_val == "6g";
+            // IEEE80211hEnabled: read actual UCI ieee80211h option.
+            // Do NOT infer from band — it is a configurable boolean.
+            let h_val = uci_get(&format!("wireless.{device}.ieee80211h"));
+            let ieee80211h = h_val == "1" || h_val == "true";
             m.insert(
                 format!("Device.WiFi.Radio.{radio_idx}.IEEE80211hEnabled"),
                 ieee80211h.to_string(),
@@ -454,10 +458,17 @@ pub async fn get(_cfg: &ClientConfig, path: &str) -> HashMap<String, String> {
                 );
             }
 
-            // Radio Name — hardware description from /sys/class/ieee80211/phy*/device
-            let radio_name = get_radio_hardware_name(device);
-            if !radio_name.is_empty() {
-                m.insert(format!("Device.WiFi.Radio.{radio_idx}.Name"), radio_name);
+            // Radio.Name: TR-181 requires the OS-level interface name (e.g. "phy0").
+            // The hardware chip description is surfaced as a vendor extension.
+            let phy_name = device.replace("radio", "phy");
+            m.insert(format!("Device.WiFi.Radio.{radio_idx}.Name"), phy_name);
+            // Keep chip description as a vendor extension for informational use.
+            let hw_name = get_radio_hardware_name(device);
+            if !hw_name.is_empty() {
+                m.insert(
+                    format!("Device.WiFi.Radio.{radio_idx}.X_OptimACS_HardwareName"),
+                    hw_name,
+                );
             }
 
             // Radio Status: Up if enabled and phy interface exists, Down otherwise
@@ -514,11 +525,7 @@ pub async fn get(_cfg: &ClientConfig, path: &str) -> HashMap<String, String> {
                         bitrate,
                     );
                 }
-                let assoc_count = get_associated_device_count(&phy_iface);
-                m.insert(
-                    format!("Device.WiFi.Radio.{radio_idx}.AssociatedDeviceNumberOfEntries"),
-                    assoc_count.to_string(),
-                );
+                // AssociatedDeviceNumberOfEntries belongs on AccessPoint.{i}, not Radio.
             }
         }
     }
@@ -761,34 +768,46 @@ fn get_phy_interface(device: &str) -> String {
     iface_name
 }
 
-/// Estimate max PHY bitrate from htmode and band
-fn estimate_max_bitrate(htmode: &str, band: &str) -> String {
-    // Approximate maximum PHY rates for common configurations
-    let rate = match htmode {
-        // 802.11be (EHT)
-        "EHT320" => "46080 Mbps",
-        "EHT160" => "23040 Mbps",
-        "EHT80" if band == "6g" => "11520 Mbps",
-        "EHT80" => "11520 Mbps",
-        "EHT40" => "5760 Mbps",
-        "EHT20" => "2880 Mbps",
-        // 802.11ax (HE)
-        "HE160" => "9608 Mbps",
-        "HE80" => "4804 Mbps",
-        "HE40" => "2402 Mbps",
-        "HE20" => "1201 Mbps",
-        // 802.11ac (VHT)
-        "VHT160" => "6933 Mbps",
-        "VHT80" => "3467 Mbps",
-        "VHT40" => "1733 Mbps",
-        "VHT20" => "867 Mbps",
-        // 802.11n (HT)
-        "HT40" => "300 Mbps",
-        "HT20" => "144 Mbps",
-        // Legacy
-        _ => "",
-    };
-    rate.to_string()
+/// Map UCI htmode to TR-181 OperatingChannelBandwidth enumeration value.
+/// TR-181 values: "20MHz", "40MHz", "80MHz", "160MHz", "320MHz", "Auto"
+fn htmode_to_bandwidth_enum(htmode: &str) -> String {
+    match htmode {
+        "EHT320" => "320MHz",
+        "EHT160" | "HE160" | "VHT160" => "160MHz",
+        "EHT80" | "HE80" | "VHT80" => "80MHz",
+        "EHT40" | "HE40" | "VHT40" | "HT40" => "40MHz",
+        "EHT20" | "HE20" | "VHT20" | "HT20" => "20MHz",
+        "" => "Auto",
+        _ => "Auto",
+    }
+    .to_string()
+}
+
+/// Estimate max PHY bitrate in Mbps (TR-181 MaxBitRate is unsignedInt, no unit string).
+fn estimate_max_bitrate_mbps(htmode: &str, band: &str) -> u64 {
+    match htmode {
+        // 802.11be (EHT) — 4 spatial streams
+        "EHT320" => 46080,
+        "EHT160" => 23040,
+        "EHT80" if band == "6g" => 11520,
+        "EHT80" => 11520,
+        "EHT40" => 5760,
+        "EHT20" => 2880,
+        // 802.11ax (HE) — 4SS
+        "HE160" => 9608,
+        "HE80" => 4804,
+        "HE40" => 2402,
+        "HE20" => 1201,
+        // 802.11ac (VHT) — 4SS
+        "VHT160" => 6933,
+        "VHT80" => 3467,
+        "VHT40" => 1733,
+        "VHT20" => 867,
+        // 802.11n (HT) — 2SS
+        "HT40" => 300,
+        "HT20" => 144,
+        _ => 0,
+    }
 }
 
 /// Read MAC address from /sys/class/net/<iface>/address
@@ -1028,9 +1047,9 @@ pub async fn set(_cfg: &ClientConfig, path: &str, value: &str) -> Result<(), Str
             }
         }
     }
-    // Handle SSID Advertisement (hidden SSID)
+    // Handle SSID Advertisement (hidden SSID) — lives on AccessPoint.{i}
     else if path.ends_with(".SSIDAdvertisementEnabled") {
-        if let Some(idx) = parse_ssid_index(path) {
+        if let Some(idx) = parse_ap_index(path) {
             if idx > 0 && idx <= ifaces.len() {
                 let iface = &ifaces[idx - 1];
                 // SSIDAdvertisementEnabled: true = visible (hidden=0), false = hidden (hidden=1)

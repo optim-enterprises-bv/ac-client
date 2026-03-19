@@ -66,7 +66,7 @@ pub async fn run(cfg: Arc<ClientConfig>, gnss: Arc<std::sync::Mutex<Option<GnssP
         });
     }
 
-    // Connect MTP
+    // Connect MTP(s)
     info!("Starting MTP connection...");
     match cfg.mtp {
         MtpType::WebSocket => {
@@ -77,16 +77,56 @@ pub async fn run(cfg: Arc<ClientConfig>, gnss: Arc<std::sync::Mutex<Option<GnssP
             debug!("Starting MQTT MTP");
             mtp::mqtt::run(cfg, agent_id, status_rx).await
         }
+        MtpType::Stomp => {
+            debug!("Starting STOMP MTP");
+            mtp::stomp::run(cfg, agent_id, status_rx).await
+        }
+        MtpType::CoAP => {
+            debug!("Starting CoAP MTP");
+            mtp::coap::run(cfg, agent_id, status_rx).await
+        }
         MtpType::Both => {
-            debug!("Starting both WebSocket and MQTT MTP");
+            debug!("Starting WebSocket + MQTT MTP");
             let cfg2 = Arc::clone(&cfg);
             let agent2 = agent_id.clone();
             let status_rx2 = Arc::clone(&status_rx);
             tokio::spawn(async move {
-                debug!("Starting MQTT MTP in background task");
                 mtp::mqtt::run(cfg2, agent2, status_rx2).await;
             });
             mtp::websocket::run(cfg, agent_id, status_rx).await;
+        }
+        MtpType::All => {
+            debug!("Starting all MTPs");
+            // MQTT in background
+            if cfg.mqtt_url.is_some() {
+                let c = Arc::clone(&cfg);
+                let a = agent_id.clone();
+                let r = Arc::clone(&status_rx);
+                tokio::spawn(async move { mtp::mqtt::run(c, a, r).await });
+            }
+            // STOMP in background
+            if cfg.stomp_url.is_some() {
+                let c = Arc::clone(&cfg);
+                let a = agent_id.clone();
+                let r = Arc::clone(&status_rx);
+                tokio::spawn(async move { mtp::stomp::run(c, a, r).await });
+            }
+            // CoAP in background
+            if cfg.coap_url.is_some() {
+                let c = Arc::clone(&cfg);
+                let a = agent_id.clone();
+                let r = Arc::clone(&status_rx);
+                tokio::spawn(async move { mtp::coap::run(c, a, r).await });
+            }
+            // WebSocket as foreground (or MQTT if no WS)
+            if cfg.ws_url.is_some() {
+                mtp::websocket::run(cfg, agent_id, status_rx).await;
+            } else if cfg.mqtt_url.is_some() {
+                // Already spawned, just wait
+                loop {
+                    tokio::time::sleep(Duration::from_secs(3600)).await;
+                }
+            }
         }
     }
 }
@@ -320,10 +360,13 @@ fn collect_boot_params(cfg: &ClientConfig) -> HashMap<String, String> {
         util::read_free_mem(),
     );
 
-    // IP Address
+    // IP Address — correct TR-181 path includes the IPv4Address sub-object.
     let local_ip = util::get_local_ip();
     if !local_ip.is_empty() {
-        m.insert("Device.IP.Interface.1.IPAddress".into(), local_ip);
+        m.insert(
+            "Device.IP.Interface.1.IPv4Address.1.IPAddress".into(),
+            local_ip,
+        );
     }
 
     // TR-181 §9.3.6 required Boot! event parameters

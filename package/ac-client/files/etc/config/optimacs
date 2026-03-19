@@ -29,7 +29,7 @@ config optimacs 'agent'
 	# For local testing, use your ac-server IP: option server_host '192.168.10.5'
 	option server_host   'usp.optimcloud.com'
 
-	# TCP port for the legacy ACP/TLS connection (default: 3490).
+	# TCP port for the USP WebSocket / MQTT connection (default: 3491).
 	# Also used as the fallback WS port when ws_url is not set.
 	option server_port   '3491'
 
@@ -50,10 +50,21 @@ config optimacs 'agent'
 	# Required only when mtp = mqtt or mtp = both.
 	option mqtt_url      'mqtt://emqx.optimcloud.com:1883'
 
+	# STOMP MTP: URL of the STOMP broker (e.g. ActiveMQ, RabbitMQ).
+	# Required only when mtp = stomp or mtp = all.
+	# option stomp_url   'stomp://broker.example.com:61613'
+
+	# STOMP destination prefix. Agent subscribes to <prefix>/<endpoint_id>.
+	# option stomp_destination '/topic/usp'
+
+	# CoAP MTP: URL of the CoAP endpoint on the controller.
+	# Required only when mtp = coap or mtp = all.
+	# option coap_url    'coap://controller.example.com:5683/usp'
+
 	# ── USP endpoint identifiers ───────────────────────────────────────────
 	# Agent endpoint ID sent in every USP Record.
 	# Leave empty to auto-generate from the device MAC address as:
-	#   os::<OUI>::<MAC-without-colons>
+	#   oui:00005A:<MAC>  (e.g. oui:00005A:aa:bb:cc:dd:ee:ff)
 	# option usp_endpoint_id ''
 
 	# Controller endpoint ID that this agent will accept messages from.
@@ -63,6 +74,17 @@ config optimacs 'agent'
 	# Account claim token from the OptimACS dashboard.
 	# Links this device to your tenant account on first Boot! connect.
 	# option claim_token ''
+
+	# ── Multi-controller support ───────────────────────────────────────
+	# Comma-separated list of additional controller endpoint IDs.
+	# The primary controller is 'controller_id' above; these are secondary.
+	# option secondary_controllers 'Controller-2,Controller-3'
+
+	# ── Bulk Data Collection (TR-232) ──────────────────────────────────
+	# Interval in seconds for bulk data collection (0 = disabled).
+	# option bulk_data_interval '0'
+	# HTTP URL for bulk data uploads.
+	# option bulk_data_url 'https://collector.example.com/bulkdata'
 
 	# ── TLS / certificate paths ────────────────────────────────────────────
 	# CA certificate — used to verify the server's TLS certificate.
@@ -98,9 +120,6 @@ config optimacs 'agent'
 	# How often ac-client sends a STATUS heartbeat (uptime, load, wifi …).
 	option status_interval '300'
 
-	# How often ac-client runs a camera discovery + capture cycle.
-	option cam_interval    '360'
-
 	# ── GNSS / GPS receiver ────────────────────────────────────────────────
 	# Serial device for a NMEA-0183 GPS receiver.
 	# Leave empty (or comment out) to disable GPS reporting.
@@ -109,7 +128,6 @@ config optimacs 'agent'
 
 	# ── Storage paths ──────────────────────────────────────────────────────
 	option fw_dir        '/tmp/firmware'
-	option img_dir       '/var/apclient/images'
 	option pid_file      '/var/run/apclient.pid'
 
 	# ── Process behaviour ──────────────────────────────────────────────────

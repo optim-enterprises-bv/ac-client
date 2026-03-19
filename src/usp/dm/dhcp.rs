@@ -74,14 +74,34 @@ pub async fn get(_cfg: &ClientConfig, path: &str) -> HashMap<String, String> {
                 path.to_string(),
                 if ignore == "1" { "Disabled" } else { "Enabled" }.to_string(),
             );
-        } else if path.ends_with("MinAddress") || path.ends_with("Start") {
-            let start = uci_get_raw(&format!("dhcp.{pool_name}.start"))
-                .unwrap_or_else(|| "100".to_string());
-            m.insert(path.to_string(), start);
-        } else if path.ends_with("MaxAddress") || path.ends_with("Limit") {
-            let limit = uci_get_raw(&format!("dhcp.{pool_name}.limit"))
-                .unwrap_or_else(|| "150".to_string());
-            m.insert(path.to_string(), limit);
+        } else if path.ends_with("MinAddress") {
+            // TR-181 MinAddress must be a dotted-decimal IPv4 address.
+            // UCI dhcp.{pool}.start is an offset from the network base IP.
+            let iface = uci_get_raw(&format!("dhcp.{pool_name}.interface"))
+                .unwrap_or_else(|| pool_name.clone());
+            let base_ip = uci_get_raw(&format!("network.{iface}.ipaddr"))
+                .unwrap_or_else(|| "192.168.1.0".to_string());
+            let start_offset: u32 = uci_get_raw(&format!("dhcp.{pool_name}.start"))
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(100);
+            m.insert(path.to_string(), offset_ip(&base_ip, start_offset));
+        } else if path.ends_with("MaxAddress") {
+            // TR-181 MaxAddress must be a dotted-decimal IPv4 address.
+            // UCI dhcp.{pool}.limit is a count of addresses in the range.
+            let iface = uci_get_raw(&format!("dhcp.{pool_name}.interface"))
+                .unwrap_or_else(|| pool_name.clone());
+            let base_ip = uci_get_raw(&format!("network.{iface}.ipaddr"))
+                .unwrap_or_else(|| "192.168.1.0".to_string());
+            let start_offset: u32 = uci_get_raw(&format!("dhcp.{pool_name}.start"))
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(100);
+            let limit: u32 = uci_get_raw(&format!("dhcp.{pool_name}.limit"))
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(150);
+            m.insert(
+                path.to_string(),
+                offset_ip(&base_ip, start_offset + limit - 1),
+            );
         } else if path.ends_with("SubnetMask") {
             let iface = uci_get_raw(&format!("dhcp.{pool_name}.interface"))
                 .unwrap_or_else(|| pool_name.clone());
@@ -93,9 +113,12 @@ pub async fn get(_cfg: &ClientConfig, path: &str) -> HashMap<String, String> {
                 uci_get_raw("dhcp.@dnsmasq[0].domain").unwrap_or_else(|| "lan".to_string());
             m.insert(path.to_string(), domain);
         } else if path.ends_with("LeaseTime") {
-            let lt = uci_get_raw(&format!("dhcp.{pool_name}.leasetime"))
+            // TR-181 LeaseTime is an int in seconds.  UCI stores human-readable
+            // strings like "12h", "30m", "infinite".
+            let lt_str = uci_get_raw(&format!("dhcp.{pool_name}.leasetime"))
                 .unwrap_or_else(|| "12h".to_string());
-            m.insert(path.to_string(), lt);
+            let lt_secs = parse_leasetime(&lt_str);
+            m.insert(path.to_string(), lt_secs.to_string());
         } else if path.ends_with("LeaseNumberOfEntries") {
             let count = std::fs::read_to_string("/tmp/dhcp.leases")
                 .map(|s| s.lines().filter(|l| !l.trim().is_empty()).count())
@@ -134,17 +157,21 @@ pub async fn get(_cfg: &ClientConfig, path: &str) -> HashMap<String, String> {
                 let ci = li + 1;
                 let base = format!("Device.DHCPv4.Server.Pool.{pool_idx}.Client.{ci}");
                 m.insert(format!("{base}.Chaddr"), lease.mac.clone());
-                m.insert(format!("{base}.IPv4Address.1.IPAddress"), lease.ip.clone());
+                m.insert(
+                    format!("{base}.IPv4Address.1.IPAddress"),
+                    lease.ip.clone(),
+                );
+                // LeaseTimeRemaining belongs on the IPv4Address sub-object per TR-181.
+                m.insert(
+                    format!("{base}.IPv4Address.1.LeaseTimeRemaining"),
+                    lease.remaining.clone(),
+                );
                 if !lease.hostname.is_empty() && lease.hostname != "*" {
                     m.insert(
                         format!("{base}.X_OptimACS_Hostname"),
                         lease.hostname.clone(),
                     );
                 }
-                m.insert(
-                    format!("{base}.LeaseTimeRemaining"),
-                    lease.remaining.clone(),
-                );
             }
         } else if path.contains("StaticAddress.") {
             // Static lease query — original logic
@@ -191,6 +218,47 @@ pub async fn get(_cfg: &ClientConfig, path: &str) -> HashMap<String, String> {
     }
 
     m
+}
+
+/// Compute an IPv4 address by adding an offset to a base IP.
+/// Returns the dotted-decimal address required by TR-181 MinAddress/MaxAddress.
+fn offset_ip(base: &str, offset: u32) -> String {
+    let parts: Vec<u32> = base
+        .split('.')
+        .filter_map(|s| s.parse().ok())
+        .collect();
+    if parts.len() == 4 {
+        let base_int: u32 =
+            (parts[0] << 24) | (parts[1] << 16) | (parts[2] << 8) | parts[3];
+        let result = base_int.wrapping_add(offset);
+        format!(
+            "{}.{}.{}.{}",
+            (result >> 24) & 0xFF,
+            (result >> 16) & 0xFF,
+            (result >> 8) & 0xFF,
+            result & 0xFF,
+        )
+    } else {
+        base.to_string()
+    }
+}
+
+/// Parse UCI leasetime string to seconds.
+/// Examples: "12h" → 43200, "30m" → 1800, "infinite" → 2147483647
+fn parse_leasetime(s: &str) -> i64 {
+    if s == "infinite" || s == "0" {
+        return i64::MAX / 2; // effectively infinite per TR-181 convention
+    }
+    let s = s.trim();
+    if let Some(h) = s.strip_suffix('h') {
+        h.parse::<i64>().unwrap_or(12) * 3600
+    } else if let Some(m) = s.strip_suffix('m') {
+        m.parse::<i64>().unwrap_or(30) * 60
+    } else if let Some(d) = s.strip_suffix('d') {
+        d.parse::<i64>().unwrap_or(1) * 86400
+    } else {
+        s.parse::<i64>().unwrap_or(43200)
+    }
 }
 
 struct DhcpLease {

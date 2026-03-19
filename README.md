@@ -1,15 +1,40 @@
 # ac-client — USP Agent for OpenWrt Access Points
 
-`ac-client` is a Rust daemon implementing the **TR-369 / USP 1.3 Agent** (User Services Platform, Broadband Forum) for OpenWrt-based access-point devices managed by an [OptimACS](https://acs.optimcloud.com) controller (`ac-server`).
+`ac-client` is a Rust daemon implementing the **TR-369 / USP 1.3 Agent** (User Services Platform, Broadband Forum) for OpenWrt-based devices managed by an [OptimACS](https://acs.optimcloud.com) controller (`ac-server`).
 
-**Key Features:**
-- ✅ **Post-Quantum Cryptography** - Hybrid X25519Kyber768 (ML-KEM-768) key exchange for quantum-resistant TLS
-- ✅ **Full TP-469/USMP compliance** - ADD, DELETE, GetSupportedDM, GetInstances
-- ✅ **Complete UCI backend** - 47 operations for all OpenWrt configurations
-- ✅ **WiFi 7 (EHT) support** - EHT20, EHT80, EHT160, EHT320 modes
-- ✅ **IPv6 support** - Prefix management and address configuration
-- ✅ **Bridge & VLAN management** - List-type parameter handling
-- ✅ **System configuration** - Timezone, hostname, log settings, LED control
+![Architecture](docs/images/architecture.svg)
+
+### Key Features
+
+- ✅ **Full TR-181:2.16 Compliance** — 95+ objects, 400+ parameters, Residential Gateway profile
+- ✅ **4 MTP Protocols** — WebSocket, MQTT, STOMP, CoAP (only USP agent with all four)
+- ✅ **Post-Quantum TLS** — Hybrid X25519 + ML-KEM-768 key exchange (FIPS 203)
+- ✅ **Multi-Controller** — Primary + secondary controllers with TR-369 trust roles
+- ✅ **OPERATE Commands** — IPPing, TraceRoute, opkg Install/Uninstall, firmware download
+- ✅ **ADD/DELETE** — Port mappings, firewall rules, DHCP leases, WiFi SSIDs, subscriptions
+- ✅ **Bulk Data Collection** — TR-232 profile-based periodic parameter collection
+- ✅ **Carrier-Grade** — DSL, GPON/XPON, 802.1x, VoIP/SIP, PPPoE
+- ✅ **Software Management** — List/install/uninstall opkg packages via USP OPERATE
+- ✅ **32 Conformance Tests** — TP-286 test suite for message, record, and data model validation
+- ✅ **<1MB RAM, ~3MB binary** — Runs on the cheapest MIPS/ARM routers
+
+### Data Model Coverage (32 modules)
+
+```
+Device.LocalAgent          Device.ManagementServer     Device.DeviceInfo
+Device.WiFi                Device.Ethernet             Device.Bridging
+Device.IP (+ Stats)        Device.IP.Diagnostics       Device.DHCPv4
+Device.DHCPv6              Device.NAT.PortMapping      Device.Firewall (Chain/Rule)
+Device.Routing             Device.DNS                  Device.Hosts
+Device.PPP                 Device.Users                Device.SoftwareModules
+Device.QoS                 Device.UPnP                 Device.BulkData
+Device.DSL                 Device.Optical              Device.IEEE8021x
+Device.Services.VoIPProfile Device.RouterAdvertisement Device.IPv6rd
+Device.DSLite              Device.InterfaceStack       Device.Time
+Device.WireGuard           Device.X_TP_OpenVPN         + vendor extensions
+```
+
+See [CHANGELOG.md](CHANGELOG.md) for the complete v2.0.0 release notes.
 
 ---
 

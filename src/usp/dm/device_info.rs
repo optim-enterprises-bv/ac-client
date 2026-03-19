@@ -26,7 +26,8 @@ pub fn get(cfg: &ClientConfig, path: &str) -> HashMap<String, String> {
             );
             insert(&mut m, "SoftwareVersion", util::read_fw_version());
             insert(&mut m, "HardwareVersion", cfg.sys_model.clone());
-            insert(&mut m, "SerialNumber", cfg.mac_addr.clone());
+            // SerialNumber must be the manufacturer serial, not the MAC.
+            insert(&mut m, "SerialNumber", read_serial_number());
             insert(&mut m, "UpTime", util::read_uptime());
             insert(&mut m, "X_OptimACS_LoadAvg", util::read_load_avg());
             insert(&mut m, "X_OptimACS_FreeMem", util::read_free_mem());
@@ -38,7 +39,7 @@ pub fn get(cfg: &ClientConfig, path: &str) -> HashMap<String, String> {
             );
             insert(&mut m, "ModelName", util::read_device_model());
             insert(&mut m, "ProcessorArchitecture", util::read_device_arch());
-            insert(&mut m, "Manufacturer", "OpenWrt".to_string());
+            insert(&mut m, "Manufacturer", read_manufacturer());
             insert(
                 &mut m,
                 "ManufacturerOUI",
@@ -46,13 +47,30 @@ pub fn get(cfg: &ClientConfig, path: &str) -> HashMap<String, String> {
             );
             insert(&mut m, "Description", util::read_device_description());
             insert(&mut m, "BaseMacAddress", cfg.mac_addr.clone());
+            // AdditionalSoftwareVersion: space-separated list of additional
+            // firmware component versions.  Kernel version is a legitimate entry.
             insert(
                 &mut m,
                 "AdditionalSoftwareVersion",
-                util::read_kernel_version(),
+                format!("kernel:{}", util::read_kernel_version()),
             );
-            insert(&mut m, "ProductClass", "Gateway".to_string());
+            insert(&mut m, "ProductClass", read_product_class());
             insert(&mut m, "DeviceStatus", util::read_device_status());
+            // Sub-objects returned on full query
+            m.insert(format!("{base}MemoryStatus.Total"), util::read_mem_total());
+            m.insert(format!("{base}MemoryStatus.Free"), util::read_free_mem());
+            let tcp_win = std::fs::read_to_string("/proc/sys/net/core/rmem_max")
+                .map(|s| s.trim().to_string())
+                .unwrap_or_else(|_| "65535".to_string());
+            m.insert(format!("{base}NetworkProperties.MaxTCPWindowSize"), tcp_win);
+            let tcp_impl = std::fs::read_to_string("/proc/sys/net/ipv4/tcp_congestion_control")
+                .map(|s| s.trim().to_string())
+                .unwrap_or_else(|_| "cubic".to_string());
+            m.insert(format!("{base}NetworkProperties.TCPImplementation"), tcp_impl);
+            m.insert(format!("{base}FirmwareImage.1.Name"), "current".to_string());
+            m.insert(format!("{base}FirmwareImage.1.Version"), util::read_fw_version());
+            m.insert(format!("{base}FirmwareImage.1.Available"), "true".to_string());
+            m.insert(format!("{base}FirmwareImage.1.Status"), "Active".to_string());
         }
         "HostName" => {
             let hostname = uci_backend::get_system_hostname();
@@ -73,7 +91,7 @@ pub fn get(cfg: &ClientConfig, path: &str) -> HashMap<String, String> {
             insert(&mut m, "HardwareVersion", cfg.sys_model.clone());
         }
         "SerialNumber" => {
-            insert(&mut m, "SerialNumber", cfg.mac_addr.clone());
+            insert(&mut m, "SerialNumber", read_serial_number());
         }
         "UpTime" => {
             insert(&mut m, "UpTime", util::read_uptime());
@@ -101,7 +119,7 @@ pub fn get(cfg: &ClientConfig, path: &str) -> HashMap<String, String> {
             insert(&mut m, "ProcessorArchitecture", util::read_device_arch());
         }
         "Manufacturer" => {
-            insert(&mut m, "Manufacturer", "OpenWrt".to_string());
+            insert(&mut m, "Manufacturer", read_manufacturer());
         }
         "ManufacturerOUI" => {
             insert(
@@ -120,19 +138,79 @@ pub fn get(cfg: &ClientConfig, path: &str) -> HashMap<String, String> {
             insert(
                 &mut m,
                 "AdditionalSoftwareVersion",
-                util::read_kernel_version(),
+                format!("kernel:{}", util::read_kernel_version()),
             );
         }
         "ProductClass" => {
-            insert(&mut m, "ProductClass", "Gateway".to_string());
+            insert(&mut m, "ProductClass", read_product_class());
         }
         "DeviceStatus" => {
             insert(&mut m, "DeviceStatus", util::read_device_status());
         }
+        // ── MemoryStatus ────────────────────────────────────
+        sub if sub == "MemoryStatus." || sub.starts_with("MemoryStatus.") => {
+            let leaf = sub.strip_prefix("MemoryStatus.").unwrap_or("");
+            if leaf.is_empty() || leaf == "Total" {
+                m.insert(
+                    format!("{base}MemoryStatus.Total"),
+                    util::read_mem_total(),
+                );
+            }
+            if leaf.is_empty() || leaf == "Free" {
+                m.insert(
+                    format!("{base}MemoryStatus.Free"),
+                    util::read_free_mem(),
+                );
+            }
+        }
+        // ── NetworkProperties ────────────────────────────────
+        sub if sub == "NetworkProperties." || sub.starts_with("NetworkProperties.") => {
+            let leaf = sub.strip_prefix("NetworkProperties.").unwrap_or("");
+            if leaf.is_empty() || leaf == "MaxTCPWindowSize" {
+                let val = std::fs::read_to_string("/proc/sys/net/core/rmem_max")
+                    .map(|s| s.trim().to_string())
+                    .unwrap_or_else(|_| "65535".to_string());
+                m.insert(format!("{base}NetworkProperties.MaxTCPWindowSize"), val);
+            }
+            if leaf.is_empty() || leaf == "TCPImplementation" {
+                let val = std::fs::read_to_string(
+                    "/proc/sys/net/ipv4/tcp_congestion_control",
+                )
+                .map(|s| s.trim().to_string())
+                .unwrap_or_else(|_| "cubic".to_string());
+                m.insert(
+                    format!("{base}NetworkProperties.TCPImplementation"),
+                    val,
+                );
+            }
+        }
+        // ── FirmwareImage ────────────────────────────────────
+        sub if sub == "FirmwareImage." || sub.starts_with("FirmwareImage.") => {
+            // Single firmware image entry (slot 1)
+            m.insert(
+                format!("{base}FirmwareImage.1.Name"),
+                "current".to_string(),
+            );
+            m.insert(
+                format!("{base}FirmwareImage.1.Version"),
+                util::read_fw_version(),
+            );
+            m.insert(
+                format!("{base}FirmwareImage.1.Available"),
+                "true".to_string(),
+            );
+            m.insert(
+                format!("{base}FirmwareImage.1.Status"),
+                "Active".to_string(),
+            );
+        }
         "VendorConfigFileNumberOfEntries" => {
+            let count = std::fs::read_dir("/etc/config")
+                .map(|e| e.filter_map(|f| f.ok()).count())
+                .unwrap_or(0);
             m.insert(
                 format!("{base}VendorConfigFileNumberOfEntries"),
-                "0".to_string(),
+                count.to_string(),
             );
         }
         // ── ProcessStatus ────────────────────────────────────
@@ -180,6 +258,29 @@ pub fn get(cfg: &ClientConfig, path: &str) -> HashMap<String, String> {
                     let zone = idx - 1;
                     let type_path = format!("/sys/class/thermal/thermal_zone{zone}/type");
                     let temp_path = format!("/sys/class/thermal/thermal_zone{zone}/temp");
+                    let zone_exists =
+                        std::path::Path::new(&format!("/sys/class/thermal/thermal_zone{zone}"))
+                            .exists();
+
+                    // TR-181 requires Enable, Status, LastUpdate, Name, Value.
+                    m.insert(
+                        format!("{base}TemperatureStatus.TemperatureSensor.{idx}.Enable"),
+                        "true".to_string(),
+                    );
+                    m.insert(
+                        format!("{base}TemperatureStatus.TemperatureSensor.{idx}.Status"),
+                        if zone_exists { "Enabled" } else { "Error" }.to_string(),
+                    );
+                    // LastUpdate: current time in ISO 8601 (we always just polled it)
+                    let now_secs = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs();
+                    m.insert(
+                        format!("{base}TemperatureStatus.TemperatureSensor.{idx}.LastUpdate"),
+                        epoch_to_iso8601(now_secs),
+                    );
+
                     if let Ok(name) = std::fs::read_to_string(&type_path) {
                         m.insert(
                             format!("{base}TemperatureStatus.TemperatureSensor.{idx}.Name"),
@@ -230,13 +331,14 @@ pub fn get(cfg: &ClientConfig, path: &str) -> HashMap<String, String> {
                             meta.len().to_string(),
                         );
                         if let Ok(modified) = meta.modified() {
+                            // TR-181 dateTime must be ISO 8601 / TR-106 format.
                             let secs = modified
                                 .duration_since(std::time::UNIX_EPOCH)
                                 .unwrap_or_default()
                                 .as_secs();
                             m.insert(
                                 format!("{base}VendorLogFile.1.LastModified"),
-                                secs.to_string(),
+                                epoch_to_iso8601(secs),
                             );
                         }
                     }
@@ -317,6 +419,145 @@ fn read_process_count() -> String {
         })
         .unwrap_or(0)
         .to_string()
+}
+
+/// Read the hardware serial number from /proc/cpuinfo "Serial" field.
+/// Falls back to the board name if absent.
+fn read_serial_number() -> String {
+    if let Ok(cpuinfo) = std::fs::read_to_string("/proc/cpuinfo") {
+        for line in cpuinfo.lines() {
+            if let Some(rest) = line.strip_prefix("Serial") {
+                if let Some(val) = rest
+                    .trim_start_matches(':')
+                    .trim()
+                    .split_whitespace()
+                    .next()
+                {
+                    if val != "0000000000000000" && !val.is_empty() {
+                        return val.to_string();
+                    }
+                }
+            }
+        }
+    }
+    // Fallback: board name from OpenWrt sysinfo
+    if let Ok(board) = std::fs::read_to_string("/tmp/sysinfo/board_name") {
+        let b = board.trim().to_string();
+        if !b.is_empty() {
+            return b;
+        }
+    }
+    String::new()
+}
+
+/// Read hardware manufacturer from `ubus call system board`.
+/// Falls back to "OpenWrt" (the OS brand) only if no hardware manufacturer
+/// is discoverable, which is expected on development/emulated environments.
+fn read_manufacturer() -> String {
+    if let Ok(output) = std::process::Command::new("ubus")
+        .args(["call", "system", "board"])
+        .output()
+    {
+        let text = String::from_utf8_lossy(&output.stdout);
+        // The "model" field often contains "Manufacturer Model" (e.g. "TP-Link TL-WR841N")
+        if let Some(pos) = text.find("\"model\"") {
+            let chunk = &text[pos..];
+            if let Some(start) = chunk.find('"').and_then(|i| chunk.get(i + 1..)) {
+                // skip the "model" key quotes, find next quoted string value
+                if let Some(val_start) = start.find('"') {
+                    let rest = &start[val_start + 1..];
+                    if let Some(val_end) = rest.find('"') {
+                        let model = &rest[..val_end];
+                        // Extract the first word as manufacturer
+                        if let Some(first) = model.split_whitespace().next() {
+                            if !first.is_empty() {
+                                return first.to_string();
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    "OpenWrt".to_string()
+}
+
+/// Determine the product class from the device model.
+/// TR-181 ProductClass is a string that classifies the device type.
+fn read_product_class() -> String {
+    if let Ok(output) = std::process::Command::new("ubus")
+        .args(["call", "system", "board"])
+        .output()
+    {
+        let text = String::from_utf8_lossy(&output.stdout).to_lowercase();
+        if text.contains("router") || text.contains("gateway") {
+            return "Gateway".to_string();
+        }
+        if text.contains("ap") || text.contains("access point") {
+            return "AccessPoint".to_string();
+        }
+        if text.contains("switch") {
+            return "Switch".to_string();
+        }
+    }
+    "Gateway".to_string()
+}
+
+/// Convert a Unix epoch timestamp to an ISO 8601 / TR-106 dateTime string.
+/// Format: "YYYY-MM-DDTHH:MM:SSZ"
+fn epoch_to_iso8601(secs: u64) -> String {
+    // Manual conversion without external crates.
+    // Gregorian calendar calculation from epoch seconds.
+    let mut remaining = secs;
+    let ss = remaining % 60;
+    remaining /= 60;
+    let mm = remaining % 60;
+    remaining /= 60;
+    let hh = remaining % 24;
+    let mut days = remaining / 24;
+
+    // Calculate year, month, day from days since 1970-01-01
+    let mut year: u64 = 1970;
+    loop {
+        let days_in_year = if is_leap_year(year) { 366 } else { 365 };
+        if days < days_in_year {
+            break;
+        }
+        days -= days_in_year;
+        year += 1;
+    }
+    let leap = is_leap_year(year);
+    let month_days: [u64; 12] = [
+        31,
+        if leap { 29 } else { 28 },
+        31,
+        30,
+        31,
+        30,
+        31,
+        31,
+        30,
+        31,
+        30,
+        31,
+    ];
+    let mut month: u64 = 1;
+    for &md in &month_days {
+        if days < md {
+            break;
+        }
+        days -= md;
+        month += 1;
+    }
+    let day = days + 1;
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
+        year, month, day, hh, mm, ss
+    )
+}
+
+fn is_leap_year(y: u64) -> bool {
+    (y % 4 == 0 && y % 100 != 0) || y % 400 == 0
 }
 
 fn count_thermal_zones() -> usize {

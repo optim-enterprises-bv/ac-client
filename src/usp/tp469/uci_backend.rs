@@ -700,6 +700,235 @@ fn wifi_reload() -> Result<(), String> {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Port Mapping (NAT Redirect) Operations
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Add a new port mapping (firewall redirect rule)
+pub fn add_port_mapping(
+    proto: &str,
+    src_dport: &str,
+    dest_port: &str,
+    dest_ip: &str,
+    name: &str,
+) -> UciResult {
+    info!(
+        "Adding port mapping: {}:{} -> {}:{} ({})",
+        proto, src_dport, dest_ip, dest_port, name
+    );
+
+    if let Err(e) = uci_add("firewall", "redirect") {
+        return UciResult::error(
+            ErrorCode::InternalError,
+            &format!("Failed to add redirect: {e}"),
+        );
+    }
+
+    // After uci add, the new section is at the last index
+    let next_idx = count_uci_sections("firewall", "redirect").saturating_sub(1);
+    let section = format!("@redirect[{next_idx}]");
+    let set_ops = vec![
+        (format!("firewall.{section}.target"), "DNAT".to_string()),
+        (format!("firewall.{section}.src"), "wan".to_string()),
+        (format!("firewall.{section}.proto"), proto.to_string()),
+        (
+            format!("firewall.{section}.src_dport"),
+            src_dport.to_string(),
+        ),
+        (
+            format!("firewall.{section}.dest_port"),
+            dest_port.to_string(),
+        ),
+        (format!("firewall.{section}.dest_ip"), dest_ip.to_string()),
+        (format!("firewall.{section}.dest"), "lan".to_string()),
+    ];
+
+    for (path, val) in &set_ops {
+        if let Err(e) = uci_set(path, val) {
+            let _ = uci_delete(&format!("firewall.{section}"));
+            return UciResult::error(
+                ErrorCode::InternalError,
+                &format!("Failed to set {path}: {e}"),
+            );
+        }
+    }
+
+    if !name.is_empty() {
+        let _ = uci_set(&format!("firewall.{section}.name"), name);
+    }
+
+    if let Err(e) = uci_commit("firewall") {
+        let _ = uci_delete(&format!("firewall.{section}"));
+        return UciResult::error(
+            ErrorCode::InternalError,
+            &format!("Failed to commit: {e}"),
+        );
+    }
+
+    restart_firewall();
+    info!("Successfully added port mapping instance {}", next_idx);
+    UciResult::success(next_idx as u32)
+}
+
+/// Delete a port mapping by instance number
+pub fn delete_port_mapping(instance: u32) -> UciResult {
+    info!("Deleting port mapping instance {}", instance);
+    let section = format!("firewall.@redirect[{}]", instance);
+
+    let out = Command::new("uci")
+        .args(["get", &format!("{section}.src_dport")])
+        .output();
+
+    match out {
+        Ok(result) if result.status.success() => {
+            if let Err(e) = uci_delete(&section) {
+                return UciResult::error(
+                    ErrorCode::InternalError,
+                    &format!("Failed to delete: {e}"),
+                );
+            }
+            if let Err(e) = uci_commit("firewall") {
+                return UciResult::error(
+                    ErrorCode::InternalError,
+                    &format!("Failed to commit: {e}"),
+                );
+            }
+            restart_firewall();
+            UciResult::success(instance)
+        }
+        _ => UciResult::error(
+            ErrorCode::ObjectNotFound,
+            &format!("Port mapping instance {} not found", instance),
+        ),
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Firewall Rule Operations
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Add a new firewall rule
+pub fn add_firewall_rule(
+    name: &str,
+    target: &str,
+    proto: &str,
+    src_port: &str,
+    dest_port: &str,
+) -> UciResult {
+    info!("Adding firewall rule: {} target={}", name, target);
+
+    if let Err(e) = uci_add("firewall", "rule") {
+        return UciResult::error(
+            ErrorCode::InternalError,
+            &format!("Failed to add rule: {e}"),
+        );
+    }
+
+    // After uci add, the new section is at the last index
+    let next_idx = count_uci_sections("firewall", "rule").saturating_sub(1);
+    let section = format!("@rule[{next_idx}]");
+    if let Err(e) = uci_set(&format!("firewall.{section}.target"), target) {
+        let _ = uci_delete(&format!("firewall.{section}"));
+        return UciResult::error(
+            ErrorCode::InternalError,
+            &format!("Failed to set target: {e}"),
+        );
+    }
+    if let Err(e) = uci_set(&format!("firewall.{section}.proto"), proto) {
+        let _ = uci_delete(&format!("firewall.{section}"));
+        return UciResult::error(
+            ErrorCode::InternalError,
+            &format!("Failed to set proto: {e}"),
+        );
+    }
+    if !name.is_empty() {
+        let _ = uci_set(&format!("firewall.{section}.name"), name);
+    }
+    if !src_port.is_empty() {
+        let _ = uci_set(&format!("firewall.{section}.src_port"), src_port);
+    }
+    if !dest_port.is_empty() {
+        let _ = uci_set(&format!("firewall.{section}.dest_port"), dest_port);
+    }
+
+    if let Err(e) = uci_commit("firewall") {
+        let _ = uci_delete(&format!("firewall.{section}"));
+        return UciResult::error(
+            ErrorCode::InternalError,
+            &format!("Failed to commit: {e}"),
+        );
+    }
+
+    restart_firewall();
+    info!("Successfully added firewall rule instance {}", next_idx);
+    UciResult::success(next_idx as u32)
+}
+
+/// Delete a firewall rule by instance number
+pub fn delete_firewall_rule(instance: u32) -> UciResult {
+    info!("Deleting firewall rule instance {}", instance);
+    let section = format!("firewall.@rule[{}]", instance);
+
+    let out = Command::new("uci")
+        .args(["get", &format!("{section}.target")])
+        .output();
+
+    match out {
+        Ok(result) if result.status.success() => {
+            if let Err(e) = uci_delete(&section) {
+                return UciResult::error(
+                    ErrorCode::InternalError,
+                    &format!("Failed to delete: {e}"),
+                );
+            }
+            if let Err(e) = uci_commit("firewall") {
+                return UciResult::error(
+                    ErrorCode::InternalError,
+                    &format!("Failed to commit: {e}"),
+                );
+            }
+            restart_firewall();
+            UciResult::success(instance)
+        }
+        _ => UciResult::error(
+            ErrorCode::ObjectNotFound,
+            &format!("Firewall rule instance {} not found", instance),
+        ),
+    }
+}
+
+/// Count existing sections of a given type in a UCI config.
+/// After `uci add`, the new section is at this index (0-based).
+fn count_uci_sections(config: &str, section_type: &str) -> usize {
+    let output = Command::new("uci")
+        .args(["show", config])
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .unwrap_or_default();
+
+    let needle = format!("@{}[", section_type);
+    let mut max_idx: Option<usize> = None;
+    for line in output.lines() {
+        if let Some(pos) = line.find(&needle) {
+            let rest = &line[pos + needle.len()..];
+            if let Some(end) = rest.find(']') {
+                if let Ok(idx) = rest[..end].parse::<usize>() {
+                    max_idx = Some(max_idx.map_or(idx, |m: usize| m.max(idx)));
+                }
+            }
+        }
+    }
+    max_idx.map_or(0, |m| m + 1)
+}
+
+fn restart_firewall() {
+    let _ = Command::new("/etc/init.d/firewall")
+        .arg("reload")
+        .status();
+    info!("Firewall reloaded");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // System Hostname Operations
 // ─────────────────────────────────────────────────────────────────────────────
 

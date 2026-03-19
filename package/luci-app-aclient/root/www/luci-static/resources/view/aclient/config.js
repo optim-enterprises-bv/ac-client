@@ -17,7 +17,7 @@
  *  3. Device       – MAC address, USP endpoint ID, CPU arch, device model
  *  4. Intervals    – status heartbeat, config-poll intervals
  *  5. GNSS / GPS   – serial device, baud rate (dropdown)
- *  6. Storage      – firmware dir, image dir, PID file
+ *  6. Storage      – firmware dir, PID file
  *  7. Process      – syslog flag
  */
 
@@ -43,6 +43,7 @@ return view.extend({
 		s.tab('tls',        _('TLS / Certs'));
 		s.tab('device',     _('Device'));
 		s.tab('intervals',  _('Intervals'));
+		s.tab('advanced',   _('Advanced'));
 		s.tab('gnss',       _('GNSS / GPS'));
 		s.tab('paths',      _('Storage'));
 		s.tab('process',    _('Process'));
@@ -72,7 +73,10 @@ return view.extend({
 			  '<strong>WebSocket</strong> is the default and recommended option.'));
 		o.value('websocket', _('WebSocket (WSS)'));
 		o.value('mqtt',      _('MQTT'));
+		o.value('stomp',     _('STOMP'));
+		o.value('coap',      _('CoAP'));
 		o.value('both',      _('Both — WebSocket + MQTT'));
+		o.value('all',       _('All — WebSocket + MQTT + STOMP + CoAP'));
 		o.default = 'websocket';
 
 		o = s.taboption('connection', form.Value, 'ws_url',
@@ -83,6 +87,7 @@ return view.extend({
 		o.placeholder = 'wss://controller.example.com:3491/usp';
 		o.depends('mtp', 'websocket');
 		o.depends('mtp', 'both');
+		o.depends('mtp', 'all');
 
 		o = s.taboption('connection', form.Value, 'mqtt_url',
 			_('MQTT Broker URL'),
@@ -92,6 +97,7 @@ return view.extend({
 		o.placeholder = 'mqtt://emqx.example.com:1883';
 		o.depends('mtp', 'mqtt');
 		o.depends('mtp', 'both');
+		o.depends('mtp', 'all');
 
 		o = s.taboption('connection', form.Value, 'mqtt_client_id',
 			_('MQTT Client ID'),
@@ -100,12 +106,39 @@ return view.extend({
 		o.placeholder = _('(auto from endpoint ID)');
 		o.depends('mtp', 'mqtt');
 		o.depends('mtp', 'both');
+		o.depends('mtp', 'all');
+
+		o = s.taboption('connection', form.Value, 'stomp_url',
+			_('STOMP Broker URL'),
+			_('URL of the STOMP message broker (e.g. ActiveMQ, RabbitMQ). ' +
+			  'Example: <code>stomp://broker.example.com:61613</code>'));
+		o.placeholder = 'stomp://broker.example.com:61613';
+		o.depends('mtp', 'stomp');
+		o.depends('mtp', 'all');
+
+		o = s.taboption('connection', form.Value, 'stomp_destination',
+			_('STOMP Destination Prefix'),
+			_('STOMP destination prefix. Agent subscribes to ' +
+			  '<code>&lt;prefix&gt;/&lt;endpoint_id&gt;</code>. ' +
+			  'Leave empty for default <code>/topic/usp</code>.'));
+		o.placeholder = '/topic/usp';
+		o.depends('mtp', 'stomp');
+		o.depends('mtp', 'all');
+
+		o = s.taboption('connection', form.Value, 'coap_url',
+			_('CoAP Endpoint URL'),
+			_('URL of the CoAP endpoint on the controller. ' +
+			  'Example: <code>coap://controller.example.com:5683/usp</code>'));
+		o.placeholder = 'coap://controller.example.com:5683/usp';
+		o.depends('mtp', 'coap');
+		o.depends('mtp', 'all');
 
 		o = s.taboption('connection', form.Value, 'controller_id',
 			_('Controller Endpoint ID'),
 			_('USP endpoint ID of the OptimACS controller. ' +
-			  'The agent only processes messages from this endpoint.'));
-		o.placeholder = 'oui:00005A:OptimACS-Controller-1';
+			  'The agent only processes messages from this endpoint. ' +
+			  'Must match the <code>USP_ENDPOINT_ID</code> configured on ac-server.'));
+		o.placeholder = 'OptimACS-Controller-1';
 
 		o = s.taboption('connection', form.Value, 'server_cn',
 			_('Server TLS Common Name (SNI)'),
@@ -121,6 +154,13 @@ return view.extend({
 			  'Find this token in <strong>Account Settings → Claim Token</strong>.'));
 		o.placeholder = 'CT-XXXXXX';
 		o.password    = true;
+
+		o = s.taboption('connection', form.Value, 'secondary_controllers',
+			_('Secondary Controllers'),
+			_('Comma-separated list of additional controller endpoint IDs ' +
+			  'for multi-controller deployments (TR-369 §4.1). ' +
+			  'The primary controller is <em>Controller Endpoint ID</em> above.'));
+		o.placeholder = _('Controller-2,Controller-3');
 
 		// ╔══════════════════════════════════════════════════════════════════════╗
 		// ║  TAB 2 — TLS / Certificates                                          ║
@@ -174,8 +214,8 @@ return view.extend({
 		o = s.taboption('device', form.Value, 'usp_endpoint_id',
 			_('USP Endpoint ID'),
 			_('Agent endpoint ID sent in every USP Record. ' +
-			  'Auto-generated as <code>oui:&lt;OUI&gt;:&lt;MAC&gt;</code> from ' +
-			  'the MAC address when empty.'));
+			  'Auto-generated as <code>oui:00005A:&lt;MAC&gt;</code> ' +
+			  '(e.g. <code>oui:00005A:aa:bb:cc:dd:ee:ff</code>) from the MAC address when empty.'));
 		o.placeholder = _('(auto from MAC)');
 
 		o = s.taboption('device', form.Value, 'arch',
@@ -211,7 +251,33 @@ return view.extend({
 		o.placeholder = '60';
 
 		// ╔══════════════════════════════════════════════════════════════════════╗
-		// ║  TAB 5 — GNSS / GPS                                                  ║
+		// ║  TAB 5 — Advanced (Bulk Data, Daemon)                                 ║
+		// ╚══════════════════════════════════════════════════════════════════════╝
+
+		o = s.taboption('advanced', form.Value, 'bulk_data_interval',
+			_('Bulk Data Collection Interval (seconds)'),
+			_('Interval in seconds for periodic bulk data collection per TR-232. ' +
+			  'Set to <strong>0</strong> to disable. Collected data is uploaded to ' +
+			  'the <em>Bulk Data Upload URL</em>.'));
+		o.datatype    = 'uinteger';
+		o.placeholder = '0';
+
+		o = s.taboption('advanced', form.Value, 'bulk_data_url',
+			_('Bulk Data Upload URL'),
+			_('HTTP/HTTPS endpoint where bulk data reports are uploaded. ' +
+			  'Only used when <em>Bulk Data Interval</em> is non-zero.'));
+		o.placeholder = 'https://collector.example.com/bulkdata';
+
+		o = s.taboption('advanced', form.Flag, 'daemonize',
+			_('Daemonize'),
+			_('Run the agent as a background daemon. Normally managed by the ' +
+			  'init system — only enable for manual testing outside procd.'));
+		o.enabled  = '1';
+		o.disabled = '0';
+		o.default  = '0';
+
+		// ╔══════════════════════════════════════════════════════════════════════╗
+		// ║  TAB 6 — GNSS / GPS                                                  ║
 		// ╚══════════════════════════════════════════════════════════════════════╝
 
 		o = s.taboption('gnss', form.Value, 'gnss_dev',
@@ -224,6 +290,8 @@ return view.extend({
 		o = s.taboption('gnss', form.ListValue, 'gnss_baud',
 			_('GPS Baud Rate'),
 			_('Serial baud rate for the GPS receiver. Most NMEA receivers use 9600 bps.'));
+		o.value('1200',   '1200 bps');
+		o.value('2400',   '2400 bps');
 		o.value('4800',   '4800 bps');
 		o.value('9600',   '9600 bps  (default)');
 		o.value('19200',  '19200 bps');

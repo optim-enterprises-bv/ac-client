@@ -96,7 +96,12 @@ async fn mqtt_loop(
         (url.to_string(), 1883)
     };
 
-    let client_id = sanitise_topic(agent_id.as_str());
+    let client_id = cfg
+        .mqtt_client_id
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| sanitise_topic(agent_id.as_str()));
     debug!("MQTT client ID: {}", client_id);
 
     let mut opts = MqttOptions::new(&client_id, &host, port);

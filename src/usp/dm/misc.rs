@@ -13,9 +13,10 @@ pub type Params = HashMap<String, String>;
 pub async fn get(_cfg: &ClientConfig, path: &str) -> Params {
     let mut result = Params::new();
 
-    // Device.IP.InterfaceNumberOfEntries
+    // Device.IP.InterfaceNumberOfEntries — count real UCI network interfaces
     if path.contains("InterfaceNumberOfEntries") {
-        result.insert(path.to_string(), "4".to_string());
+        let count = count_network_interfaces();
+        result.insert(path.to_string(), count.to_string());
         return result;
     }
 
@@ -35,19 +36,9 @@ pub async fn get(_cfg: &ClientConfig, path: &str) -> Params {
         return handle_routing(path);
     }
 
-    // Device.NAT
-    if path.starts_with("Device.NAT.") {
-        return handle_nat(path);
-    }
-
     // Device.DHCPv4
     if path.starts_with("Device.DHCPv4.") {
         return handle_dhcpv4(path);
-    }
-
-    // Device.Firewall
-    if path.starts_with("Device.Firewall.") {
-        return handle_firewall(path);
     }
 
     // Device.QoS
@@ -80,7 +71,9 @@ pub async fn get(_cfg: &ClientConfig, path: &str) -> Params {
         return handle_cellular(path);
     }
 
-    // Device.NeighborDiscovery
+    // Device.NeighborDiscovery. is not a standard TR-181 path.
+    // IPv6 neighbor discovery data belongs at Device.IP.Interface.{i}.IPv6Neighbor.{i}.
+    // We keep the vendor handler but only expose it under the X_ prefix in GetSupportedDM.
     if path.starts_with("Device.NeighborDiscovery.") {
         return handle_neighbor_discovery(path);
     }
@@ -89,9 +82,92 @@ pub async fn get(_cfg: &ClientConfig, path: &str) -> Params {
     result
 }
 
-/// Set miscellaneous TR-181 parameters (most are read-only)
-pub async fn set(_cfg: &ClientConfig, path: &str, _value: &str) -> Result<(), String> {
-    // Most of these paths are read-only in stub implementation
+/// Set miscellaneous TR-181 parameters
+pub async fn set(_cfg: &ClientConfig, path: &str, value: &str) -> Result<(), String> {
+    use crate::usp::tp469::uci_backend::{uci_commit, uci_set};
+
+    // Device.Time.NTPServer1 / NTPServer2
+    if path.ends_with("NTPServer1") || path.ends_with("NTPServer2") {
+        // OpenWrt stores NTP servers as a list in system.ntp.server
+        // We replace the whole list: read current, swap the right entry, write back
+        let current = std::process::Command::new("uci")
+            .args(["get", "system.ntp.server"])
+            .output()
+            .ok()
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .unwrap_or_default();
+        let mut servers: Vec<String> = current
+            .trim()
+            .split_whitespace()
+            .map(|s| s.to_string())
+            .collect();
+        let idx = if path.ends_with("NTPServer1") { 0 } else { 1 };
+        while servers.len() <= idx {
+            servers.push(String::new());
+        }
+        servers[idx] = value.to_string();
+        // Delete existing list and re-add
+        let _ = std::process::Command::new("uci")
+            .args(["delete", "system.ntp.server"])
+            .status();
+        for s in &servers {
+            if !s.is_empty() {
+                let _ = std::process::Command::new("uci")
+                    .args(["add_list", &format!("system.ntp.server={s}")])
+                    .status();
+            }
+        }
+        uci_commit("system")?;
+        // Restart NTP
+        let _ = std::process::Command::new("/etc/init.d/sysntpd")
+            .arg("restart")
+            .status();
+        return Ok(());
+    }
+
+    // Device.Time.LocalTimeZone
+    if path.ends_with("LocalTimeZone") {
+        uci_set("system.@system[0].zonename", value)?;
+        uci_commit("system")?;
+        return Ok(());
+    }
+
+    // Device.DNS.Client.Server.{i}.DNSServer — set per-interface DNS via UCI
+    if path.starts_with("Device.DNS.") && path.ends_with("DNSServer") {
+        // Extract server index
+        let idx = extract_index(path, "Server.").unwrap_or(1);
+        // Write to the first WAN interface's DNS setting
+        let iface = if idx <= 1 { "wan" } else { "wan6" };
+        uci_set(&format!("network.{iface}.dns"), value)?;
+        uci_commit("network")?;
+        let _ = std::process::Command::new("/etc/init.d/network")
+            .arg("reload")
+            .status();
+        return Ok(());
+    }
+
+    // Device.Routing.Router.{i}.IPv4Forwarding.{i}.* — add/modify static routes
+    if path.starts_with("Device.Routing.") && path.contains("IPv4Forwarding.") {
+        let fwd_idx = extract_index(path, "IPv4Forwarding.").unwrap_or(1);
+        let section = format!("@route[{}]", fwd_idx.saturating_sub(1));
+        if path.ends_with("DestIPAddress") {
+            uci_set(&format!("network.{section}.target"), value)?;
+        } else if path.ends_with("DestSubnetMask") {
+            uci_set(&format!("network.{section}.netmask"), value)?;
+        } else if path.ends_with("GatewayIPAddress") {
+            uci_set(&format!("network.{section}.gateway"), value)?;
+        } else if path.ends_with("Interface") {
+            uci_set(&format!("network.{section}.interface"), value)?;
+        } else {
+            return Err(format!("Read-only routing param: {path}"));
+        }
+        uci_commit("network")?;
+        let _ = std::process::Command::new("/etc/init.d/network")
+            .arg("reload")
+            .status();
+        return Ok(());
+    }
+
     Err(format!("Read-only or not implemented: {path}"))
 }
 
@@ -101,14 +177,14 @@ fn handle_dns(path: &str) -> Params {
     let mut result = Params::new();
 
     if path.contains("ServerNumberOfEntries") {
-        // Count configured DNS servers
-        let count = std::process::Command::new("uci")
-            .args(["show", "network", "@dns"])
-            .output()
-            .ok()
-            .and_then(|o| String::from_utf8(o.stdout).ok())
-            .map(|s| s.lines().count())
-            .unwrap_or(0);
+        // Count nameserver entries in the runtime resolv.conf written by netifd.
+        let count = std::fs::read_to_string("/tmp/resolv.conf.d/resolv.conf.auto")
+            .or_else(|_| std::fs::read_to_string("/tmp/resolv.conf.auto"))
+            .or_else(|_| std::fs::read_to_string("/etc/resolv.conf"))
+            .unwrap_or_default()
+            .lines()
+            .filter(|l| l.trim_start().starts_with("nameserver"))
+            .count();
         result.insert(path.to_string(), count.to_string());
     } else if path.contains("Server.") && path.ends_with("DNSServer") {
         // Get DNS server IP
@@ -165,6 +241,8 @@ fn handle_routing(path: &str) -> Params {
                 result.insert(path.to_string(), route.gateway);
             } else if path.ends_with("Interface") {
                 result.insert(path.to_string(), route.interface);
+            } else if path.ends_with("Origin") {
+                result.insert(path.to_string(), route.origin.clone());
             }
         }
     }
@@ -177,6 +255,7 @@ struct Route {
     mask: String,
     gateway: String,
     interface: String,
+    origin: String,
 }
 
 fn get_route(idx: usize) -> Option<Route> {
@@ -215,11 +294,29 @@ fn get_route(idx: usize) -> Option<Route> {
         "".to_string()
     };
 
+    // Determine origin from "proto" field in ip route output
+    // e.g. "default via 192.168.1.1 dev eth0 proto dhcp"
+    let proto = parts
+        .iter()
+        .position(|&p| p == "proto")
+        .and_then(|pos| parts.get(pos + 1).copied())
+        .unwrap_or("");
+    let origin = match proto {
+        "dhcp" => "DHCPv4",
+        "kernel" => "AutoConfig",
+        "static" | "boot" => "Static",
+        "ra" => "RouterAdvertisement",
+        _ if parts[0] == "default" => "DHCPv4",
+        _ => "Static",
+    }
+    .to_string();
+
     Some(Route {
         dest,
         mask,
         gateway,
         interface,
+        origin,
     })
 }
 
@@ -234,99 +331,8 @@ fn prefix_to_mask(prefix: u8) -> String {
     )
 }
 
-// ── NAT ────────────────────────────────────────────────────────────────────
-
-fn handle_nat(path: &str) -> Params {
-    let mut result = Params::new();
-
-    if path.contains("InterfaceSetting.1.Enable") {
-        result.insert(path.to_string(), "true".to_string());
-    } else if path.contains("InterfaceSetting.1.Status") {
-        result.insert(path.to_string(), "Enabled".to_string());
-    } else if path.contains("PortMappingNumberOfEntries") {
-        result.insert(path.to_string(), "0".to_string());
-    } else if path.contains("DMZEnable") {
-        // Check if DMZ is enabled in firewall config
-        let dmz = std::process::Command::new("uci")
-            .args(["get", "firewall.dmz.enabled"])
-            .output()
-            .ok()
-            .and_then(|o| String::from_utf8(o.stdout).ok())
-            .map(|s| s.trim() == "1" || s.trim() == "true")
-            .unwrap_or(false);
-        result.insert(path.to_string(), dmz.to_string());
-    } else if path.contains("DMZHost") {
-        let host = std::process::Command::new("uci")
-            .args(["get", "firewall.dmz.dest_ip"])
-            .output()
-            .ok()
-            .and_then(|o| String::from_utf8(o.stdout).ok())
-            .map(|s| s.trim().to_string())
-            .unwrap_or_default();
-        result.insert(path.to_string(), host);
-    }
-
-    result
-}
-
-// ── Firewall ────────────────────────────────────────────────────────────────
-
-fn handle_firewall(path: &str) -> Params {
-    let mut result = Params::new();
-
-    if path.ends_with("Level") {
-        let level = uci_get_raw("firewall.@defaults[0].input")
-            .map(|s| match s.as_str() {
-                "ACCEPT" => "Low",
-                "REJECT" => "High",
-                "DROP" => "High",
-                _ => "Medium",
-            })
-            .unwrap_or("Medium");
-        result.insert(path.to_string(), level.to_string());
-    } else if path.ends_with("Config") {
-        result.insert(path.to_string(), "Standard".to_string());
-    } else if path.ends_with("X_OptimACS_SynFlood") {
-        let val = uci_get_raw("firewall.@defaults[0].syn_flood").unwrap_or_default();
-        let enabled = val == "1" || val == "true";
-        result.insert(path.to_string(), enabled.to_string());
-    } else if path.ends_with("X_OptimACS_DropInvalid") {
-        let val = uci_get_raw("firewall.@defaults[0].drop_invalid").unwrap_or_default();
-        let enabled = val == "1" || val == "true";
-        result.insert(path.to_string(), enabled.to_string());
-    } else if path.ends_with("X_OptimACS_Input") {
-        let val =
-            uci_get_raw("firewall.@defaults[0].input").unwrap_or_else(|| "REJECT".to_string());
-        result.insert(path.to_string(), val);
-    } else if path.ends_with("X_OptimACS_Output") {
-        let val =
-            uci_get_raw("firewall.@defaults[0].output").unwrap_or_else(|| "ACCEPT".to_string());
-        result.insert(path.to_string(), val);
-    } else if path.ends_with("X_OptimACS_Forward") {
-        let val =
-            uci_get_raw("firewall.@defaults[0].forward").unwrap_or_else(|| "REJECT".to_string());
-        result.insert(path.to_string(), val);
-    } else if path.ends_with("X_OptimACS_FlowOffloading") {
-        let val = uci_get_raw("firewall.@defaults[0].flow_offloading").unwrap_or_default();
-        let enabled = val == "1" || val == "true";
-        result.insert(path.to_string(), enabled.to_string());
-    } else if path.ends_with("ZoneNumberOfEntries") {
-        // Count firewall zones
-        let output = std::process::Command::new("uci")
-            .args(["show", "firewall"])
-            .output()
-            .ok()
-            .and_then(|o| String::from_utf8(o.stdout).ok())
-            .unwrap_or_default();
-        let count = output
-            .lines()
-            .filter(|l| l.contains("@zone[") && l.contains(".name="))
-            .count();
-        result.insert(path.to_string(), count.to_string());
-    }
-
-    result
-}
+// NOTE: handle_nat and handle_firewall have been moved to dedicated modules
+// nat.rs and firewall_dm.rs respectively. Dispatch in mod.rs routes directly.
 
 /// Helper to read a UCI value and return trimmed Option<String>
 fn uci_get_raw(key: &str) -> Option<String> {
@@ -486,22 +492,13 @@ fn get_wg_peers(iface: &str) -> Vec<WgPeer> {
         let fields: Vec<&str> = line.split('\t').collect();
         if fields.len() >= 8 {
             let handshake_epoch = fields[4].parse::<u64>().unwrap_or(0);
+            // LastHandshakeTime must be a dateTime value (ISO 8601), not a
+            // human-readable relative string.  Use the empty string when there
+            // has never been a handshake (epoch == 0).
             let handshake_str = if handshake_epoch == 0 {
-                "Never".to_string()
+                String::new()
             } else {
-                // Seconds ago
-                let now = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_secs())
-                    .unwrap_or(0);
-                let ago = now.saturating_sub(handshake_epoch);
-                if ago < 60 {
-                    format!("{}s ago", ago)
-                } else if ago < 3600 {
-                    format!("{}m ago", ago / 60)
-                } else {
-                    format!("{}h {}m ago", ago / 3600, (ago % 3600) / 60)
-                }
+                epoch_to_iso8601(handshake_epoch)
             };
 
             peers.push(WgPeer {
@@ -635,13 +632,21 @@ fn handle_time(path: &str) -> Params {
             .unwrap_or_else(|| "UTC".to_string());
         result.insert(path.to_string(), tz);
     } else if path.ends_with("CurrentLocalTime") {
+        // TR-181 dateTime must be ISO 8601 / TR-106 format: "YYYY-MM-DDTHH:MM:SSZ"
         let now = std::process::Command::new("date")
-            .args(["+%Y-%m-%d %H:%M:%S"])
+            .args(["-u", "+%Y-%m-%dT%H:%M:%SZ"])
             .output()
             .ok()
             .and_then(|o| String::from_utf8(o.stdout).ok())
             .map(|s| s.trim().to_string())
-            .unwrap_or_default();
+            .unwrap_or_else(|| {
+                // Fallback: compute from epoch via UNIX_EPOCH
+                let secs = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+                epoch_to_iso8601(secs)
+            });
         result.insert(path.to_string(), now);
     }
 
@@ -1238,6 +1243,59 @@ fn get_dhcp_pools() -> Vec<String> {
 }
 
 // ── Helper Functions ────────────────────────────────────────────────────────
+
+/// Count UCI network interfaces that have a proto= option (real IP interfaces).
+fn count_network_interfaces() -> usize {
+    let out = std::process::Command::new("uci")
+        .args(["show", "network"])
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .unwrap_or_default();
+    let mut sections: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for line in out.lines() {
+        if line.starts_with("network.") && line.contains(".proto=") {
+            if let Some(section) = line.split('.').nth(1) {
+                if !section.starts_with('@') && section != "globals" {
+                    sections.insert(section.to_string());
+                }
+            }
+        }
+    }
+    sections.len().max(1)
+}
+
+/// Convert Unix epoch seconds to ISO 8601 / TR-106 dateTime string.
+/// Format: "YYYY-MM-DDTHH:MM:SSZ"
+fn epoch_to_iso8601(secs: u64) -> String {
+    let mut remaining = secs;
+    let ss = remaining % 60;
+    remaining /= 60;
+    let mm = remaining % 60;
+    remaining /= 60;
+    let hh = remaining % 24;
+    let mut days = remaining / 24;
+    let mut year: u64 = 1970;
+    loop {
+        let days_in_year = if is_leap(year) { 366 } else { 365 };
+        if days < days_in_year { break; }
+        days -= days_in_year;
+        year += 1;
+    }
+    let leap = is_leap(year);
+    let month_days: [u64; 12] = [31, if leap { 29 } else { 28 }, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    let mut month: u64 = 1;
+    for &md in &month_days {
+        if days < md { break; }
+        days -= md;
+        month += 1;
+    }
+    format!("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z", year, month, days + 1, hh, mm, ss)
+}
+
+fn is_leap(y: u64) -> bool {
+    (y % 4 == 0 && y % 100 != 0) || y % 400 == 0
+}
 
 fn extract_index(path: &str, prefix: &str) -> Option<usize> {
     if let Some(start) = path.find(prefix) {
