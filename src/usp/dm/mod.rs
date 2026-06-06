@@ -7,6 +7,7 @@
 
 pub mod bridge;
 pub mod bridging;
+pub mod fingerprint;
 pub mod bulk_data;
 pub mod device_info;
 pub mod dhcp;
@@ -239,6 +240,8 @@ async fn dispatch_get(cfg: &ClientConfig, path: &str) -> Params {
         ieee8021x::get(cfg, path).await
     } else if path.starts_with("Device.Services.") {
         voip::get(cfg, path).await
+    } else if path.starts_with("Device.X_OptimACS_FP.") {
+        fingerprint::get(cfg, path).await
     } else if path.starts_with("Device.X_OptimACS_Network.Bridge.")
         || path.starts_with("Device.X_OptimACS_Network.Bridge")
     {

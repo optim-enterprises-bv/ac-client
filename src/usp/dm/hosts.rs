@@ -51,6 +51,13 @@ pub async fn get(_cfg: &ClientConfig, _path: &str) -> HashMap<String, String> {
         }
         m.insert(format!("{base}Active"), active.to_string());
         m.insert(format!("{base}AddressSource"), "DHCP".to_string());
+        // Enrich with VendorClassID from DHCP snoop if available.
+        if let Some(vc) = crate::dhcp_snoop::table()
+            .and_then(|t| t.lock().ok())
+            .and_then(|tbl| tbl.get(&mac).and_then(|fp| fp.vendor_class.clone()))
+        {
+            m.insert(format!("{base}VendorClassID"), vc);
+        }
         // Layer references — DHCP leases don't specify the interface directly,
         // but on OpenWrt the LAN bridge (br-lan) serves DHCP clients.
         m.insert(

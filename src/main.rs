@@ -6,12 +6,18 @@
 
 mod apply;
 mod config;
+mod dhcp_snoop;
 mod error;
 mod gnss;
+mod lldp_snoop;
+mod mdns_snoop;
+mod nbns_snoop;
 mod proto;
+mod ssdp_snoop;
 mod tls;
 mod usp;
 mod util;
+mod wifi_snoop;
 
 use std::path::PathBuf;
 use std::process;
@@ -150,6 +156,41 @@ async fn main() {
     let cfg = Arc::new(cfg);
 
     info!("ac-client starting (MTP={:?})", cfg.mtp);
+
+    // Initialise DHCP fingerprint table and start passive sniffer.
+    // Default LAN bridge on OpenWrt is br-lan; non-fatal if it doesn't exist.
+    dhcp_snoop::init();
+    dhcp_snoop::spawn("br-lan");
+    info!("DHCP fingerprint sniffer started on br-lan");
+
+    // Initialise mDNS sniffer — captures Bonjour PTR+TXT records (Apple, Cast, Hue, …).
+    mdns_snoop::init();
+    mdns_snoop::spawn("br-lan");
+    info!("mDNS fingerprint sniffer started on br-lan");
+
+    // 802.11 IE fingerprinting — polls hostapd via ubus every 30s.
+    // Identifies Apple (vendor IE 00:17:f2), Qualcomm, Broadcom, Ralink chipsets.
+    wifi_snoop::init();
+    wifi_snoop::spawn();
+    info!("WiFi IE fingerprint poller started");
+
+    // UPnP/SSDP sniffer — captures NOTIFY messages on UDP 239.255.255.250:1900.
+    // Identifies Roku, Chromecast, Samsung TV, LG TV, media servers.
+    ssdp_snoop::init();
+    ssdp_snoop::spawn("br-lan");
+    info!("SSDP fingerprint sniffer started on br-lan");
+
+    // LLDP sniffer — captures EtherType 0x88CC frames.
+    // Identifies IP phones, managed switches, enterprise APs.
+    lldp_snoop::init();
+    lldp_snoop::spawn("br-lan");
+    info!("LLDP fingerprint sniffer started on br-lan");
+
+    // NetBIOS Name Service sniffer — captures UDP port 137 broadcasts.
+    // Identifies Windows PCs via their computer name (DESKTOP-XXXXX).
+    nbns_snoop::init();
+    nbns_snoop::spawn("br-lan");
+    info!("NBNS fingerprint sniffer started on br-lan");
 
     // Start GNSS reader (non-fatal if device not present)
     let gnss_pos = if cfg.gnss_dev.is_empty() {
