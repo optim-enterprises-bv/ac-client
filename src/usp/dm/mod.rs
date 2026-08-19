@@ -5,6 +5,7 @@
 
 #![allow(dead_code)]
 
+pub mod appfilter;
 pub mod bridge;
 pub mod device_info;
 pub mod dhcp;
@@ -169,6 +170,10 @@ async fn dispatch_get(cfg: &ClientConfig, path: &str) -> Params {
         || path.starts_with("Device.X_OptimACS_Network.Bridge")
     {
         bridge::get(cfg, path).await
+    } else if path.starts_with("Device.X_OptimACS_AppFilter")
+        || path.starts_with("Device.X_OptimACS_NDPI")
+    {
+        appfilter::get(cfg, path)
     } else if path.starts_with("Device.X_OptimACS_Firmware.") {
         firmware::get(cfg, path)
     } else if path.starts_with("Device.IP.")
@@ -210,6 +215,10 @@ async fn dispatch_set(cfg: &ClientConfig, path: &str, value: &str) -> Result<(),
         bridge::set(cfg, path, value).await
     } else if path.starts_with("Device.X_OptimACS_Security.") {
         security::set(cfg, path, value).await
+    } else if path.starts_with("Device.X_OptimACS_AppFilter.")
+        || path.starts_with("Device.X_OptimACS_NDPI.")
+    {
+        appfilter::set(cfg, path, value).await
     } else {
         Err(format!("read-only or unknown path: {path}"))
     }
