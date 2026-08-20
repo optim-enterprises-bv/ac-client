@@ -24,31 +24,31 @@
 config optimacs 'agent'
 
 	# ── Server / MTP ──────────────────────────────────────────────────────
-	# Hostname or IP of the OptimACS server (used to build ws_url when
+	# Hostname or IP of the controller (used to build ws_url when
 	# ws_url is left empty).
 	# For local testing, use your ac-server IP: option server_host '192.168.10.5'
-	option server_host   'usp.optimcloud.com'
+	option server_host   'gw.aether-io.com'
 
 	# TCP port for the legacy ACP/TLS connection (default: 3490).
 	# Also used as the fallback WS port when ws_url is not set.
-	option server_port   '3491'
+	option server_port   '443'
 
 	# TLS SNI name — must match the CN in the server's certificate.
 	# For local testing, use the server IP: option server_cn '192.168.10.5'
-	option server_cn     'usp.optimcloud.com'
+	option server_cn     'gw.aether-io.com'
 
 	# ── USP Message Transport Protocol (MTP) ──────────────────────────────
 	# Which MTP(s) to use: websocket | mqtt | both
-	option mtp           'mqtt'
+	option mtp           'websocket'
 
-	# WebSocket MTP: direct WSS URL to ac-server.
+	# WebSocket MTP: direct WSS URL to the controller.
 	# When left empty, built automatically from server_host + server_port.
 	# For local testing: option ws_url 'wss://192.168.10.5:3491'
-	# option ws_url      'wss://usp.optimcloud.com:3491/usp'
+	option ws_url        'wss://gw.aether-io.com/usp'
 
 	# MQTT MTP: URL of the EMQX (or other) broker.
 	# Required only when mtp = mqtt or mtp = both.
-	option mqtt_url      'mqtt://emqx.optimcloud.com:1883'
+	# option mqtt_url    'mqtt://emqx.optimcloud.com:1883'
 
 	# ── USP endpoint identifiers ───────────────────────────────────────────
 	# Agent endpoint ID sent in every USP Record.
@@ -57,8 +57,8 @@ config optimacs 'agent'
 	# option usp_endpoint_id ''
 
 	# Controller endpoint ID that this agent will accept messages from.
-	# This must match the USP_ENDPOINT_ID configured on ac-server.
-	option controller_id 'OptimACS-Controller-1'
+	# This must match the USP_ENDPOINT_ID configured on the controller.
+	option controller_id 'oui:00005A:Aether-Controller-1'
 
 	# Account claim token from the OptimACS dashboard.
 	# Links this device to your tenant account on first Boot! connect.
@@ -66,7 +66,12 @@ config optimacs 'agent'
 
 	# ── TLS / certificate paths ────────────────────────────────────────────
 	# CA certificate — used to verify the server's TLS certificate.
-	option ca_file       '/etc/apclient/init/ca.crt'
+	# build_tls_config() seeds its trust store ONLY from this file; no system
+	# or webpki roots are loaded. The default controller terminates TLS at a
+	# public CA (Let's Encrypt), so this points at the ca-bundle trust store.
+	# For a private controller, point this at that CA instead, e.g.
+	#   option ca_file '/etc/apclient/init/ca.crt'
+	option ca_file       '/etc/ssl/certs/ca-certificates.crt'
 
 	# Init (bootstrap) certificate, used before the device is provisioned.
 	option init_cert     '/etc/apclient/init/client.crt'

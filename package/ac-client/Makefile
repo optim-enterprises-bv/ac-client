@@ -26,7 +26,7 @@ include $(TOPDIR)/rules.mk
 
 PKG_NAME    := ac-client
 PKG_VERSION := 0.1.0
-PKG_RELEASE := 1
+PKG_RELEASE := 2
 
 # ── Source ───────────────────────────────────────────────────────────────────
 # The ac-client crate is the root of this repository.  Proto files are
@@ -51,7 +51,7 @@ define Package/ac-client
   SUBMENU   := Management
   TITLE     := USP Agent daemon for OpenWrt APs (TR-369 / USP 1.3)
   URL       := https://github.com/optim-enterprises-bv/ac-client
-  DEPENDS   := +libc
+  DEPENDS   := +libc +ca-bundle
   MAINTAINER:= Optim Enterprises BV
 endef
 
