@@ -294,9 +294,20 @@ pub fn read_device_arch() -> String {
     {
         let text = String::from_utf8_lossy(&output.stdout);
         for line in text.lines() {
-            // Look for "system" field which often contains CPU info
-            if let Some(idx) = line.find("\"system\":") {
-                if let Some(start) = line[idx..].find('"').map(|i| idx + i + 1) {
+            // Look for "system" field which often contains CPU info.
+            //
+            // Search from AFTER the key token: `line.find("\"system\":")` returns
+            // the index of the key's own opening quote, so scanning for '"' from
+            // there matches that same quote and yields the key name rather than
+            // the value. On aarch64 this reported HardwareVersion as the literal
+            // string "system" instead of e.g. "ARMv8 Processor rev 0", because
+            // /proc/cpuinfo has no "model name" line on arm64 and every device
+            // falls through to here.
+            const KEY: &str = "\"system\":";
+            if let Some(idx) = line.find(KEY) {
+                let after = idx + KEY.len();
+                if let Some(rel) = line[after..].find('"') {
+                    let start = after + rel + 1;
                     if let Some(end) = line[start..].find('"') {
                         let system = &line[start..start + end];
                         if !system.is_empty() && system != "target" {

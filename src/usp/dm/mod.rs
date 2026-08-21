@@ -8,6 +8,7 @@
 pub mod appfilter;
 pub mod bridge;
 pub mod device_info;
+pub mod dpi;
 pub mod dhcp;
 pub mod firmware;
 pub mod hosts;

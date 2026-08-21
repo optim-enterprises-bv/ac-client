@@ -92,6 +92,12 @@ pub fn get(_cfg: &ClientConfig, path: &str) -> HashMap<String, String> {
         if !apps.is_empty() {
             m.insert("Device.X_OptimACS_AppFilter.AppList".into(), apps);
         }
+        // Observed classification results, merged from the engine's several
+        // per-MAC ubus methods into one envelope. Served from a 300s cache so
+        // the merge never rides the controller's parameter poll — see dm::dpi.
+        if let Some(t) = super::dpi::oaf_telemetry() {
+            m.insert("Device.X_OptimACS_AppFilter.Telemetry".into(), t);
+        }
     }
 
     if path.starts_with("Device.X_OptimACS_NDPI") {
