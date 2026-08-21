@@ -12,7 +12,12 @@ use log::{debug, error, info, trace};
 
 // Default interval constants (seconds)
 const PORT: u16 = 3490;
-const STATUS_INTERVAL: u64 = 300;
+// Also the only periodic traffic on the WebSocket MTP, so it doubles as the
+// idle-timeout guard: it must stay below the shortest idle timeout on the path
+// or the connection is reaped before the heartbeat fires. Cloudflare closes an
+// idle WebSocket at ~126s; at the previous default of 300 a board reconnected
+// every 128-152s, re-running the full onboard each time.
+const STATUS_INTERVAL: u64 = 60;
 const UPDATE_INTERVAL: u64 = 60;
 
 /// MTP selection for the USP Agent.

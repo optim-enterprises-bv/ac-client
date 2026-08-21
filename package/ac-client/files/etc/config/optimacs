@@ -101,7 +101,20 @@ config optimacs 'agent'
 	option update_interval '60'
 
 	# How often ac-client sends a STATUS heartbeat (uptime, load, wifi …).
-	option status_interval '300'
+	#
+	# This doubles as the only periodic traffic on the WebSocket MTP, so it
+	# also determines whether the connection survives an idle timeout. It must
+	# stay comfortably BELOW the shortest idle timeout on the path, or the
+	# connection is reaped before the heartbeat ever fires and the agent
+	# reconnects forever.
+	#
+	# Measured on the default endpoint: Cloudflare closes an idle WebSocket at
+	# ~126s, the ingress behind it at ~300s. At the old default of 300 a board
+	# dropped every 128-152s and re-ran the full onboard each time (~28 per
+	# hour). At 60 the same board held one connection indefinitely.
+	#
+	# Raise this only if you know every idle timeout on your path.
+	option status_interval '60'
 
 	# How often ac-client runs a camera discovery + capture cycle.
 	option cam_interval    '360'
