@@ -72,40 +72,143 @@ fn parse_host_index(path: &str) -> Option<usize> {
     }
 }
 
-pub async fn get(_cfg: &ClientConfig, _path: &str) -> HashMap<String, String> {
-    let mut m = HashMap::new();
-    let dns_entries = get_dns_entries();
+/// One entry in the LAN host table.
+struct Host {
+    mac: String,
+    ip: String,
+    hostname: String,
+    active: bool,
+    source: &'static str,
+}
 
-    // First, read from /etc/hosts
-    let content = std::fs::read_to_string("/etc/hosts").unwrap_or_default();
-    let mut idx = 1u32;
+/// The bridge carrying LAN clients, e.g. `br-lan`.
+///
+/// Used to keep the WAN side out of the host table: the upstream gateway shows
+/// up in the neighbour table like any other peer, and reporting it as a LAN
+/// host would attribute its traffic to this subscriber.
+fn lan_device() -> String {
+    let out = std::process::Command::new("uci")
+        .args(["get", "network.lan.device"])
+        .output()
+        .ok();
+    let dev = out
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default();
+    if dev.is_empty() {
+        "br-lan".to_string()
+    } else {
+        dev
+    }
+}
 
-    for line in content.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
+/// DHCP leases: `<expiry> <mac> <ip> <hostname> <clientid>`.
+///
+/// Authoritative for the MAC/hostname pairing. dnsmasq writes `*` when the
+/// client offered no hostname.
+fn leases() -> Vec<Host> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let mut out = Vec::new();
+    for path in ["/tmp/dhcp.leases", "/var/dhcp.leases"] {
+        let Ok(text) = std::fs::read_to_string(path) else {
+            continue;
+        };
+        for line in text.lines() {
+            let f: Vec<&str> = line.split_whitespace().collect();
+            if f.len() < 4 {
+                continue;
+            }
+            let expiry: u64 = f[0].parse().unwrap_or(0);
+            out.push(Host {
+                mac: f[1].to_ascii_lowercase(),
+                ip: f[2].to_string(),
+                // `*` means the client sent no hostname; report empty rather
+                // than a literal asterisk.
+                hostname: if f[3] == "*" { String::new() } else { f[3].to_string() },
+                // expiry 0 means an infinite lease.
+                active: expiry == 0 || expiry > now,
+                source: "DHCP",
+            });
+        }
+        break;
+    }
+    out
+}
+
+/// ARP/neighbour entries on the LAN bridge.
+///
+/// Picks up statically-addressed clients that never took a lease, which a
+/// lease-only view would miss entirely.
+fn neighbours(lan: &str) -> Vec<Host> {
+    let Ok(text) = std::fs::read_to_string("/proc/net/arp") else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for line in text.lines().skip(1) {
+        let f: Vec<&str> = line.split_whitespace().collect();
+        if f.len() < 6 {
             continue;
         }
-        let mut parts = line.split_whitespace();
-        let ip = parts.next().unwrap_or("");
-        let hostname = parts.next().unwrap_or("");
-        if !ip.is_empty() && !hostname.is_empty() {
-            let base = format!("Device.Hosts.Host.{idx}.");
-            m.insert(format!("{base}IPAddress"), ip.into());
-            m.insert(format!("{base}HostName"), hostname.into());
-            m.insert(format!("{base}Active"), "true".to_string());
-            idx += 1;
+        let (ip, flags, mac, dev) = (f[0], f[2], f[3].to_ascii_lowercase(), f[5]);
+        // flags 0x0 is an incomplete entry: an address we probed and never
+        // heard from. Reporting it would invent a client.
+        if dev != lan || flags == "0x0" || mac == "00:00:00:00:00:00" {
+            continue;
+        }
+        out.push(Host {
+            mac,
+            ip: ip.to_string(),
+            hostname: String::new(),
+            active: true,
+            source: "ARP",
+        });
+    }
+    out
+}
+
+/// TR-181 `Device.Hosts.` — the LAN host table.
+///
+/// Previously this reported `/etc/hosts` plus dnsmasq's static DNS entries,
+/// which on a default OpenWrt box means four loopback and IPv6 multicast rows
+/// and nothing else. It also never emitted `PhysAddress` at all.
+///
+/// That matters beyond tidiness: a controller resolves a client's identity from
+/// this table, and DPI or policy data keyed on a MAC it has never seen through
+/// an independent source cannot be attributed to anyone. A host table without
+/// MACs is not a partial answer, it is an unusable one.
+///
+/// Real sources, merged by MAC: DHCP leases first (they carry the hostname),
+/// then ARP for anything statically addressed that never took a lease.
+pub async fn get(_cfg: &ClientConfig, _path: &str) -> HashMap<String, String> {
+    let lan = lan_device();
+    let mut hosts: Vec<Host> = leases();
+
+    for n in neighbours(&lan) {
+        if let Some(existing) = hosts.iter_mut().find(|h| h.mac == n.mac) {
+            // A live ARP entry is better evidence of presence than a lease that
+            // merely has not expired.
+            existing.active = true;
+            if existing.ip.is_empty() {
+                existing.ip = n.ip;
+            }
+        } else {
+            hosts.push(n);
         }
     }
 
-    // Then add DNS entries from UCI
-    for (ip, hostname) in &dns_entries {
-        let base = format!("Device.Hosts.Host.{idx}.");
-        m.insert(format!("{base}IPAddress"), ip.clone());
-        m.insert(format!("{base}HostName"), hostname.clone());
-        m.insert(format!("{base}Active"), "true".to_string());
-        idx += 1;
+    let mut m = HashMap::new();
+    for (i, h) in hosts.iter().enumerate() {
+        let base = format!("Device.Hosts.Host.{}.", i + 1);
+        m.insert(format!("{base}PhysAddress"), h.mac.clone());
+        m.insert(format!("{base}IPAddress"), h.ip.clone());
+        m.insert(format!("{base}HostName"), h.hostname.clone());
+        m.insert(format!("{base}Active"), h.active.to_string());
+        m.insert(format!("{base}AddressSource"), h.source.to_string());
+        m.insert(format!("{base}InterfaceType"), "Ethernet".to_string());
     }
-
+    m.insert("Device.Hosts.HostNumberOfEntries".into(), hosts.len().to_string());
     m
 }
 
