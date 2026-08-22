@@ -997,4 +997,26 @@ oui:{vendor-oui}:{mac-address-without-colons}
 
 ## License
 
-Copyright (c) 2026 Optim Enterprises BV. Released under the [BSD 3-Clause License](LICENSE).
+Copyright (c) 2026 Optim Enterprises BV.
+Licensed under the [Business Source License 1.1](LICENSE) — source-available,
+not open source.
+
+You may read, modify, redistribute and make non-production use of this freely.
+**Production use is granted for use with the Aether platform**; production use
+with, or to interoperate with, any other USP controller, management platform or
+cloud service requires a commercial licence. Converts to **GPL-2.0-or-later on
+2030-08-22**.
+
+The gate is which controller you point at, not whether you are a commercial
+entity. An operator running Aether is covered; the same operator pointing this
+agent at a different ACS is not.
+
+This matters more here than for a typical device agent: USP/TR-369 is a
+standard, so this agent would otherwise interoperate with any compliant
+controller — including a competitor's.
+
+For commercial licensing: `licensing@optimcloud.com`.
+
+Versions published before 2026-08-22 were released under BSD-3-Clause and
+remain available to their recipients under those terms; this change applies
+going forward.
