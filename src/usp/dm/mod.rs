@@ -17,6 +17,7 @@ pub mod ip;
 pub mod misc;
 pub mod reputation;
 pub mod security;
+pub mod sensing;
 pub mod wifi;
 
 use crate::config::ClientConfig;
@@ -181,6 +182,8 @@ async fn dispatch_get(cfg: &ClientConfig, path: &str) -> Params {
         enforcement::get(cfg, path)
     } else if path.starts_with("Device.X_OptimACS_Reputation") {
         reputation::get(cfg, path)
+    } else if path.starts_with("Device.X_OptimACS_Sensing") {
+        sensing::get(cfg, path)
     } else if path.starts_with("Device.X_OptimACS_Firmware.") {
         firmware::get(cfg, path)
     } else if path.starts_with("Device.IP.")
