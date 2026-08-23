@@ -9,6 +9,7 @@ pub mod appfilter;
 pub mod bridge;
 pub mod device_info;
 pub mod dpi;
+pub mod enforcement;
 pub mod dhcp;
 pub mod firmware;
 pub mod hosts;
@@ -175,6 +176,8 @@ async fn dispatch_get(cfg: &ClientConfig, path: &str) -> Params {
         || path.starts_with("Device.X_OptimACS_NDPI")
     {
         appfilter::get(cfg, path)
+    } else if path.starts_with("Device.X_OptimACS_Enforcement") {
+        enforcement::get(cfg, path)
     } else if path.starts_with("Device.X_OptimACS_Firmware.") {
         firmware::get(cfg, path)
     } else if path.starts_with("Device.IP.")
