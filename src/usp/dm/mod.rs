@@ -8,13 +8,14 @@
 pub mod appfilter;
 pub mod bridge;
 pub mod device_info;
+pub mod dhcp;
 pub mod dpi;
 pub mod enforcement;
-pub mod dhcp;
 pub mod firmware;
 pub mod hosts;
 pub mod ip;
 pub mod misc;
+pub mod reputation;
 pub mod security;
 pub mod wifi;
 
@@ -178,6 +179,8 @@ async fn dispatch_get(cfg: &ClientConfig, path: &str) -> Params {
         appfilter::get(cfg, path)
     } else if path.starts_with("Device.X_OptimACS_Enforcement") {
         enforcement::get(cfg, path)
+    } else if path.starts_with("Device.X_OptimACS_Reputation") {
+        reputation::get(cfg, path)
     } else if path.starts_with("Device.X_OptimACS_Firmware.") {
         firmware::get(cfg, path)
     } else if path.starts_with("Device.IP.")
@@ -223,6 +226,8 @@ async fn dispatch_set(cfg: &ClientConfig, path: &str, value: &str) -> Result<(),
         || path.starts_with("Device.X_OptimACS_NDPI.")
     {
         appfilter::set(cfg, path, value).await
+    } else if path.starts_with("Device.X_OptimACS_Reputation.") {
+        reputation::set(cfg, path, value)
     } else {
         Err(format!("read-only or unknown path: {path}"))
     }

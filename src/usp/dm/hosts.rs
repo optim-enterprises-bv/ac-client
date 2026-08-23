@@ -126,7 +126,11 @@ fn leases() -> Vec<Host> {
                 ip: f[2].to_string(),
                 // `*` means the client sent no hostname; report empty rather
                 // than a literal asterisk.
-                hostname: if f[3] == "*" { String::new() } else { f[3].to_string() },
+                hostname: if f[3] == "*" {
+                    String::new()
+                } else {
+                    f[3].to_string()
+                },
                 // expiry 0 means an infinite lease.
                 active: expiry == 0 || expiry > now,
                 source: "DHCP",
@@ -208,7 +212,10 @@ pub async fn get(_cfg: &ClientConfig, _path: &str) -> HashMap<String, String> {
         m.insert(format!("{base}AddressSource"), h.source.to_string());
         m.insert(format!("{base}InterfaceType"), "Ethernet".to_string());
     }
-    m.insert("Device.Hosts.HostNumberOfEntries".into(), hosts.len().to_string());
+    m.insert(
+        "Device.Hosts.HostNumberOfEntries".into(),
+        hosts.len().to_string(),
+    );
     m
 }
 
