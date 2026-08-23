@@ -10,6 +10,7 @@ pub mod bridge;
 pub mod device_info;
 pub mod dhcp;
 pub mod dpi;
+pub mod dpi_flows;
 pub mod enforcement;
 pub mod firmware;
 pub mod hosts;
@@ -184,6 +185,8 @@ async fn dispatch_get(cfg: &ClientConfig, path: &str) -> Params {
         reputation::get(cfg, path)
     } else if path.starts_with("Device.X_OptimACS_Sensing") {
         sensing::get(cfg, path)
+    } else if path.starts_with("Device.X_OptimACS_DPI") {
+        dpi_flows::get(cfg, path)
     } else if path.starts_with("Device.X_OptimACS_Firmware.") {
         firmware::get(cfg, path)
     } else if path.starts_with("Device.IP.")
