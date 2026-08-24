@@ -50,6 +50,15 @@ const SPOOL: &str = "/var/spool/ac-client/ndpid";
 /// Events per batch file.
 const BATCH_EVENTS: usize = 128;
 
+/// Longest a buffered event waits before its batch is written.
+///
+/// Without this a quiet link never reaches BATCH_EVENTS and nothing is ever
+/// spooled: the collector connects, reads, counts, and produces no output at
+/// all. Observed on the BPI-R4 -- 90 seconds of generated traffic, socket
+/// connected, spool empty. `aether-sensord` flushes on its daemon interval for
+/// exactly this reason.
+const FLUSH_SECS: u64 = 60;
+
 /// Batches kept before the oldest is dropped. The courier deletes what it
 /// ships, so this only fills when nothing is collecting.
 const MAX_BATCHES: usize = 16;
@@ -266,9 +275,24 @@ async fn drain(stream: &mut UnixStream, b: &mut Batcher) -> io::Result<()> {
     let mut chunk = [0u8; 16 * 1024];
     let mut arp = arp_table();
     let mut since_arp = 0usize;
+    let mut ticker = tokio::time::interval(std::time::Duration::from_secs(FLUSH_SECS));
+    // The first tick fires immediately; skip it so an empty buffer does not
+    // produce a batch of nothing on connect.
+    ticker.tick().await;
 
     loop {
-        let n = stream.read(&mut chunk).await?;
+        let n = tokio::select! {
+            // Time-based flush, so a link too quiet to fill a batch still
+            // reports. Biased towards the read: under load the counter matters
+            // more than the timer, and a flush that waits one extra chunk is
+            // harmless.
+            _ = ticker.tick() => {
+                b.flush();
+                continue;
+            }
+            r = stream.read(&mut chunk) => r?,
+        };
+
         if n == 0 {
             b.flush();
             return Err(io::Error::new(
@@ -283,7 +307,12 @@ async fn drain(stream: &mut UnixStream, b: &mut Batcher) -> io::Result<()> {
                 // A frame header that will never parse means the stream is
                 // desynchronised; dropping the connection and reconnecting is
                 // the only way back to a known position.
-                if buf.len() >= 5 && std::str::from_utf8(&buf[..5]).ok().and_then(|h| h.parse::<usize>().ok()).is_none() {
+                if buf.len() >= 5
+                    && std::str::from_utf8(&buf[..5])
+                        .ok()
+                        .and_then(|h| h.parse::<usize>().ok())
+                        .is_none()
+                {
                     b.flush();
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidData,
@@ -425,6 +454,17 @@ mod tests {
         // arp_table() filters these out; assert the shape that matters if one
         // ever slipped through a different reader.
         assert_eq!(arp.get("192.168.1.7").map(|s| s.as_str()), Some("00:00:00:00:00:00"));
+    }
+
+    /// A batch must be written on a timer as well as on a count, or a link
+    /// too quiet to produce 128 events spools nothing at all.
+    #[test]
+    fn a_quiet_link_still_flushes() {
+        assert!(FLUSH_SECS > 0, "a zero interval would spin");
+        assert!(
+            FLUSH_SECS <= 300,
+            "waiting longer than the controller's poll makes every batch stale"
+        );
     }
 
     #[test]
