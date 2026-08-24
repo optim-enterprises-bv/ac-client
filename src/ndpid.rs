@@ -80,32 +80,75 @@ const MAX_FRAME: usize = 99_999;
 /// the uplink for no extra fact.
 const WANTED: &[&str] = &["detected", "detection-update", "end", "idle"];
 
-/// Read `/proc/net/arp` into an IP -> MAC map.
+/// Read the neighbour tables into an IP -> MAC map.
 ///
-/// Re-read per batch rather than cached for the process lifetime: a lease
+/// BOTH families. `/proc/net/arp` is IPv4-only, and reading it alone made every
+/// IPv6 flow unattributable by construction -- on a dual-stack subscriber
+/// network that silently under-reports usage for whichever share of traffic is
+/// v6, which is most of it on a modern handset. Measured on the BPI-R4: the
+/// only unattributed flow in a 59-flow sample was IPv6.
+///
+/// Re-read periodically rather than cached for the process lifetime: a lease
 /// changing hands mid-session would otherwise attribute one subscriber's
 /// traffic to another, which is worse than failing to attribute it.
 fn arp_table() -> HashMap<String, String> {
     let mut m = HashMap::new();
-    let Ok(text) = fs::read_to_string("/proc/net/arp") else {
-        return m;
-    };
-    for line in text.lines().skip(1) {
-        let mut f = line.split_whitespace();
-        let (Some(ip), Some(_hw), Some(_flags), Some(mac)) =
-            (f.next(), f.next(), f.next(), f.next())
-        else {
-            continue;
-        };
-        // 00:00:00:00:00:00 is the kernel's placeholder for an incomplete
-        // entry. Storing it would attribute every unresolved host to one
-        // fictional client.
-        if mac == "00:00:00:00:00:00" {
-            continue;
+
+    // IPv4: space-separated, `IP HWtype Flags HWaddr Mask Device`.
+    if let Ok(text) = fs::read_to_string("/proc/net/arp") {
+        for line in text.lines().skip(1) {
+            let mut f = line.split_whitespace();
+            let (Some(ip), Some(_hw), Some(_flags), Some(mac)) =
+                (f.next(), f.next(), f.next(), f.next())
+            else {
+                continue;
+            };
+            // The kernel's placeholder for an incomplete entry. Storing it
+            // would attribute every unresolved host to one fictional client.
+            if mac == "00:00:00:00:00:00" {
+                continue;
+            }
+            m.insert(ip.to_string(), mac.to_ascii_lowercase());
         }
-        m.insert(ip.to_string(), mac.to_ascii_lowercase());
     }
+
+    // IPv6 has no /proc equivalent, so the neighbour table comes from iproute2.
+    // `ip -6 neigh show` prints `<addr> dev <ifname> lladdr <mac> <state>`;
+    // entries without an lladdr (FAILED, INCOMPLETE) are skipped rather than
+    // recorded as a client we cannot name.
+    if let Ok(out) = std::process::Command::new("ip")
+        .args(["-6", "neigh", "show"])
+        .output()
+    {
+        for line in String::from_utf8_lossy(&out.stdout).lines() {
+            let f: Vec<&str> = line.split_whitespace().collect();
+            let Some(addr) = f.first() else { continue };
+            let Some(i) = f.iter().position(|t| *t == "lladdr") else {
+                continue;
+            };
+            let Some(mac) = f.get(i + 1) else { continue };
+            if *mac == "00:00:00:00:00:00" {
+                continue;
+            }
+            m.insert(addr.to_string(), mac.to_ascii_lowercase());
+        }
+    }
+
     m
+}
+
+/// Multicast and broadcast destinations, which have no owning client.
+///
+/// mDNS, SSDP and friends are addressed to a group, not a host. Counting them
+/// as "could not attribute" made the drop counter look like lost subscriber
+/// traffic when it is nothing of the kind -- and the counter exists precisely
+/// so that a real loss is visible.
+fn is_multicast(ip: &str) -> bool {
+    match ip.parse::<IpAddr>() {
+        Ok(IpAddr::V4(a)) => a.is_multicast() || a.is_broadcast(),
+        Ok(IpAddr::V6(a)) => a.is_multicast(),
+        Err(_) => false,
+    }
 }
 
 /// Whether an address is one of ours to attribute.
@@ -127,7 +170,22 @@ fn is_local(ip: &str) -> bool {
 /// Returns false when the flow cannot be attributed, in which case the event
 /// is dropped here rather than sent for the controller to reject: an
 /// unattributable flow costs uplink and produces nothing.
-fn attribute(ev: &mut serde_json::Map<String, serde_json::Value>, arp: &HashMap<String, String>) -> bool {
+/// Why a flow could not be attributed. Distinguished so the drop counter means
+/// "subscriber traffic we lost" and not "broadcast chatter we correctly
+/// ignored".
+enum Attribution {
+    Ok,
+    /// Addressed to a group, not a host. Expected and harmless.
+    Multicast,
+    /// A local host we have no neighbour entry for. This is the one that
+    /// matters: it IS subscriber traffic and it is being lost.
+    Unknown,
+}
+
+fn attribute(
+    ev: &mut serde_json::Map<String, serde_json::Value>,
+    arp: &HashMap<String, String>,
+) -> Attribution {
     let src = ev.get("src_ip").and_then(|v| v.as_str()).unwrap_or("");
     let dst = ev.get("dst_ip").and_then(|v| v.as_str()).unwrap_or("");
 
@@ -139,11 +197,15 @@ fn attribute(ev: &mut serde_json::Map<String, serde_json::Value>, arp: &HashMap<
     } else if is_local(dst) {
         (dst, false)
     } else {
-        return false;
+        return Attribution::Unknown;
     };
 
     let Some(mac) = arp.get(client_ip) else {
-        return false;
+        // Group-addressed traffic has no owning host, so it is not a loss.
+        if is_multicast(dst) || is_multicast(src) {
+            return Attribution::Multicast;
+        }
+        return Attribution::Unknown;
     };
     ev.insert(
         "client_mac".into(),
@@ -156,13 +218,16 @@ fn attribute(ev: &mut serde_json::Map<String, serde_json::Value>, arp: &HashMap<
         "client_is_src".into(),
         serde_json::Value::Bool(subject_is_src),
     );
-    true
+    Attribution::Ok
 }
 
 struct Batcher {
     pending: Vec<String>,
     written: u64,
     dropped_unattributed: u64,
+    /// Group-addressed traffic, counted apart so it never inflates the number
+    /// that means "subscriber traffic lost".
+    skipped_multicast: u64,
 }
 
 impl Batcher {
@@ -171,6 +236,7 @@ impl Batcher {
             pending: Vec::with_capacity(BATCH_EVENTS),
             written: 0,
             dropped_unattributed: 0,
+            skipped_multicast: 0,
         }
     }
 
@@ -198,9 +264,11 @@ impl Batcher {
         // consumer that cannot see what was dropped will read a thinned stream
         // as a quiet network.
         body.push_str(&format!(
-            "{{\"meta\":true,\"events\":{},\"unattributed_dropped\":{},\"total_written\":{}}}\n",
+            "{{\"meta\":true,\"events\":{},\"unattributed_dropped\":{},\
+             \"multicast_skipped\":{},\"total_written\":{}}}\n",
             self.pending.len(),
             self.dropped_unattributed,
+            self.skipped_multicast,
             self.written
         ));
 
@@ -336,12 +404,16 @@ async fn drain(stream: &mut UnixStream, b: &mut Batcher) -> io::Result<()> {
                         arp = arp_table();
                         since_arp = 0;
                     }
-                    if attribute(&mut ev, &arp) {
-                        if let Ok(line) = serde_json::to_string(&serde_json::Value::Object(ev)) {
-                            b.push(line);
+                    match attribute(&mut ev, &arp) {
+                        Attribution::Ok => {
+                            if let Ok(line) =
+                                serde_json::to_string(&serde_json::Value::Object(ev))
+                            {
+                                b.push(line);
+                            }
                         }
-                    } else {
-                        b.dropped_unattributed += 1;
+                        Attribution::Multicast => b.skipped_multicast += 1,
+                        Attribution::Unknown => b.dropped_unattributed += 1,
                     }
                 }
             }
@@ -423,7 +495,7 @@ mod tests {
             r#"{"src_ip":"192.168.1.151","dst_ip":"142.250.197.35"}"#,
         )
         .unwrap();
-        assert!(attribute(&mut ev, &arp));
+        assert!(matches!(attribute(&mut ev, &arp), Attribution::Ok));
         assert_eq!(ev["client_mac"], "8c:16:45:e6:78:16");
         assert_eq!(ev["client_is_src"], true);
 
@@ -432,18 +504,53 @@ mod tests {
             r#"{"src_ip":"142.250.197.35","dst_ip":"192.168.1.151"}"#,
         )
         .unwrap();
-        assert!(attribute(&mut ev, &arp));
+        assert!(matches!(attribute(&mut ev, &arp), Attribution::Ok));
         assert_eq!(ev["client_is_src"], false);
 
-        // Local address with no ARP entry: not attributable.
+        // Local address with no neighbour entry: a real loss, and counted as one.
         let mut ev: serde_json::Map<String, serde_json::Value> =
             serde_json::from_str(r#"{"src_ip":"192.168.1.99","dst_ip":"1.1.1.1"}"#).unwrap();
-        assert!(!attribute(&mut ev, &arp));
+        assert!(matches!(attribute(&mut ev, &arp), Attribution::Unknown));
 
         // Neither end local (transit): not ours to attribute.
         let mut ev: serde_json::Map<String, serde_json::Value> =
             serde_json::from_str(r#"{"src_ip":"8.8.8.8","dst_ip":"1.1.1.1"}"#).unwrap();
-        assert!(!attribute(&mut ev, &arp));
+        assert!(matches!(attribute(&mut ev, &arp), Attribution::Unknown));
+    }
+
+    /// IPv6 must be attributable. `/proc/net/arp` is v4-only, so reading it
+    /// alone made every v6 flow unattributable by construction -- measured on
+    /// the BPI-R4, the sole unattributed flow in a 59-flow sample was IPv6.
+    #[test]
+    fn ipv6_clients_are_attributable() {
+        let mut arp = HashMap::new();
+        arp.insert(
+            "fd7a:8a35:3985::e7b".to_string(),
+            "8c:16:45:e6:78:16".to_string(),
+        );
+        let mut ev: serde_json::Map<String, serde_json::Value> = serde_json::from_str(
+            r#"{"src_ip":"fd7a:8a35:3985::e7b","dst_ip":"2606:4700::1111"}"#,
+        )
+        .unwrap();
+        assert!(matches!(attribute(&mut ev, &arp), Attribution::Ok));
+        assert_eq!(ev["client_mac"], "8c:16:45:e6:78:16");
+    }
+
+    /// Group-addressed traffic has no owning host, so it must not inflate the
+    /// counter that means "subscriber traffic we lost". mDNS to ff02::fb was
+    /// the actual content of the drops observed in production.
+    #[test]
+    fn multicast_is_skipped_not_counted_as_a_loss() {
+        let arp = HashMap::new();
+        let mut ev: serde_json::Map<String, serde_json::Value> = serde_json::from_str(
+            r#"{"src_ip":"fe80::b299:d7ff:fe85:5ec8","dst_ip":"ff02::fb"}"#,
+        )
+        .unwrap();
+        assert!(matches!(attribute(&mut ev, &arp), Attribution::Multicast));
+
+        assert!(is_multicast("224.0.0.251"));
+        assert!(is_multicast("255.255.255.255"));
+        assert!(!is_multicast("192.168.1.151"));
     }
 
     /// An incomplete ARP entry must never become a client identity.
