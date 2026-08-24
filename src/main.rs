@@ -8,6 +8,7 @@ mod apply;
 mod config;
 mod error;
 mod gnss;
+mod ndpid;
 mod proto;
 mod tls;
 mod usp;
@@ -157,6 +158,13 @@ async fn main() {
     } else {
         gnss::spawn_gnss_reader(&cfg.gnss_dev, cfg.gnss_baud)
     };
+
+    // Drain nDPId's event stream into a spool for `dm::ndpid_flows` to ship.
+    //
+    // Started unconditionally and cheap when idle: nDPId is `enabled 0` in the
+    // shipped config, so on most devices this finds no socket, says so once,
+    // and retries quietly. Nothing here starts nDPId or changes its consent.
+    ndpid::spawn();
 
     // Run the USP agent; restart on error
     loop {

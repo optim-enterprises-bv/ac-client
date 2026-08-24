@@ -11,6 +11,7 @@ pub mod device_info;
 pub mod dhcp;
 pub mod dpi;
 pub mod dpi_flows;
+pub mod ndpid_flows;
 pub mod enforcement;
 pub mod firmware;
 pub mod hosts;
@@ -186,7 +187,14 @@ async fn dispatch_get(cfg: &ClientConfig, path: &str) -> Params {
     } else if path.starts_with("Device.X_OptimACS_Sensing") {
         sensing::get(cfg, path)
     } else if path.starts_with("Device.X_OptimACS_DPI") {
-        dpi_flows::get(cfg, path)
+        // Both producers answer under this prefix: sensord's own classified
+        // flows and nDPId's native events. Merged here rather than given
+        // separate prefixes so a controller GET of the DPI branch collects
+        // everything the device has, but kept in distinct PARAMETERS so the
+        // controller never has to guess which engine wrote a line.
+        let mut m = dpi_flows::get(cfg, path);
+        m.extend(ndpid_flows::get(cfg, path));
+        m
     } else if path.starts_with("Device.X_OptimACS_Firmware.") {
         firmware::get(cfg, path)
     } else if path.starts_with("Device.IP.")
