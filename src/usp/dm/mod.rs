@@ -17,6 +17,7 @@ pub mod firmware;
 pub mod hosts;
 pub mod ip;
 pub mod misc;
+pub mod qos;
 pub mod reputation;
 pub mod security;
 pub mod sensing;
@@ -172,6 +173,8 @@ async fn dispatch_get(cfg: &ClientConfig, path: &str) -> Params {
         dhcp::get(cfg, path).await
     } else if path.starts_with("Device.Hosts.") {
         hosts::get(cfg, path).await
+    } else if path.starts_with("Device.X_OptimACS_QoS") {
+        qos::get(cfg, path).await
     } else if path.starts_with("Device.X_OptimACS_Network.Bridge.")
         || path.starts_with("Device.X_OptimACS_Network.Bridge")
     {
