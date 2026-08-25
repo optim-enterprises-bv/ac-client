@@ -51,7 +51,18 @@ define Package/ac-client
   SUBMENU   := Management
   TITLE     := USP Agent daemon for OpenWrt APs (TR-369 / USP 1.3)
   URL       := https://github.com/optim-enterprises-bv/ac-client
-  DEPENDS   := +libc
+  # `iw` and `tc` are runtime dependencies of the telemetry the agent reports,
+  # not of the binary. Without `iw` the radio survey returns nothing, so noise
+  # and channel utilisation are simply absent; without `tc` the same is true of
+  # every queue statistic. Both fail quietly by design — the agent reports what
+  # it can read — but an image built without them silently loses the RF and
+  # bufferbloat data the controller now charts, which is the failure mode this
+  # whole codebase keeps producing.
+  #
+  # `sqm-scripts` and `kmod-sched-cake` are NOT depended on: shaping is an
+  # operator choice, and an unshaped link is a valid state the agent reports
+  # honestly (`ShaperRate: unlimited`). They belong in the image profile.
+  DEPENDS   := +libc +iw +tc
   MAINTAINER:= Optim Enterprises BV
 endef
 

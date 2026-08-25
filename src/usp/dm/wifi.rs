@@ -357,6 +357,43 @@ pub async fn get(_cfg: &ClientConfig, path: &str) -> HashMap<String, String> {
             if !chan.is_empty() {
                 m.insert(format!("Device.WiFi.Radio.{radio_idx}.Channel"), chan);
             }
+
+            // Measured RF conditions. Everything above this point is what the
+            // radio was configured with; none of it says whether the channel is
+            // actually usable. Noise floor and occupancy are what distinguish a
+            // quiet channel from one saturated by a neighbour, and the
+            // controller had no way to tell them apart.
+            if let Some(ifname) = radio_ifname(device) {
+                let (noise, active, busy) = radio_survey(&ifname);
+
+                if let Some(n) = noise {
+                    m.insert(
+                        format!("Device.WiFi.Radio.{radio_idx}.Noise"),
+                        n.to_string(),
+                    );
+                }
+                if let (Some(a), Some(b)) = (active, busy) {
+                    m.insert(
+                        format!("Device.WiFi.Radio.{radio_idx}.X_OptimACS_ChannelActiveTime"),
+                        a.to_string(),
+                    );
+                    m.insert(
+                        format!("Device.WiFi.Radio.{radio_idx}.X_OptimACS_ChannelBusyTime"),
+                        b.to_string(),
+                    );
+                    // Percentage is derived here rather than on the controller
+                    // because these are monotonic counters: differencing them
+                    // needs two samples from the same radio, and a controller
+                    // that sees a reboot in between would compute a negative.
+                    if a > 0 {
+                        let pct = (b.min(a) as f64 / a as f64) * 100.0;
+                        m.insert(
+                            format!("Device.WiFi.Radio.{radio_idx}.X_OptimACS_ChannelUtilization"),
+                            format!("{pct:.1}"),
+                        );
+                    }
+                }
+            }
             m.insert(
                 format!("Device.WiFi.Radio.{radio_idx}.Enable"),
                 enable.to_string(),
@@ -666,6 +703,91 @@ fn get_radio_hardware_name(device: &str) -> String {
     } else {
         format!("Generic {} Radio", modes)
     }
+}
+
+/// The first live interface belonging to a radio section, e.g. `radio0` -> `wlan0`.
+///
+/// `iw` measures per-interface; UCI names radios. Without this mapping the
+/// survey cannot be run at all.
+fn radio_ifname(radio: &str) -> Option<String> {
+    let out = std::process::Command::new("ubus")
+        .args(["call", "network.wireless", "status"])
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())?;
+
+    // Scope to this radio's object, then take its first `ifname`.
+    let key = format!("\"{radio}\"");
+    let start = out.find(&key)?;
+    let tail = &out[start..];
+    let end = tail[1..]
+        .find("\n\t\"")
+        .map(|e| e + 1)
+        .unwrap_or(tail.len());
+    let block = &tail[..end];
+
+    let pos = block.find("\"ifname\": \"")? + "\"ifname\": \"".len();
+    let rest = &block[pos..];
+    let stop = rest.find('"')?;
+    Some(rest[..stop].to_string())
+}
+
+/// Noise floor and channel occupancy for the channel a radio is actually on.
+///
+/// Returns `(noise_dbm, active_ms, busy_ms)`.
+///
+/// Read from `iw dev <if> survey dump` rather than from UCI, because UCI holds
+/// what the radio was *configured* with and this needs what it is *measuring*.
+/// Only the block marked `[in use]` is read — a survey lists every channel the
+/// hardware can see, and the others carry stale or zero counters.
+///
+/// Every field is optional: `iw` may be absent, the driver may not report
+/// survey data, and a radio that is down reports nothing. Absent is returned as
+/// `None` rather than zero, because a zero noise floor would read as a
+/// perfectly quiet channel.
+fn radio_survey(ifname: &str) -> (Option<i64>, Option<u64>, Option<u64>) {
+    let Some(out) = std::process::Command::new("iw")
+        .args(["dev", ifname, "survey", "dump"])
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+    else {
+        return (None, None, None);
+    };
+
+    let mut noise = None;
+    let mut active = None;
+    let mut busy = None;
+    let mut in_use = false;
+
+    for line in out.lines() {
+        let t = line.trim();
+        if t.starts_with("frequency:") {
+            // A new block begins; it counts only if this one is the live channel.
+            in_use = t.contains("[in use]");
+            continue;
+        }
+        if !in_use {
+            continue;
+        }
+        let value = |t: &str| -> Option<i64> {
+            t.split(':')
+                .nth(1)?
+                .split_whitespace()
+                .next()?
+                .parse::<i64>()
+                .ok()
+        };
+        if t.starts_with("noise:") {
+            noise = value(t);
+        } else if t.starts_with("channel active time:") {
+            active = value(t).and_then(|v| u64::try_from(v).ok());
+        } else if t.starts_with("channel busy time:") {
+            busy = value(t).and_then(|v| u64::try_from(v).ok());
+        }
+    }
+
+    (noise, active, busy)
 }
 
 /// Build a section→ifname map from `ubus call network.wireless status`.
