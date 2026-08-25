@@ -14,6 +14,7 @@ pub mod hosts;
 pub mod ip;
 pub mod misc;
 pub mod qos;
+pub mod reputation;
 pub mod security;
 pub mod wifi;
 
@@ -169,6 +170,8 @@ async fn dispatch_get(cfg: &ClientConfig, path: &str) -> Params {
         hosts::get(cfg, path).await
     } else if path.starts_with("Device.X_OptimACS_QoS") {
         qos::get(cfg, path).await
+    } else if path.starts_with("Device.X_OptimACS_Reputation") {
+        reputation::get(cfg, path).await
     } else if path.starts_with("Device.X_OptimACS_Network.Bridge.")
         || path.starts_with("Device.X_OptimACS_Network.Bridge")
     {
@@ -222,6 +225,8 @@ async fn dispatch_set(cfg: &ClientConfig, path: &str, value: &str) -> Result<(),
         || path.starts_with("Device.X_OptimACS_NDPI.")
     {
         appfilter::set(cfg, path, value).await
+    } else if path.starts_with("Device.X_OptimACS_Reputation") {
+        reputation::set(cfg, path, value).await
     } else {
         Err(format!("read-only or unknown path: {path}"))
     }

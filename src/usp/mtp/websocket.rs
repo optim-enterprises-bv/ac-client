@@ -174,10 +174,32 @@ async fn connect_and_serve(
     info!("USP WS: version negotiation initiated (GetSupportedProto sent)");
 
     debug!("Entering message receive loop...");
+
+    // Dead-peer detection.
+    //
+    // `ws.send()` returning Ok means the bytes reached the kernel's send
+    // buffer, not the controller. When the far end vanishes — a pod restart, a
+    // proxy dropping the connection — TCP keeps accepting writes into Send-Q
+    // and the socket stays ESTABLISHED until retransmits finally give up, which
+    // can take many minutes.
+    //
+    // Observed exactly that: a controller pod was OOMKilled and this agent
+    // logged "Status heartbeat sent successfully" every 60s for 14 minutes with
+    // 7509 bytes stuck unacknowledged, while the controller had no idea the
+    // device existed. Every heartbeat "succeeded" and none arrived.
+    //
+    // So liveness is judged on what comes *back*. The controller answers
+    // heartbeats and polls this agent, so silence for several intervals means
+    // the link is gone regardless of what our writes report. Breaking the loop
+    // reaches the reconnect path.
+    let mut last_rx = std::time::Instant::now();
+    let silence_limit = std::time::Duration::from_secs((cfg.status_interval * 3).max(90));
+
     loop {
         tokio::select! {
             // Handle incoming WebSocket messages
             frame = ws.next() => {
+                last_rx = std::time::Instant::now();
                 let frame = match frame {
                     Some(Ok(f)) => f,
                     Some(Err(e)) => {
@@ -276,8 +298,25 @@ async fn connect_and_serve(
                 if let Some(record_bytes) = status_msg {
                     info!("WebSocket: Sending status heartbeat ({} bytes)", record_bytes.len());
                     trace!("Status record bytes (first 64): {:?}", &record_bytes[..record_bytes.len().min(64)]);
+                    // Checked before sending: if nothing has come back for
+                    // several intervals the socket is already dead and another
+                    // "successful" write would only add to a backlog nobody is
+                    // reading.
+                    let quiet = last_rx.elapsed();
+                    if quiet > silence_limit {
+                        warn!(
+                            "WebSocket: no traffic from the controller for {}s (limit {}s) — \
+                             treating the link as dead and reconnecting",
+                            quiet.as_secs(),
+                            silence_limit.as_secs()
+                        );
+                        break;
+                    }
+
                     match ws.send(Message::Binary(record_bytes)).await {
-                        Ok(()) => info!("WebSocket: Status heartbeat sent successfully"),
+                        // Deliberately not "sent successfully": this only means
+                        // the bytes were accepted locally.
+                        Ok(()) => debug!("WebSocket: status heartbeat queued"),
                         Err(e) => {
                             warn!("WebSocket: Failed to send status heartbeat: {e}");
                             // Don't break here - let the connection error handling deal with it
