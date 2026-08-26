@@ -7,16 +7,17 @@
 
 pub mod appfilter;
 pub mod bridge;
+pub mod claim;
 pub mod device_info;
 pub mod dhcp;
 pub mod dpi;
 pub mod dpi_flows;
-pub mod ndpid_flows;
 pub mod enforcement;
 pub mod firmware;
 pub mod hosts;
 pub mod ip;
 pub mod misc;
+pub mod ndpid_flows;
 pub mod qos;
 pub mod reputation;
 pub mod security;
@@ -245,6 +246,8 @@ async fn dispatch_set(cfg: &ClientConfig, path: &str, value: &str) -> Result<(),
         appfilter::set(cfg, path, value).await
     } else if path.starts_with("Device.X_OptimACS_Reputation.") {
         reputation::set(cfg, path, value)
+    } else if path.starts_with("Device.X_OptimACS_Claim.") {
+        claim::set(cfg, path, value)
     } else {
         Err(format!("read-only or unknown path: {path}"))
     }
