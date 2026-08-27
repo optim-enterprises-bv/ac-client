@@ -271,7 +271,20 @@ pub async fn enrol_if_needed(cfg: &ClientConfig) -> bool {
     }
 
     let b64 = resp.text().await.unwrap_or_default();
-    let der = match base64::engine::general_purpose::STANDARD.decode(b64.trim().as_bytes()) {
+    // RFC 7030 §4.2.3 returns base64 encoded per RFC 2045, which WRAPS at 76
+    // characters. `.trim()` only removes the outer whitespace, so the embedded
+    // newlines reached the decoder and it refused the response:
+    //
+    //   est: response is not valid base64: Invalid symbol 10, offset 76
+    //
+    // Symbol 10 is a newline at exactly the wrap column. The controller was
+    // behaving correctly and the certificate had already been issued -- see
+    // the note in `enrol_if_needed` about what that costs.
+    let compact: Vec<u8> = b64
+        .bytes()
+        .filter(|b| !b.is_ascii_whitespace())
+        .collect();
+    let der = match base64::engine::general_purpose::STANDARD.decode(&compact) {
         Ok(d) => d,
         Err(e) => {
             warn!("est: response is not valid base64: {e}");
@@ -512,6 +525,71 @@ mod birth_identity_tests {
             body.contains(".identity("),
             "the identity must be attached to the client builder, not merely \
              loaded",
+        );
+    }
+}
+
+#[cfg(test)]
+mod response_encoding_tests {
+    use base64::Engine;
+
+    /// The exact failure seen on the first real device.
+    ///
+    /// RFC 7030 §4.2.3 returns base64 per RFC 2045, which wraps at 76
+    /// characters. The decoder rejected the newline at offset 76 and the
+    /// enrolment was thrown away -- after the controller had already issued the
+    /// certificate and bound the serial. A parse bug on this side cost a
+    /// permanent binding on the other.
+    #[test]
+    fn wrapped_base64_decodes() {
+        let raw = vec![0xABu8; 200];
+        let flat = base64::engine::general_purpose::STANDARD.encode(&raw);
+        let wrapped = flat
+            .as_bytes()
+            .chunks(76)
+            .map(|c| String::from_utf8_lossy(c).to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(wrapped.contains('\n'), "the fixture must actually be wrapped");
+
+        // What the code does: strip all whitespace, then decode.
+        let compact: Vec<u8> = wrapped
+            .bytes()
+            .filter(|b| !b.is_ascii_whitespace())
+            .collect();
+        let out = base64::engine::general_purpose::STANDARD
+            .decode(&compact)
+            .expect("wrapped base64 must decode");
+        assert_eq!(out, raw);
+
+        // And what it used to do, for the avoidance of doubt.
+        assert!(
+            base64::engine::general_purpose::STANDARD
+                .decode(wrapped.trim().as_bytes())
+                .is_err(),
+            "trim() alone must still fail -- otherwise this test proves nothing",
+        );
+    }
+
+    #[test]
+    fn crlf_wrapping_also_decodes() {
+        let raw = vec![0x5Au8; 120];
+        let flat = base64::engine::general_purpose::STANDARD.encode(&raw);
+        let wrapped = flat
+            .as_bytes()
+            .chunks(64)
+            .map(|c| String::from_utf8_lossy(c).to_string())
+            .collect::<Vec<_>>()
+            .join("\r\n");
+        let compact: Vec<u8> = wrapped
+            .bytes()
+            .filter(|b| !b.is_ascii_whitespace())
+            .collect();
+        assert_eq!(
+            base64::engine::general_purpose::STANDARD
+                .decode(&compact)
+                .unwrap(),
+            raw
         );
     }
 }
