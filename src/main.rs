@@ -7,6 +7,7 @@
 mod apply;
 mod config;
 mod error;
+mod est;
 mod gnss;
 mod ndpid;
 mod proto;
@@ -166,8 +167,20 @@ async fn main() {
     // and retries quietly. Nothing here starts nDPId or changes its consent.
     ndpid::spawn();
 
-    // Run the USP agent; restart on error
+    // Obtain an operational certificate before the first connection.
+    //
+    // `tls::build_tls_config` already prefers cert_file/key_file and falls back
+    // to the shared birth certificate, so without this the fallback WAS the
+    // steady state: every device on the fleet authenticating with the same
+    // credential baked into a public package. Enrolment is what makes the
+    // device's identity its own, and what puts the USP Endpoint ID in a
+    // subjectAltName where TR-369 R-SEC.0a expects it.
+    //
+    // Inside the loop deliberately: a device that boots before the controller
+    // is reachable must retry rather than run unenrolled forever. It is cheap
+    // and silent once a certificate exists.
     loop {
+        est::enrol_if_needed(&cfg).await;
         usp::agent::run(Arc::clone(&cfg), Arc::clone(&gnss_pos)).await;
         error!("USP agent exited; restarting in 30s");
         tokio::time::sleep(std::time::Duration::from_secs(30)).await;

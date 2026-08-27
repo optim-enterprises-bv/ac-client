@@ -26,6 +26,10 @@ tokio-rustls = "0.26"
 rustls              = { version = "0.23", default-features = false, features = ["std"] }
 rustls-post-quantum = "0.2"
 rustls-pemfile      = "2"
+# CSR generation for EST enrolment. Pure Rust deliberately: the device ships
+# without openssl (verified -- no openssl, no base64), so shelling out is not
+# an option on a stock image.
+rcgen               = { version = "0.13", default-features = false, features = ["pem", "crypto", "ring"] }
 
 # Protobuf (same version as ac-server)
 prost = "0.13"
