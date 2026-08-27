@@ -140,6 +140,29 @@ fn est_base(cfg: &ClientConfig) -> String {
     }
 }
 
+/// The birth certificate and key, as a TLS client identity.
+///
+/// `Ok(None)` when the files are simply absent -- a legitimate state for a
+/// build that ships no bootstrap credential -- as distinct from `Err`, which
+/// means they exist and are broken. Collapsing those two would hide a corrupt
+/// credential behind the same log line as a deliberate omission.
+fn birth_identity(cfg: &ClientConfig) -> Result<Option<reqwest::Identity>, String> {
+    if !cfg.init_cert.exists() || !cfg.init_key.exists() {
+        return Ok(None);
+    }
+    let cert = std::fs::read(&cfg.init_cert)
+        .map_err(|e| format!("cannot read {}: {e}", cfg.init_cert.display()))?;
+    let key = std::fs::read(&cfg.init_key)
+        .map_err(|e| format!("cannot read {}: {e}", cfg.init_key.display()))?;
+    // rustls wants key and certificate in one PEM blob.
+    let mut pem = key;
+    pem.push(b'\n');
+    pem.extend_from_slice(&cert);
+    reqwest::Identity::from_pem(&pem)
+        .map(Some)
+        .map_err(|e| format!("birth certificate is not a usable identity: {e}"))
+}
+
 /// Enrol if this device has no operational certificate yet.
 ///
 /// Returns `true` when a certificate was installed, so the caller knows the TLS
@@ -182,10 +205,38 @@ pub async fn enrol_if_needed(cfg: &ClientConfig) -> bool {
     use base64::Engine;
     let body = base64::engine::general_purpose::STANDARD.encode(&csr_der);
 
-    let client = match reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .build()
-    {
+    // Present the birth certificate as a TLS client identity.
+    //
+    // This is what makes self-service enrolment possible at all. A subscriber
+    // who flashes their own router has no operator-minted token, so without a
+    // client identity the controller sees an anonymous request and refuses it
+    // -- which is exactly what happened on the first end-to-end run: the
+    // device reached the right URL and got
+    //
+    //   401: enrolment requires a bearer token or a birth certificate
+    //        presented over mTLS
+    //
+    // The credential is deliberately public: it ships in a downloadable
+    // package and is identical on every install, so it attests "genuine Optim
+    // firmware" and never "I am device X". The controller treats it as
+    // authorising ENROLMENT only and binds the serial on first use (ADR-026),
+    // which is what stops it being a fleet-wide skeleton key.
+    //
+    // Failure to load it is NOT fatal: a device with an operator token still
+    // enrols without one, and refusing to try would turn a missing optional
+    // credential into a total outage.
+    let mut builder = reqwest::Client::builder().timeout(std::time::Duration::from_secs(30));
+    match birth_identity(cfg) {
+        Ok(Some(id)) => builder = builder.identity(id),
+        Ok(None) => {
+            debug!(
+                "est: no birth certificate at {} -- enrolling without a client identity",
+                cfg.init_cert.display()
+            );
+        }
+        Err(e) => warn!("est: birth certificate unusable, continuing without it: {e}"),
+    }
+    let client = match builder.build() {
         Ok(c) => c,
         Err(e) => {
             warn!("est: cannot build HTTP client: {e}");
@@ -397,6 +448,70 @@ mod wiring_tests {
             enrol < run,
             "enrolment must precede the connection, or the first connection \
              always authenticates with the shared birth certificate",
+        );
+    }
+}
+
+#[cfg(test)]
+mod birth_identity_tests {
+    use super::*;
+
+    fn cfg_with(dir: &std::path::Path) -> ClientConfig {
+        let mut c = ClientConfig::default();
+        c.init_cert = dir.join("client.crt");
+        c.init_key = dir.join("client.key");
+        c
+    }
+
+    #[test]
+    fn absent_files_are_none_not_an_error() {
+        let d = std::env::temp_dir().join(format!("bi-absent-{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        assert!(matches!(birth_identity(&cfg_with(&d)), Ok(None)));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// Present but broken must be an error, not silently "no credential".
+    ///
+    /// The distinction is the whole point: a device that ships a corrupt birth
+    /// certificate and a device that ships none both fail to enrol, but only
+    /// one of them is a build fault, and one log line for both would send
+    /// someone looking in the wrong place.
+    #[test]
+    fn present_but_corrupt_is_an_error() {
+        let d = std::env::temp_dir().join(format!("bi-corrupt-{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        let c = cfg_with(&d);
+        std::fs::write(&c.init_cert, b"not a certificate").unwrap();
+        std::fs::write(&c.init_key, b"not a key").unwrap();
+        assert!(birth_identity(&c).is_err());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// The guard that this whole episode existed for want of.
+    ///
+    /// `enrol_if_needed` built a plain `reqwest::Client` with no identity. The
+    /// controller implemented birth-certificate enrolment, the package shipped
+    /// the certificate, the config knew its path -- and the request went out
+    /// anonymous, so the first real first-boot test got a flat 401. Every
+    /// piece was correct except the one line that connects them.
+    #[test]
+    fn the_enrolment_request_presents_the_birth_certificate() {
+        let src = include_str!("est.rs");
+        let body = src
+            .split("pub async fn enrol_if_needed")
+            .nth(1)
+            .expect("enrol_if_needed must exist");
+        let body = &body[..body.find("\n#[cfg(test)]").unwrap_or(body.len())];
+        assert!(
+            body.contains("birth_identity(cfg)"),
+            "enrol_if_needed must attach the birth certificate; without it a \
+             device with no operator token can never self-enrol",
+        );
+        assert!(
+            body.contains(".identity("),
+            "the identity must be attached to the client builder, not merely \
+             loaded",
         );
     }
 }

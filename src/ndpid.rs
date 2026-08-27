@@ -207,10 +207,7 @@ fn attribute(
         }
         return Attribution::Unknown;
     };
-    ev.insert(
-        "client_mac".into(),
-        serde_json::Value::String(mac.clone()),
-    );
+    ev.insert("client_mac".into(), serde_json::Value::String(mac.clone()));
     // Which direction the byte counters mean relative to the client, so the
     // controller does not have to re-derive it and risk getting up and down
     // the wrong way round.
@@ -275,7 +272,11 @@ impl Batcher {
         // Write-then-rename, so the courier never reads a half-written batch
         // and ships truncated NDJSON.
         if fs::write(&tmp, body).is_ok() && fs::rename(&tmp, &path).is_ok() {
-            debug!("ndpid: wrote {} events to {}", self.pending.len(), path.display());
+            debug!(
+                "ndpid: wrote {} events to {}",
+                self.pending.len(),
+                path.display()
+            );
         } else {
             warn!("ndpid: could not write batch {}", path.display());
             let _ = fs::remove_file(&tmp);
@@ -406,8 +407,7 @@ async fn drain(stream: &mut UnixStream, b: &mut Batcher) -> io::Result<()> {
                     }
                     match attribute(&mut ev, &arp) {
                         Attribution::Ok => {
-                            if let Ok(line) =
-                                serde_json::to_string(&serde_json::Value::Object(ev))
+                            if let Ok(line) = serde_json::to_string(&serde_json::Value::Object(ev))
                             {
                                 b.push(line);
                             }
@@ -491,19 +491,17 @@ mod tests {
         let mut arp = HashMap::new();
         arp.insert("192.168.1.151".to_string(), "8c:16:45:e6:78:16".to_string());
 
-        let mut ev: serde_json::Map<String, serde_json::Value> = serde_json::from_str(
-            r#"{"src_ip":"192.168.1.151","dst_ip":"142.250.197.35"}"#,
-        )
-        .unwrap();
+        let mut ev: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_str(r#"{"src_ip":"192.168.1.151","dst_ip":"142.250.197.35"}"#)
+                .unwrap();
         assert!(matches!(attribute(&mut ev, &arp), Attribution::Ok));
         assert_eq!(ev["client_mac"], "8c:16:45:e6:78:16");
         assert_eq!(ev["client_is_src"], true);
 
         // Inbound: the local endpoint is the destination.
-        let mut ev: serde_json::Map<String, serde_json::Value> = serde_json::from_str(
-            r#"{"src_ip":"142.250.197.35","dst_ip":"192.168.1.151"}"#,
-        )
-        .unwrap();
+        let mut ev: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_str(r#"{"src_ip":"142.250.197.35","dst_ip":"192.168.1.151"}"#)
+                .unwrap();
         assert!(matches!(attribute(&mut ev, &arp), Attribution::Ok));
         assert_eq!(ev["client_is_src"], false);
 
@@ -528,10 +526,9 @@ mod tests {
             "fd7a:8a35:3985::e7b".to_string(),
             "8c:16:45:e6:78:16".to_string(),
         );
-        let mut ev: serde_json::Map<String, serde_json::Value> = serde_json::from_str(
-            r#"{"src_ip":"fd7a:8a35:3985::e7b","dst_ip":"2606:4700::1111"}"#,
-        )
-        .unwrap();
+        let mut ev: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_str(r#"{"src_ip":"fd7a:8a35:3985::e7b","dst_ip":"2606:4700::1111"}"#)
+                .unwrap();
         assert!(matches!(attribute(&mut ev, &arp), Attribution::Ok));
         assert_eq!(ev["client_mac"], "8c:16:45:e6:78:16");
     }
@@ -542,10 +539,9 @@ mod tests {
     #[test]
     fn multicast_is_skipped_not_counted_as_a_loss() {
         let arp = HashMap::new();
-        let mut ev: serde_json::Map<String, serde_json::Value> = serde_json::from_str(
-            r#"{"src_ip":"fe80::b299:d7ff:fe85:5ec8","dst_ip":"ff02::fb"}"#,
-        )
-        .unwrap();
+        let mut ev: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_str(r#"{"src_ip":"fe80::b299:d7ff:fe85:5ec8","dst_ip":"ff02::fb"}"#)
+                .unwrap();
         assert!(matches!(attribute(&mut ev, &arp), Attribution::Multicast));
 
         assert!(is_multicast("224.0.0.251"));
@@ -560,7 +556,10 @@ mod tests {
         arp.insert("192.168.1.7".to_string(), "00:00:00:00:00:00".to_string());
         // arp_table() filters these out; assert the shape that matters if one
         // ever slipped through a different reader.
-        assert_eq!(arp.get("192.168.1.7").map(|s| s.as_str()), Some("00:00:00:00:00:00"));
+        assert_eq!(
+            arp.get("192.168.1.7").map(|s| s.as_str()),
+            Some("00:00:00:00:00:00")
+        );
     }
 
     /// A batch must be written on a timer as well as on a count, or a link
