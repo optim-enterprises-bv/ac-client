@@ -73,3 +73,17 @@ base64 = "0.22"
 
 [build-dependencies]
 prost-build = "0.13"
+
+# Release binary size. Defaults (opt-level=3, 16 CGUs, no LTO) produced a
+# 9.57 MB stripped aarch64-musl binary, which does not fit the overlay on a
+# 16 MB-flash router -- that ruled out most of the consumer OpenWrt install
+# base. These four settings bring it to 5.38 MB (-44%) with no source change.
+#
+# panic="abort" would save a further 0.50 MB. Deliberately not set: it turns a
+# panic in any tokio task into an abort of the whole agent, and 0.5 MB is not
+# worth changing crash behaviour on a device you cannot attach a debugger to.
+[profile.release]
+opt-level = "z"
+lto = "fat"
+codegen-units = 1
+strip = true
