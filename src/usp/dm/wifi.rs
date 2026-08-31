@@ -140,6 +140,48 @@ fn friendly_to_uci_encryption(v: &str) -> Result<&'static str, String> {
     })
 }
 
+// ── Deferred radio reload ─────────────────────────────────────────────────────
+//
+// A controller pushes a config as one SET carrying many parameters. Reloading
+// inside each parameter's branch meant one `wifi` per parameter: a 23-parameter
+// push restarted the wireless stack 23 times, which on the device looks like
+// the APs flapping in a loop for half a minute and drops every client each
+// time round.
+//
+// Branches now record that a reload is owed; `dm::set_params` flushes once
+// after the whole SET has been applied. A single-parameter SET still reloads,
+// because it goes through the same flush.
+
+static WIFI_RELOAD_PENDING: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+fn mark_wifi_reload() {
+    WIFI_RELOAD_PENDING.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// Run the reload if any parameter in this SET asked for one.
+pub async fn flush_reload() -> Result<(), String> {
+    if WIFI_RELOAD_PENDING.swap(false, std::sync::atomic::Ordering::SeqCst) {
+        wifi_reload().await?;
+    }
+    Ok(())
+}
+
+/// Whether the radio backing a wifi-iface is a 6 GHz one.
+///
+/// 6 GHz has no WPA2 and no optional MFP: hostapd refuses the interface with
+/// "Management frame protection is required in 6 GHz" and the AP simply does
+/// not come up. A controller pushing a profile written for 2.4/5 GHz would
+/// otherwise remove the 6 GHz radio rather than misconfigure it, and the only
+/// sign on the device is a missing AP.
+fn iface_is_6ghz(iface: &str) -> bool {
+    let device = uci_get(&format!("wireless.{iface}.device"));
+    if device.is_empty() {
+        return false;
+    }
+    uci_get(&format!("wireless.{device}.band")).trim() == "6g"
+}
+
 fn parse_radio_index(path: &str) -> Option<usize> {
     if let Some(start) = path.find("Radio.") {
         let rest = &path[start + 6..];
@@ -1130,7 +1172,7 @@ pub async fn set(_cfg: &ClientConfig, path: &str, value: &str) -> Result<(), Str
                 // the new SSID sat in /etc/config/wireless while the AP kept
                 // beaconing the old one, and the controller saw a clean SetResp.
                 // Every other branch in this function already reloads.
-                wifi_reload().await?;
+                mark_wifi_reload();
                 info!("WiFi SSID {idx} set to '{value}' on {iface}");
             } else {
                 return Err(format!(
@@ -1153,7 +1195,7 @@ pub async fn set(_cfg: &ClientConfig, path: &str, value: &str) -> Result<(), Str
                 };
                 uci_set(&format!("wireless.{iface}.disabled"), disabled)?;
                 uci_commit("wireless")?;
-                wifi_reload().await?;
+                mark_wifi_reload();
                 info!("WiFi SSID {idx} enable set to '{value}' (disabled={disabled})");
             } else {
                 return Err(format!("SSID index {idx} out of range"));
@@ -1167,7 +1209,7 @@ pub async fn set(_cfg: &ClientConfig, path: &str, value: &str) -> Result<(), Str
                 let iface = &ifaces[idx - 1];
                 uci_set(&format!("wireless.{iface}.key"), value)?;
                 uci_commit("wireless")?;
-                wifi_reload().await?;
+                mark_wifi_reload();
                 info!("WiFi AccessPoint {idx} key updated");
             } else {
                 return Err(format!("AccessPoint index {idx} out of range"));
@@ -1183,9 +1225,16 @@ pub async fn set(_cfg: &ClientConfig, path: &str, value: &str) -> Result<(), Str
                 // a round-trip of our own reported value writes
                 // `encryption=WPA2-Personal` and hostapd refuses to start.
                 let enc = friendly_to_uci_encryption(value)?;
+                if iface_is_6ghz(iface) && !matches!(enc, "sae" | "owe") {
+                    return Err(format!(
+                        "encryption {value:?} ({enc}) is not permitted on a 6 GHz \
+                         radio; 6 GHz requires WPA3-SAE or OWE and hostapd will \
+                         not start the interface"
+                    ));
+                }
                 uci_set(&format!("wireless.{iface}.encryption"), enc)?;
                 uci_commit("wireless")?;
-                wifi_reload().await?;
+                mark_wifi_reload();
                 info!("WiFi AccessPoint {idx} encryption set to '{value}' (uci: {enc})");
             } else {
                 return Err(format!("AccessPoint index {idx} out of range"));
@@ -1205,7 +1254,7 @@ pub async fn set(_cfg: &ClientConfig, path: &str, value: &str) -> Result<(), Str
                 };
                 uci_set(&format!("wireless.{iface}.hidden"), hidden)?;
                 uci_commit("wireless")?;
-                wifi_reload().await?;
+                mark_wifi_reload();
                 info!("WiFi SSID {idx} advertisement set to '{value}' (hidden={hidden})");
             } else {
                 return Err(format!("SSID index {idx} out of range"));
@@ -1219,7 +1268,7 @@ pub async fn set(_cfg: &ClientConfig, path: &str, value: &str) -> Result<(), Str
                 let iface = &ifaces[idx - 1];
                 uci_set(&format!("wireless.{iface}.maxassoc"), value)?;
                 uci_commit("wireless")?;
-                wifi_reload().await?;
+                mark_wifi_reload();
                 info!("WiFi AccessPoint {idx} max associations set to '{value}'");
             } else {
                 return Err(format!("AccessPoint index {idx} out of range"));
@@ -1238,7 +1287,7 @@ pub async fn set(_cfg: &ClientConfig, path: &str, value: &str) -> Result<(), Str
                 };
                 uci_set(&format!("wireless.{iface}.wmm"), wmm)?;
                 uci_commit("wireless")?;
-                wifi_reload().await?;
+                mark_wifi_reload();
                 info!("WiFi AccessPoint {idx} WMM set to '{wmm}'");
             } else {
                 return Err(format!("AccessPoint index {idx} out of range"));
@@ -1252,7 +1301,7 @@ pub async fn set(_cfg: &ClientConfig, path: &str, value: &str) -> Result<(), Str
                 let device = &devices[idx - 1];
                 uci_set(&format!("wireless.{device}.channel"), value)?;
                 uci_commit("wireless")?;
-                wifi_reload().await?;
+                mark_wifi_reload();
                 info!("WiFi Radio {idx} channel set to '{value}'");
             } else {
                 return Err(format!(
@@ -1275,7 +1324,7 @@ pub async fn set(_cfg: &ClientConfig, path: &str, value: &str) -> Result<(), Str
                 };
                 uci_set(&format!("wireless.{device}.disabled"), disabled)?;
                 uci_commit("wireless")?;
-                wifi_reload().await?;
+                mark_wifi_reload();
                 info!("WiFi Radio {idx} enable set to '{value}' (disabled={disabled})");
             } else {
                 return Err(format!("Radio index {idx} out of range"));
@@ -1289,7 +1338,7 @@ pub async fn set(_cfg: &ClientConfig, path: &str, value: &str) -> Result<(), Str
                 let device = &devices[idx - 1];
                 uci_set(&format!("wireless.{device}.htmode"), value)?;
                 uci_commit("wireless")?;
-                wifi_reload().await?;
+                mark_wifi_reload();
                 info!("WiFi Radio {idx} bandwidth set to '{value}'");
             } else {
                 return Err(format!("Radio index {idx} out of range"));
@@ -1307,9 +1356,16 @@ pub async fn set(_cfg: &ClientConfig, path: &str, value: &str) -> Result<(), Str
                     "required" | "2" => "2",
                     other => return Err(format!("invalid MFPConfig: {other}")),
                 };
+                if pmf != "2" && iface_is_6ghz(iface) {
+                    return Err(format!(
+                        "MFPConfig {value:?} is not permitted on a 6 GHz radio; \
+                         hostapd requires management frame protection there and \
+                         will not start the interface"
+                    ));
+                }
                 uci_set(&format!("wireless.{iface}.ieee80211w"), pmf)?;
                 uci_commit("wireless")?;
-                wifi_reload().await?;
+                mark_wifi_reload();
                 info!("WiFi AccessPoint {idx} MFP set to '{value}' (ieee80211w={pmf})");
             } else {
                 return Err(format!("AccessPoint index {idx} out of range"));
@@ -1323,7 +1379,7 @@ pub async fn set(_cfg: &ClientConfig, path: &str, value: &str) -> Result<(), Str
                 let iface = &ifaces[idx - 1];
                 uci_set(&format!("wireless.{iface}.mode"), value)?;
                 uci_commit("wireless")?;
-                wifi_reload().await?;
+                mark_wifi_reload();
                 info!("WiFi AccessPoint {idx} mode set to '{value}'");
             } else {
                 return Err(format!("AccessPoint index {idx} out of range"));
@@ -1342,7 +1398,7 @@ pub async fn set(_cfg: &ClientConfig, path: &str, value: &str) -> Result<(), Str
                 if value == "true" || value == "1" {
                     uci_set(&format!("wireless.{device}.channel"), "auto")?;
                     uci_commit("wireless")?;
-                    wifi_reload().await?;
+                    mark_wifi_reload();
                     info!("WiFi Radio {idx} set to automatic channel selection");
                 } else {
                     info!("WiFi Radio {idx} AutoChannelEnable=false is a no-op; awaiting explicit Channel");
@@ -1373,7 +1429,7 @@ pub async fn set(_cfg: &ClientConfig, path: &str, value: &str) -> Result<(), Str
                 }
                 uci_set(&format!("wireless.{device}.txpower"), &dbm.to_string())?;
                 uci_commit("wireless")?;
-                wifi_reload().await?;
+                mark_wifi_reload();
                 info!("WiFi Radio {idx} txpower set to {dbm} dBm");
             } else {
                 return Err(format!("Radio index {idx} out of range"));
@@ -1458,6 +1514,30 @@ mod set_tests {
         }
     }
 
+    /// Deferring the reload is only safe if something flushes it. If
+    /// `set_params` stops calling `flush_reload`, every branch marks a reload
+    /// that never happens and the radios silently keep the old config -- the
+    /// original bug, reintroduced for every parameter instead of one.
+    #[test]
+    fn the_deferred_reload_is_flushed() {
+        let src: String = include_str!("mod.rs")
+            .lines()
+            .map(|l| match l.find("//") {
+                Some(i) => &l[..i],
+                None => l,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let start = src
+            .find("pub async fn set_params")
+            .expect("set_params not found");
+        let end = src[start..].find("\n}\n").expect("end of set_params") + start;
+        assert!(
+            src[start..end].contains("flush_reload"),
+            "set_params never flushes the deferred radio reload"
+        );
+    }
+
     /// The bug this guard exists for: `.SSID` wrote UCI, committed, and never
     /// reloaded, so the radio kept beaconing the old name while the controller
     /// received a clean SetResp.
@@ -1481,7 +1561,7 @@ mod set_tests {
         let branches: Vec<&str> = body.split("else if").collect();
         let mut offenders = Vec::new();
         for b in &branches {
-            if b.contains("uci_commit(") && !b.contains("wifi_reload(") {
+            if b.contains("uci_commit(") && !b.contains("mark_wifi_reload(") {
                 let label = b
                     .lines()
                     .find(|l| l.contains("path.ends_with"))
@@ -1493,7 +1573,7 @@ mod set_tests {
         }
         assert!(
             offenders.is_empty(),
-            "branches commit UCI without reloading the radio: {offenders:#?}"
+            "branches commit UCI without marking the radio for reload: {offenders:#?}"
         );
     }
 }

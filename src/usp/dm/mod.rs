@@ -139,6 +139,13 @@ pub async fn set_params(cfg: &ClientConfig, updates: &[(String, String)]) -> Res
     for (path, value) in updates {
         dispatch_set(cfg, path, value).await?;
     }
+    // One radio reload per SET, not per parameter. See `wifi::flush_reload`.
+    //
+    // Flushed even if a parameter failed above? No -- the `?` returns first, and
+    // that is deliberate: `allow_partial` is false on the controller side, so a
+    // SET that failed part way should not bring the radios up on a half-applied
+    // config.
+    wifi::flush_reload().await?;
     Ok(())
 }
 
