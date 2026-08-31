@@ -107,6 +107,39 @@ fn parse_ssid_index(path: &str) -> Option<usize> {
 }
 
 /// Parse Radio index from path like "Device.WiFi.Radio.1.Channel"
+/// Inverse of the `ModeEnabled` table used on GET.
+///
+/// GET maps `psk2` to `WPA2-Personal`. Without this, a controller that echoes
+/// back what the agent reported writes `encryption=WPA2-Personal` into UCI and
+/// hostapd refuses to start the AP -- a config push that takes the radio down.
+fn friendly_to_uci_encryption(v: &str) -> Result<&'static str, String> {
+    Ok(match v.trim() {
+        "WPA2-Personal" => "psk2",
+        "WPA-WPA2-Personal" => "psk-mixed",
+        "WPA-Personal" => "psk",
+        "WPA3-Personal" => "sae",
+        "WPA2-WPA3-Personal" | "WPA3-Personal-Transition" => "sae-mixed",
+        "WPA2-Enterprise" => "wpa2",
+        "OWE" => "owe",
+        "None" => "none",
+        // Already a UCI value: accept it so a caller that knows the native
+        // spelling is not forced through the friendly one.
+        "psk2" | "psk-mixed" | "psk" | "sae" | "sae-mixed" | "wpa2" | "owe" | "none" => {
+            return Ok(match v.trim() {
+                "psk2" => "psk2",
+                "psk-mixed" => "psk-mixed",
+                "psk" => "psk",
+                "sae" => "sae",
+                "sae-mixed" => "sae-mixed",
+                "wpa2" => "wpa2",
+                "owe" => "owe",
+                _ => "none",
+            })
+        }
+        other => return Err(format!("unknown encryption mode: {other}")),
+    })
+}
+
 fn parse_radio_index(path: &str) -> Option<usize> {
     if let Some(start) = path.find("Radio.") {
         let rest = &path[start + 6..];
@@ -1093,6 +1126,11 @@ pub async fn set(_cfg: &ClientConfig, path: &str, value: &str) -> Result<(), Str
                 let iface = &ifaces[idx - 1];
                 uci_set(&format!("wireless.{iface}.ssid"), value)?;
                 uci_commit("wireless")?;
+                // Committing UCI does not touch the running radio. Without this
+                // the new SSID sat in /etc/config/wireless while the AP kept
+                // beaconing the old one, and the controller saw a clean SetResp.
+                // Every other branch in this function already reloads.
+                wifi_reload().await?;
                 info!("WiFi SSID {idx} set to '{value}' on {iface}");
             } else {
                 return Err(format!(
@@ -1141,10 +1179,14 @@ pub async fn set(_cfg: &ClientConfig, path: &str, value: &str) -> Result<(), Str
         if let Some(idx) = parse_ap_index(path) {
             if idx > 0 && idx <= ifaces.len() {
                 let iface = &ifaces[idx - 1];
-                uci_set(&format!("wireless.{iface}.encryption"), value)?;
+                // GET translates uci -> friendly; this must translate back, or
+                // a round-trip of our own reported value writes
+                // `encryption=WPA2-Personal` and hostapd refuses to start.
+                let enc = friendly_to_uci_encryption(value)?;
+                uci_set(&format!("wireless.{iface}.encryption"), enc)?;
                 uci_commit("wireless")?;
                 wifi_reload().await?;
-                info!("WiFi AccessPoint {idx} encryption set to '{value}'");
+                info!("WiFi AccessPoint {idx} encryption set to '{value}' (uci: {enc})");
             } else {
                 return Err(format!("AccessPoint index {idx} out of range"));
             }
@@ -1253,6 +1295,90 @@ pub async fn set(_cfg: &ClientConfig, path: &str, value: &str) -> Result<(), Str
                 return Err(format!("Radio index {idx} out of range"));
             }
         }
+    }
+    // Handle AccessPoint management frame protection (802.11w)
+    else if path.ends_with(".MFPConfig") {
+        if let Some(idx) = parse_ap_index(path) {
+            if idx > 0 && idx <= ifaces.len() {
+                let iface = &ifaces[idx - 1];
+                let pmf = match value.trim().to_ascii_lowercase().as_str() {
+                    "disabled" | "0" => "0",
+                    "optional" | "1" => "1",
+                    "required" | "2" => "2",
+                    other => return Err(format!("invalid MFPConfig: {other}")),
+                };
+                uci_set(&format!("wireless.{iface}.ieee80211w"), pmf)?;
+                uci_commit("wireless")?;
+                wifi_reload().await?;
+                info!("WiFi AccessPoint {idx} MFP set to '{value}' (ieee80211w={pmf})");
+            } else {
+                return Err(format!("AccessPoint index {idx} out of range"));
+            }
+        }
+    }
+    // Handle AccessPoint Mode (ap / sta / wds ...)
+    else if path.ends_with(".Mode") && path.contains("AccessPoint.") {
+        if let Some(idx) = parse_ap_index(path) {
+            if idx > 0 && idx <= ifaces.len() {
+                let iface = &ifaces[idx - 1];
+                uci_set(&format!("wireless.{iface}.mode"), value)?;
+                uci_commit("wireless")?;
+                wifi_reload().await?;
+                info!("WiFi AccessPoint {idx} mode set to '{value}'");
+            } else {
+                return Err(format!("AccessPoint index {idx} out of range"));
+            }
+        }
+    }
+    // Handle Radio automatic channel selection
+    else if path.ends_with(".AutoChannelEnable") {
+        if let Some(idx) = parse_radio_index(path) {
+            if idx > 0 && idx <= devices.len() {
+                let device = &devices[idx - 1];
+                // OpenWrt spells auto-select as the literal channel `auto`.
+                // Only act when turning it on: turning it off without naming a
+                // channel would leave the radio with no channel at all, so the
+                // controller must follow with an explicit Channel.
+                if value == "true" || value == "1" {
+                    uci_set(&format!("wireless.{device}.channel"), "auto")?;
+                    uci_commit("wireless")?;
+                    wifi_reload().await?;
+                    info!("WiFi Radio {idx} set to automatic channel selection");
+                } else {
+                    info!("WiFi Radio {idx} AutoChannelEnable=false is a no-op; awaiting explicit Channel");
+                }
+            } else {
+                return Err(format!("Radio index {idx} out of range"));
+            }
+        }
+    }
+    // Handle Radio transmit power
+    //
+    // Symmetric with GET, which reports `wireless.<dev>.txpower` unchanged --
+    // that is dBm, not the TR-181 percentage. Keeping the two the same means a
+    // controller can safely write back a value it read.
+    else if path.ends_with(".TransmitPower") {
+        if let Some(idx) = parse_radio_index(path) {
+            if idx > 0 && idx <= devices.len() {
+                let device = &devices[idx - 1];
+                let dbm: i32 = value
+                    .trim()
+                    .parse()
+                    .map_err(|_| format!("TransmitPower must be an integer dBm value: {value}"))?;
+                if !(0..=30).contains(&dbm) {
+                    return Err(format!(
+                        "TransmitPower {dbm} out of range 0-30 dBm; \
+                         a TR-181 percentage cannot be written here"
+                    ));
+                }
+                uci_set(&format!("wireless.{device}.txpower"), &dbm.to_string())?;
+                uci_commit("wireless")?;
+                wifi_reload().await?;
+                info!("WiFi Radio {idx} txpower set to {dbm} dBm");
+            } else {
+                return Err(format!("Radio index {idx} out of range"));
+            }
+        }
     } else {
         warn!("DM SET WiFi: unknown path {path}");
         return Err(format!("Unknown WiFi path: {path}"));
@@ -1283,5 +1409,91 @@ async fn wifi_reload() -> Result<(), String> {
             warn!("WiFi reload failed, changes will apply on reboot");
             Ok(()) // Don't fail the operation
         }
+    }
+}
+
+#[cfg(test)]
+mod set_tests {
+    use super::*;
+
+    /// A GET/SET round-trip must be safe: the controller reports back what the
+    /// agent told it. Writing the friendly spelling straight into UCI put
+    /// `encryption=WPA2-Personal` in the config and hostapd would not start.
+    #[test]
+    fn friendly_encryption_round_trips_to_uci() {
+        assert_eq!(friendly_to_uci_encryption("WPA2-Personal").unwrap(), "psk2");
+        assert_eq!(friendly_to_uci_encryption("WPA3-Personal").unwrap(), "sae");
+        assert_eq!(
+            friendly_to_uci_encryption("WPA-WPA2-Personal").unwrap(),
+            "psk-mixed"
+        );
+        assert_eq!(
+            friendly_to_uci_encryption("WPA2-WPA3-Personal").unwrap(),
+            "sae-mixed"
+        );
+        assert_eq!(friendly_to_uci_encryption("None").unwrap(), "none");
+        // Native spellings pass through, so a caller that knows UCI is not
+        // forced to go via the friendly name.
+        assert_eq!(friendly_to_uci_encryption("psk2").unwrap(), "psk2");
+        assert!(friendly_to_uci_encryption("nonsense").is_err());
+    }
+
+    /// Every spelling this file reports on GET must be writable on SET.
+    /// Otherwise the controller can read a value it cannot put back.
+    #[test]
+    fn every_reported_mode_is_settable() {
+        for friendly in [
+            "WPA2-Personal",
+            "WPA-WPA2-Personal",
+            "WPA3-Personal",
+            "WPA2-WPA3-Personal",
+            "WPA2-Enterprise",
+            "OWE",
+            "None",
+        ] {
+            assert!(
+                friendly_to_uci_encryption(friendly).is_ok(),
+                "GET reports {friendly} but SET cannot write it"
+            );
+        }
+    }
+
+    /// The bug this guard exists for: `.SSID` wrote UCI, committed, and never
+    /// reloaded, so the radio kept beaconing the old name while the controller
+    /// received a clean SetResp.
+    ///
+    /// Asserted against the source because the behaviour is "did we call the
+    /// reload", which cannot be observed without a live radio. Comment lines
+    /// are stripped so a commented-out call cannot satisfy it.
+    #[test]
+    fn every_uci_writing_branch_reloads() {
+        let src: String = include_str!("wifi.rs")
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let start = src.find("pub async fn set(").expect("set() not found");
+        let end = src[start..].find("\n}\n").expect("end of set() not found") + start;
+        let body = &src[start..end];
+
+        // Split into branches on `else if`, keeping the first.
+        let branches: Vec<&str> = body.split("else if").collect();
+        let mut offenders = Vec::new();
+        for b in &branches {
+            if b.contains("uci_commit(") && !b.contains("wifi_reload(") {
+                let label = b
+                    .lines()
+                    .find(|l| l.contains("path.ends_with"))
+                    .unwrap_or("<unknown branch>")
+                    .trim()
+                    .to_string();
+                offenders.push(label);
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "branches commit UCI without reloading the radio: {offenders:#?}"
+        );
     }
 }
