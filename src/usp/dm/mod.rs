@@ -8,6 +8,7 @@
 pub mod appfilter;
 pub mod bridge;
 pub mod claim;
+pub mod consent;
 pub mod device_info;
 pub mod dhcp;
 pub mod dpi;
@@ -196,7 +197,15 @@ async fn dispatch_get(cfg: &ClientConfig, path: &str) -> Params {
     } else if path.starts_with("Device.X_OptimACS_Reputation") {
         reputation::get(cfg, path)
     } else if path.starts_with("Device.X_OptimACS_Sensing") {
-        sensing::get(cfg, path)
+        // Consent state is merged in rather than given its own arm.
+        //
+        // The controller polls the PREFIX `Device.X_OptimACS_Sensing.`, never
+        // the leaf, so an exact-path arm for `.Enable` would be unreachable in
+        // production and the switch would read as absent -- present in the data
+        // model, invisible to the only caller.
+        let mut m = sensing::get(cfg, path);
+        m.extend(consent::get(cfg, path));
+        m
     } else if path.starts_with("Device.X_OptimACS_DPI") {
         // Both producers answer under this prefix: sensord's own classified
         // flows and nDPId's native events. Merged here rather than given
@@ -205,6 +214,10 @@ async fn dispatch_get(cfg: &ClientConfig, path: &str) -> Params {
         // controller never has to guess which engine wrote a line.
         let mut m = dpi_flows::get(cfg, path);
         m.extend(ndpid_flows::get(cfg, path));
+        // Consent state, for the same reason as the Sensing branch above: the
+        // controller GETs this prefix, so `.Enable` must be answered here or it
+        // is never seen.
+        m.extend(consent::get(cfg, path));
         m
     } else if path.starts_with("Device.X_OptimACS_Firmware.") {
         firmware::get(cfg, path)
@@ -255,6 +268,8 @@ async fn dispatch_set(cfg: &ClientConfig, path: &str, value: &str) -> Result<(),
         reputation::set(cfg, path, value)
     } else if path.starts_with("Device.X_OptimACS_Claim.") {
         claim::set(cfg, path, value)
+    } else if path == "Device.X_OptimACS_Sensing.Enable" || path == "Device.X_OptimACS_DPI.Enable" {
+        consent::set(cfg, path, value).await
     } else {
         Err(format!("read-only or unknown path: {path}"))
     }
