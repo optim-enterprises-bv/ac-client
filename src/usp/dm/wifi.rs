@@ -155,7 +155,11 @@ fn friendly_to_uci_encryption(v: &str) -> Result<&'static str, String> {
 static WIFI_RELOAD_PENDING: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
-fn mark_wifi_reload() {
+/// Record that the radios need reloading once this SET completes.
+///
+/// `pub(crate)` so the mesh module shares the SAME batched reload: a SET that
+/// changes both an SSID and the mesh must bounce the radios once, not twice.
+pub(crate) fn mark_wifi_reload() {
     WIFI_RELOAD_PENDING.store(true, std::sync::atomic::Ordering::SeqCst);
 }
 
