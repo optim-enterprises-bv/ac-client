@@ -209,17 +209,27 @@ pub async fn set(_cfg: &ClientConfig, path: &str, value: &str) -> Result<(), Str
 
 /// Create the section with safe defaults if it does not exist.
 ///
-/// `mode` and `mesh_fwding` are set here rather than left to the controller:
-/// a `wifi-iface` without `mode 'mesh'` is not a mesh at all, and forwarding off
-/// yields a mesh that peers and carries no traffic. Both are what every caller
-/// wants and neither is discoverable from a failure.
+/// `mode` is set here because a `wifi-iface` without `mode 'mesh'` is not a mesh
+/// at all, and that is not discoverable from a failure.
+///
+/// `mesh_fwding` is deliberately NOT written. OpenWrt's wifi-scripts translate
+/// it into a wpa_supplicant network field which the supplicant rejects:
+///
+/// ```text
+/// Line 10: unknown network field 'mesh_fwding'.
+/// Failed to read or parse configuration '/var/run/wpa-supplicant-phy1-mesh0.conf'.
+/// ```
+///
+/// The whole config then fails to parse, the supplicant never joins the mesh,
+/// and no peering is ever attempted -- observed on hardware, where the UCI was
+/// perfect and the radio was up while the mesh silently did nothing. Kernel mesh
+/// forwarding defaults to on, so omitting it changes no behaviour.
 fn ensure_section() -> Result<(), String> {
     if configured() {
         return Ok(());
     }
     uci_set(&format!("wireless.{SECTION}"), "wifi-iface")?;
     uci_set(&opt("mode"), "mesh")?;
-    uci_set(&opt("mesh_fwding"), "1")?;
     // Default to the first radio only so the section is valid; the controller
     // is expected to set Radio explicitly.
     if uci_get(&opt("device")).trim().is_empty() {
