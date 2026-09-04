@@ -81,6 +81,23 @@ fn peer_count() -> Option<usize> {
     None
 }
 
+/// Is the WING mesh routing toolkit usable on this device?
+///
+/// Reported so the controller does not have to guess. aether classifies a
+/// device into a mesh family from what it reports, and its USP path had no way
+/// to learn this at all -- it hardcoded "not WING-capable", so a device with
+/// WING installed was permanently classified as 802.11s and the WING compiler
+/// was unreachable for the entire fleet.
+///
+/// Both markers are required, and they are the same two `platform::detect::
+/// wing_capable` looks for: the Click binary WING routes with, and the netifd
+/// proto handler that brings a WING interface up. Either alone is a partial
+/// install that would take a config it cannot run.
+fn wing_capable() -> bool {
+    std::path::Path::new("/usr/bin/click").exists()
+        && std::path::Path::new("/lib/netifd/proto/wing.sh").exists()
+}
+
 /// Report the mesh configuration and what it is actually doing.
 pub fn get(_cfg: &ClientConfig, path: &str) -> HashMap<String, String> {
     let mut m = HashMap::new();
@@ -117,6 +134,14 @@ pub fn get(_cfg: &ClientConfig, path: &str) -> HashMap<String, String> {
         "Device.X_OptimACS_Mesh.Peers".into(),
         peer_count().map(|n| n.to_string()).unwrap_or_default(),
     );
+
+    // Reported unconditionally, including when no mesh is configured: this is a
+    // property of the FIRMWARE, not of the current mesh, and the controller
+    // needs it before it plans anything.
+    m.insert(
+        "Device.X_OptimACS_Mesh.WingCapable".into(),
+        if wing_capable() { "1" } else { "0" }.into(),
+    );
     m
 }
 
@@ -144,6 +169,9 @@ pub async fn set(_cfg: &ClientConfig, path: &str, value: &str) -> Result<(), Str
             return Ok(());
         }
         "Peers" => return Err("Peers is read-only".into()),
+        // A capability, not a setting. Letting a controller assert it would let
+        // a device be planned into a mesh family its firmware cannot run.
+        "WingCapable" => return Err("WingCapable is read-only".into()),
         _ => {}
     }
 
@@ -291,6 +319,38 @@ mod tests {
             !m.contains_key("Device.X_OptimACS_Mesh.Passphrase"),
             "the mesh key must not be readable through the data model"
         );
+    }
+
+    /// WingCapable must be reported even with no mesh configured.
+    ///
+    /// It is a property of the firmware, not of the current mesh. The
+    /// controller needs it BEFORE it plans anything — that is the whole point,
+    /// since without it a WING-capable device is permanently classified as
+    /// 802.11s and the WING compiler is unreachable.
+    #[test]
+    fn wing_capability_is_reported_even_with_no_mesh() {
+        let cfg = ClientConfig::default();
+        let m = get(&cfg, "Device.X_OptimACS_Mesh.");
+        assert!(
+            m.contains_key("Device.X_OptimACS_Mesh.WingCapable"),
+            "WingCapable must always be present, got: {:?}",
+            m.keys().collect::<Vec<_>>()
+        );
+        let v = &m["Device.X_OptimACS_Mesh.WingCapable"];
+        assert!(v == "0" || v == "1", "must be a boolean, got {v:?}");
+    }
+
+    /// A capability must not be settable.
+    ///
+    /// Letting a controller assert it would let a device be planned into a mesh
+    /// family its firmware cannot run.
+    #[tokio::test]
+    async fn wing_capability_is_read_only() {
+        let cfg = ClientConfig::default();
+        let err = set(&cfg, "Device.X_OptimACS_Mesh.WingCapable", "1")
+            .await
+            .expect_err("must be refused");
+        assert!(err.contains("read-only"), "got: {err}");
     }
 
     #[test]
