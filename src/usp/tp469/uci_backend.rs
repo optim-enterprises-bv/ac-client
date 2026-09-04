@@ -579,11 +579,11 @@ pub fn uci_set(path: &str, value: &str) -> Result<(), String> {
     }
 }
 
-fn uci_delete(path: &str) -> Result<(), String> {
+pub(crate) fn uci_delete(path: &str) -> Result<(), String> {
     let status = Command::new("uci")
         .args(["delete", path])
         .status()
-        .map_err(|e| format!("Failed to execute uci delete: {}", e))?;
+        .map_err(|e| format!("Failed to execute uci delete: {e}"))?;
 
     if status.success() {
         Ok(())
@@ -592,11 +592,11 @@ fn uci_delete(path: &str) -> Result<(), String> {
     }
 }
 
-fn uci_add_list(path: &str, value: &str) -> Result<(), String> {
+pub(crate) fn uci_add_list(path: &str, value: &str) -> Result<(), String> {
     let status = Command::new("uci")
         .args(["add_list", &format!("{}={}", path, value)])
         .status()
-        .map_err(|e| format!("Failed to execute uci add_list: {}", e))?;
+        .map_err(|e| format!("Failed to execute uci add_list: {e}"))?;
 
     if status.success() {
         Ok(())
@@ -626,11 +626,11 @@ pub fn uci_get(path: &str) -> String {
     }
 }
 
-fn uci_del_list(path: &str, value: &str) -> Result<(), String> {
+pub(crate) fn uci_del_list(path: &str, value: &str) -> Result<(), String> {
     let status = Command::new("uci")
         .args(["del_list", &format!("{}={}", path, value)])
         .status()
-        .map_err(|e| format!("Failed to execute uci del_list: {}", e))?;
+        .map_err(|e| format!("Failed to execute uci del_list: {e}"))?;
 
     if status.success() {
         Ok(())

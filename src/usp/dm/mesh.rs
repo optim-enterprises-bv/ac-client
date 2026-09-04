@@ -31,7 +31,9 @@ use log::{info, warn};
 
 use crate::config::ClientConfig;
 use crate::usp::dm::wifi::mark_wifi_reload;
-use crate::usp::tp469::uci_backend::{uci_commit, uci_get, uci_set};
+use crate::usp::tp469::uci_backend::{
+    uci_add_list, uci_commit, uci_delete, uci_del_list, uci_get, uci_set,
+};
 
 /// UCI `wifi-iface` section owned by the controller.
 const SECTION: &str = "aethermesh";
@@ -160,10 +162,14 @@ pub async fn set(_cfg: &ClientConfig, path: &str, value: &str) -> Result<(), Str
             let on = usp_bool(value)?;
             if on {
                 ensure_section()?;
+                ensure_network_interface()?;
             } else {
                 remove_section()?;
+                remove_network_interface()?;
             }
             uci_commit("wireless")?;
+            uci_commit("network")?;
+            uci_commit("firewall")?;
             mark_wifi_reload();
             info!("mesh: {}", if on { "enabled" } else { "removed" });
             return Ok(());
@@ -221,6 +227,15 @@ pub async fn set(_cfg: &ClientConfig, path: &str, value: &str) -> Result<(), Str
             v @ ("0" | "1" | "2") => ("ieee80211w", v.to_owned()),
             other => return Err(format!("MFP must be 0, 1 or 2, got {other}")),
         },
+        // The mesh interface's layer-3 address (e.g. `10.0.0.1/8`). Stored on
+        // the wireless section so the network interface + firewall zone can be
+        // created together when the mesh is enabled.
+        "IPAddress" => {
+            if value.trim().is_empty() {
+                return Err("IPAddress must not be empty".into());
+            }
+            ("ipaddr", value.to_owned())
+        }
         other => return Err(format!("unknown mesh parameter: {other}")),
     };
 
@@ -278,6 +293,70 @@ fn remove_section() -> Result<(), String> {
     if !status.success() {
         warn!("mesh: uci delete wireless.{SECTION} returned {status}");
         return Err("failed to remove mesh interface".into());
+    }
+    Ok(())
+}
+
+/// The `network` interface section that carries the mesh's layer-3 address.
+///
+/// A mesh `wifi-iface` alone forms the 802.11s adjacency but carries no IP, so
+/// the mesh forms and routes nothing. This creates a static `network` interface
+/// on the mesh device and binds it to the `lan` firewall zone so the firewall
+/// accepts mesh traffic. The address comes from the `ipaddr` option the
+/// controller sets via `Device.X_OptimACS_Mesh.IPAddress`.
+const NETWORK_SECTION: &str = "aethermesh";
+
+fn net_opt(name: &str) -> String {
+    format!("network.{NETWORK_SECTION}.{name}")
+}
+
+/// Create the static network interface + firewall zone binding for the mesh.
+fn ensure_network_interface() -> Result<(), String> {
+    // The mesh device is the wifi-iface's ifname (mesh0, mesh1, ...). Resolve it
+    // from the wireless section; fall back to `mesh0` (OpenWrt's default).
+    let ifname = uci_get(&opt("ifname")).trim().to_owned();
+    let ifname = if ifname.is_empty() { "mesh0".to_owned() } else { ifname };
+
+    // Create the network interface if it does not exist.
+    if uci_get(&format!("network.{NETWORK_SECTION}")).trim().is_empty() {
+        uci_set(&format!("network.{NETWORK_SECTION}"), "interface")?;
+        uci_set(&net_opt("device"), &ifname)?;
+        uci_set(&net_opt("proto"), "static")?;
+        // The address is set by the controller via IPAddress; if it was not
+        // sent yet, leave it empty and let the controller fill it in.
+        let ip = uci_get(&opt("ipaddr"));
+        if !ip.trim().is_empty() {
+            uci_set(&net_opt("ipaddr"), ip.trim())?;
+        }
+        info!("mesh: created network interface '{NETWORK_SECTION}' on {ifname}");
+    }
+
+    // Bind the mesh network to the lan firewall zone so mesh traffic is not
+    // dropped. Idempotent: only add if not already present.
+    let zone = uci_get("firewall.@zone[0].name");
+    if zone.trim() == "lan" {
+        let networks = uci_get("firewall.@zone[0].network");
+        if !networks.split_whitespace().any(|n| n == NETWORK_SECTION) {
+            uci_add_list("firewall.@zone[0].network", NETWORK_SECTION)?;
+            info!("mesh: bound '{NETWORK_SECTION}' to lan firewall zone");
+        }
+    }
+
+    Ok(())
+}
+
+/// Remove the network interface + firewall zone binding when the mesh is torn
+/// down. Best-effort: a missing section is not an error.
+fn remove_network_interface() -> Result<(), String> {
+    if !uci_get(&format!("network.{NETWORK_SECTION}")).trim().is_empty() {
+        uci_delete(&format!("network.{NETWORK_SECTION}"))?;
+        info!("mesh: removed network interface '{NETWORK_SECTION}'");
+    }
+    // Remove the mesh network from the lan zone if present.
+    let networks = uci_get("firewall.@zone[0].network");
+    if networks.split_whitespace().any(|n| n == NETWORK_SECTION) {
+        uci_del_list("firewall.@zone[0].network", NETWORK_SECTION)?;
+        info!("mesh: unbound '{NETWORK_SECTION}' from lan firewall zone");
     }
     Ok(())
 }
