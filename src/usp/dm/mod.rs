@@ -17,6 +17,7 @@ pub mod enforcement;
 pub mod firmware;
 pub mod hosts;
 pub mod ip;
+pub mod mesh;
 pub mod misc;
 pub mod ndpid_flows;
 pub mod qos;
@@ -192,6 +193,8 @@ async fn dispatch_get(cfg: &ClientConfig, path: &str) -> Params {
         || path.starts_with("Device.X_OptimACS_NDPI")
     {
         appfilter::get(cfg, path)
+    } else if path.starts_with("Device.X_OptimACS_Mesh") {
+        mesh::get(cfg, path)
     } else if path.starts_with("Device.X_OptimACS_Enforcement") {
         enforcement::get(cfg, path)
     } else if path.starts_with("Device.X_OptimACS_Reputation") {
@@ -268,9 +271,51 @@ async fn dispatch_set(cfg: &ClientConfig, path: &str, value: &str) -> Result<(),
         reputation::set(cfg, path, value)
     } else if path.starts_with("Device.X_OptimACS_Claim.") {
         claim::set(cfg, path, value)
+    } else if path.starts_with("Device.X_OptimACS_Mesh.") {
+        // 802.11s has no TR-181 representation, so a controller building a mesh
+        // over USP has only this vendor object. Matched on the PREFIX: a mesh
+        // arrives as several parameters in one SET (MeshId, Passphrase, Radio,
+        // Encryption, Enable) and every one of them must land.
+        mesh::set(cfg, path, value).await
     } else if path == "Device.X_OptimACS_Sensing.Enable" || path == "Device.X_OptimACS_DPI.Enable" {
         consent::set(cfg, path, value).await
     } else {
         Err(format!("read-only or unknown path: {path}"))
+    }
+}
+
+#[cfg(test)]
+mod dispatch_tests {
+    use super::*;
+
+    /// `Device.X_OptimACS_Mesh.` must be reachable THROUGH the dispatch.
+    ///
+    /// The module's own tests call `mesh::get`/`mesh::set` directly, which
+    /// proves the code works and says nothing about whether anything calls it.
+    /// A data-model object that is implemented and unrouted is invisible to the
+    /// controller and indistinguishable from a device that does not support it.
+    ///
+    /// The SET assertion keys off the ERROR TEXT on purpose: an unrouted path
+    /// falls through to "read-only or unknown path", while a routed one reaches
+    /// `mesh::set` and is rejected as "unknown mesh parameter". Confirmed to
+    /// fail by removing the dispatch arm.
+    #[tokio::test]
+    async fn the_mesh_object_is_reachable_through_dispatch() {
+        let cfg = ClientConfig::default();
+
+        let got = dispatch_get(&cfg, "Device.X_OptimACS_Mesh.").await;
+        assert!(
+            got.keys().any(|k| k.starts_with("Device.X_OptimACS_Mesh.")),
+            "GET dispatch does not route the mesh prefix; got {:?}",
+            got.keys().collect::<Vec<_>>()
+        );
+
+        let err = dispatch_set(&cfg, "Device.X_OptimACS_Mesh.NoSuchParam", "1")
+            .await
+            .expect_err("an unknown mesh parameter must be rejected");
+        assert!(
+            err.contains("unknown mesh parameter"),
+            "SET dispatch did not reach mesh::set -- got {err:?}"
+        );
     }
 }
