@@ -198,6 +198,21 @@ pub fn get(_cfg: &ClientConfig, path: &str) -> HashMap<String, String> {
             .unwrap_or_default(),
     );
 
+    // The mesh interface's own MAC. Peers are reported as the *mesh* MACs of
+    // the other nodes, which differ from the agent MACs the controller keys
+    // devices by. Without this, the controller cannot map a peer mesh-MAC back
+    // to the agent that owns it, so it cannot draw the link between two nodes.
+    m.insert(
+        "Device.X_OptimACS_Mesh.InterfaceMAC".into(),
+        discover_mesh_iface()
+            .and_then(|iface| {
+                std::fs::read_to_string(format!("/sys/class/net/{iface}/address"))
+                    .ok()
+                    .map(|s| s.trim().to_owned())
+            })
+            .unwrap_or_default(),
+    );
+
     // Reported unconditionally, including when no mesh is configured: this is a
     // property of the FIRMWARE, not of the current mesh, and the controller
     // needs it before it plans anything.
