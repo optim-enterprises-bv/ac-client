@@ -155,6 +155,23 @@ fn wing_capable() -> bool {
         && std::path::Path::new("/lib/netifd/proto/wing.sh").exists()
 }
 
+/// Whether the device can run B.A.T.M.A.N. adv: the `kmod-batman-adv` kernel
+/// module and the `batctl` userspace tool are both present. Either alone is a
+/// partial install that would take a config it cannot run.
+fn batman_capable() -> bool {
+    // The module lives under /lib/modules/<kernel>/batman-adv.ko.
+    let has_kmod = std::fs::read_dir("/lib/modules")
+        .map(|rd| {
+            rd.filter_map(Result::ok).any(|e| {
+                e.path()
+                    .join("batman-adv.ko")
+                    .exists()
+            })
+        })
+        .unwrap_or(false);
+    has_kmod && std::path::Path::new("/usr/sbin/batctl").exists()
+}
+
 /// Report the mesh configuration and what it is actually doing.
 pub fn get(_cfg: &ClientConfig, path: &str) -> HashMap<String, String> {
     let mut m = HashMap::new();
@@ -219,6 +236,14 @@ pub fn get(_cfg: &ClientConfig, path: &str) -> HashMap<String, String> {
     m.insert(
         "Device.X_OptimACS_Mesh.WingCapable".into(),
         if wing_capable() { "1" } else { "0" }.into(),
+    );
+
+    // Whether the device can run B.A.T.M.A.N. adv (kmod-batman-adv + batctl).
+    // Reported unconditionally, like WingCapable: a property of the firmware,
+    // not of the current mesh, and the controller needs it before it plans.
+    m.insert(
+        "Device.X_OptimACS_Mesh.BatmanCapable".into(),
+        if batman_capable() { "1" } else { "0" }.into(),
     );
 
     // The mesh interface's layer-3 address, read back from the network
