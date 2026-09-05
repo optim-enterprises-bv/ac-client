@@ -19,6 +19,42 @@ fn uci_add_list(path: &str, value: &str) -> Result<(), String> {
     }
 }
 
+/// A client's DHCP fingerprint, captured by the dnsmasq hook.
+struct Fingerprint {
+    vendor_class: String,
+    requested_options: String,
+}
+
+/// Read a client's DHCP fingerprint from the file the dnsmasq hook wrote.
+///
+/// The hook persists one file per MAC under /tmp/dhcp-fingerprints/, keyed by
+/// the lowercase colon-form MAC. The vendor class (option 60) and requested
+/// options (option 55) are the two fields that most reliably identify the
+/// device/OS. Absent file (no DHCP event captured yet, or a statically
+/// addressed client) means no fingerprint.
+fn read_fingerprint(mac: &str) -> Option<Fingerprint> {
+    let mac_lc = mac.to_ascii_lowercase();
+    let path = format!("/tmp/dhcp-fingerprints/{mac_lc}");
+    let text = std::fs::read_to_string(&path).ok()?;
+    let mut vendor_class = String::new();
+    let mut requested_options = String::new();
+    for line in text.lines() {
+        if let Some(v) = line.strip_prefix("vendor_class=") {
+            vendor_class = v.to_owned();
+        } else if let Some(v) = line.strip_prefix("requested_options=") {
+            requested_options = v.to_owned();
+        }
+    }
+    if vendor_class.is_empty() && requested_options.is_empty() {
+        None
+    } else {
+        Some(Fingerprint {
+            vendor_class,
+            requested_options,
+        })
+    }
+}
+
 fn uci_delete(path: &str) -> Result<(), String> {
     let status = std::process::Command::new("uci")
         .args(["delete", path])
@@ -211,6 +247,13 @@ pub async fn get(_cfg: &ClientConfig, _path: &str) -> HashMap<String, String> {
         m.insert(format!("{base}Active"), h.active.to_string());
         m.insert(format!("{base}AddressSource"), h.source.to_string());
         m.insert(format!("{base}InterfaceType"), "Ethernet".to_string());
+        // DHCP fingerprint (vendor class + requested options) captured by the
+        // dnsmasq hook, if the client has one. This is what identifies the
+        // device/OS even when the MAC is randomised.
+        if let Some(fp) = read_fingerprint(&h.mac) {
+            m.insert(format!("{base}X_OptimACS_VendorClass"), fp.vendor_class);
+            m.insert(format!("{base}X_OptimACS_RequestedOptions"), fp.requested_options);
+        }
     }
     m.insert(
         "Device.Hosts.HostNumberOfEntries".into(),

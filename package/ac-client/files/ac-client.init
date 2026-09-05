@@ -67,6 +67,15 @@ start_service() {
 	# rather than in the package Makefile to avoid cp -fpR EISDIR errors.
 	mkdir -p /var/apclient/images /var/apclient/firmware
 
+	# Wire the DHCP fingerprint capture hook into dnsmasq. dnsmasq sources
+	# USER_DHCPSCRIPT on every DHCP event; our hook persists the client's
+	# vendor class + requested options so ac-client can report them.
+	if [ -f /usr/lib/ac-client/dhcp-fingerprint.sh ]; then
+		uci -q set dhcp.@dnsmasq[0].user_dhcpscript=/usr/lib/ac-client/dhcp-fingerprint.sh
+		uci -q commit dhcp
+		/etc/init.d/dnsmasq restart >/dev/null 2>&1
+	fi
+
 	procd_open_instance
 
 	# shellcheck disable=SC2086

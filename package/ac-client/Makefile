@@ -131,6 +131,12 @@ define Package/ac-client/install
 	# procd init script
 	$(INSTALL_DIR) $(1)/etc/init.d
 	$(INSTALL_BIN) ./files/ac-client.init $(1)/etc/init.d/ac-client
+
+	# DHCP fingerprint capture hook. Sourced by dnsmasq's dhcp-script.sh
+	# (via USER_DHCPSCRIPT) on every DHCP event; persists the client's vendor
+	# class + requested options to /tmp so ac-client can report them.
+	$(INSTALL_DIR) $(1)/usr/lib/ac-client
+	$(INSTALL_BIN) ./files/dhcp-fingerprint.sh $(1)/usr/lib/ac-client/dhcp-fingerprint.sh
 	#
 	# NOTE: /var on OpenWrt is a symlink to /tmp (tmpfs).  Do NOT install
 	# directories under /var here — the build system copies the package tree
