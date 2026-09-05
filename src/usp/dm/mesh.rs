@@ -122,9 +122,11 @@ fn discover_mesh_iface() -> Option<String> {
         return None;
     }
     let text = String::from_utf8_lossy(&out.stdout);
-    // Parse blocks: "Interface <name>" ... "type mesh point".
+    // Parse blocks: "Interface <name>" ... "type mesh point". The line is
+    // indented with a tab in `iw dev` output, so trim before matching.
     let mut current: Option<String> = None;
     for line in text.lines() {
+        let line = line.trim();
         if let Some(name) = line.strip_prefix("Interface ") {
             current = Some(name.trim().to_owned());
         } else if line.contains("type mesh point") {
