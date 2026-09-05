@@ -155,19 +155,17 @@ fn wing_capable() -> bool {
         && std::path::Path::new("/lib/netifd/proto/wing.sh").exists()
 }
 
-/// Whether the device can run B.A.T.M.A.N. adv: the `kmod-batman-adv` kernel
-/// module and the `batctl` userspace tool are both present. Either alone is a
+/// Whether the device can run B.A.T.M.A.N. adv: the `batman_adv` kernel module
+/// is loaded and the `batctl` userspace tool is present. Either alone is a
 /// partial install that would take a config it cannot run.
+///
+/// The module is loaded under the name `batman_adv` (with an underscore), so
+/// presence in `/proc/modules` is the reliable check — it works whether the
+/// module was autoloaded from a .ko on disk or insmod'ed by hand (e.g. a
+/// development build where the .ko never made it into the rootfs).
 fn batman_capable() -> bool {
-    // The module lives under /lib/modules/<kernel>/batman-adv.ko.
-    let has_kmod = std::fs::read_dir("/lib/modules")
-        .map(|rd| {
-            rd.filter_map(Result::ok).any(|e| {
-                e.path()
-                    .join("batman-adv.ko")
-                    .exists()
-            })
-        })
+    let has_kmod = std::fs::read_to_string("/proc/modules")
+        .map(|s| s.lines().any(|l| l.starts_with("batman_adv ")))
         .unwrap_or(false);
     has_kmod && std::path::Path::new("/usr/sbin/batctl").exists()
 }
@@ -246,14 +244,14 @@ pub fn get(_cfg: &ClientConfig, path: &str) -> HashMap<String, String> {
         if batman_capable() { "1" } else { "0" }.into(),
     );
 
-    // The mesh interface's layer-3 address, read back from the network
-    // interface the controller created via IPAddress. Reported so the
-    // controller can see what address the device actually has (which may be a
-    // mactoip-derived address the device self-assigned at boot, not the one the
-    // controller pushed).
+    // The mesh interface's layer-3 address. Prefer the bat0 IP when batman-adv
+    // is active (the mesh data-plane address the controller routes to);
+    // otherwise the 802.11s mesh iface IP. Report the *actual* address on the
+    // interface, not the UCI config, so the controller sees what the device
+    // really has (which may be a mactoip-derived address self-assigned at boot).
     m.insert(
         "Device.X_OptimACS_Mesh.IPAddress".into(),
-        uci_get(&net_opt("ipaddr")).trim().to_owned(),
+        mesh_ipaddr(),
     );
 
     // Whether this device is the mesh's internet gateway. A device is the
@@ -265,6 +263,29 @@ pub fn get(_cfg: &ClientConfig, path: &str) -> HashMap<String, String> {
         if is_gateway() { "gateway" } else { "client" }.into(),
     );
     m
+}
+
+/// The actual layer-3 address on the mesh data-plane interface.
+///
+/// Prefers `bat0` (batman-adv active) then the 802.11s mesh iface; returns the
+/// bare address (no CIDR). Empty when neither has an address.
+fn mesh_ipaddr() -> String {
+    for iface in ["bat0", "mesh0", "phy1-mesh0"] {
+        if let Ok(out) = std::process::Command::new("ip")
+            .args(["-4", "addr", "show", iface])
+            .output()
+        {
+            let s = String::from_utf8_lossy(&out.stdout);
+            if let Some(line) = s.lines().find(|l| l.trim_start().starts_with("inet ")) {
+                // `inet a.b.c.d/8 ...` — take the address before the '/'.
+                let addr = line.trim().split_whitespace().nth(1).unwrap_or("");
+                if let Some(ip) = addr.split('/').next() {
+                    return ip.to_owned();
+                }
+            }
+        }
+    }
+    String::new()
 }
 
 /// Whether this device is the mesh's internet gateway: its WAN interface has
