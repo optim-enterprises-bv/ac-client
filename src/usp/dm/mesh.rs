@@ -55,28 +55,81 @@ fn configured() -> bool {
     !uci_get(&format!("wireless.{SECTION}")).trim().is_empty()
 }
 
-/// Number of established mesh peers, if the interface is up.
+/// Established mesh peers, as a comma-separated list of MACs.
 ///
 /// Read from `iw`, not from UCI: UCI says what was asked for, `iw` says what is
 /// actually peered. A mesh configured correctly that has found nobody is the
 /// failure this parameter exists to make visible.
-fn peer_count() -> Option<usize> {
-    let iface = uci_get(&opt("ifname"));
-    let iface = iface.trim();
-    let candidates: Vec<String> = if iface.is_empty() {
-        // OpenWrt names mesh interfaces `mesh0`, `mesh1`, … unless overridden.
-        (0..4).map(|i| format!("mesh{i}")).collect()
+///
+/// The interface is discovered, not assumed: OpenWrt names mesh interfaces
+/// `mesh0`, `mesh1`, … or `phy1-mesh0` depending on the driver and how many
+/// radios are in play, and the `ifname` UCI option is frequently empty (netifd
+/// assigns the name). Scanning `iw dev` for a `type mesh point` interface is
+/// the only spelling that is guaranteed to match the real one.
+fn mesh_peers() -> Option<Vec<String>> {
+    // Find the mesh interface by scanning `iw dev` output for a mesh point.
+    let iface = discover_mesh_iface()?;
+    let out = std::process::Command::new("iw")
+        .args(["dev", &iface, "station", "dump"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    // `iw dev <iface> station dump` lists each peer as `Station <mac>`, with
+    // the plink state on a following line. Only established peers count as
+    // a real link; a peer stuck in OPN_SNT/LISTEN is not a usable path.
+    let lines: Vec<&str> = text.lines().collect();
+    let mut peers = Vec::new();
+    let mut i = 0;
+    while i < lines.len() {
+        let line = lines[i];
+        if let Some(mac) = line.strip_prefix("Station ") {
+            let mac = mac.split_whitespace().next().unwrap_or("").to_owned();
+            // Scan the station's block for its plink state (it may not be the
+            // immediate next line).
+            let mut established = false;
+            i += 1;
+            while i < lines.len() && !lines[i].starts_with("Station ") {
+                if lines[i].contains("mesh plink:") && lines[i].contains("ESTAB") {
+                    established = true;
+                }
+                i += 1;
+            }
+            if established {
+                peers.push(mac);
+            }
+            continue;
+        }
+        i += 1;
+    }
+    if peers.is_empty() {
+        None
     } else {
-        vec![iface.to_owned()]
-    };
-    for name in candidates {
-        if let Ok(out) = std::process::Command::new("iw")
-            .args(["dev", &name, "station", "dump"])
-            .output()
-        {
-            if out.status.success() {
-                let text = String::from_utf8_lossy(&out.stdout);
-                return Some(text.matches("Station ").count());
+        Some(peers)
+    }
+}
+
+/// Find the name of the mesh interface, if any.
+///
+/// `iw dev` prints one block per interface, each with a `type mesh point`
+/// line. Prefer the interface the controller created (`aethermesh`'s device),
+/// falling back to any mesh point.
+fn discover_mesh_iface() -> Option<String> {
+    let out = std::process::Command::new("iw").arg("dev").output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    // Parse blocks: "Interface <name>" ... "type mesh point".
+    let mut current: Option<String> = None;
+    for line in text.lines() {
+        if let Some(name) = line.strip_prefix("Interface ") {
+            current = Some(name.trim().to_owned());
+        } else if line.contains("type mesh point") {
+            if let Some(name) = current.take() {
+                return Some(name);
             }
         }
     }
@@ -132,9 +185,15 @@ pub fn get(_cfg: &ClientConfig, path: &str) -> HashMap<String, String> {
     // The passphrase is never reported. A controller that can read back the
     // key it set gains nothing, and anything that can read the data model
     // gains a credential.
+    //
+    // Peers is a comma-separated list of established peer MACs, so the
+    // controller can draw the actual mesh graph (which node links to which),
+    // not just a count. Empty when no mesh is configured or no peer is up.
     m.insert(
         "Device.X_OptimACS_Mesh.Peers".into(),
-        peer_count().map(|n| n.to_string()).unwrap_or_default(),
+        mesh_peers()
+            .map(|p| p.join(","))
+            .unwrap_or_default(),
     );
 
     // Reported unconditionally, including when no mesh is configured: this is a
@@ -430,6 +489,45 @@ mod tests {
             .await
             .expect_err("must be refused");
         assert!(err.contains("read-only"), "got: {err}");
+    }
+
+    /// Only established peers are reported as links; a peer stuck in
+    /// OPN_SNT/LISTEN is not a usable path and must not appear.
+    #[test]
+    fn only_established_peers_are_reported() {
+        // Simulate `iw dev <iface> station dump` for a mesh with one ESTAB
+        // peer and one stuck in OPN_SNT.
+        let dump = "\
+Station d6:f3:37:42:d3:cd (on phy1-mesh0)
+\tsignal: -45 dBm
+\tmesh plink:\tESTAB
+Station ae:5e:ca:cf:3f:1a (on phy1-mesh0)
+\tsignal: -60 dBm
+\tmesh plink:\tOPN_SNT
+";
+        // Extract established peer MACs the same way mesh_peers() does.
+        let lines: Vec<&str> = dump.lines().collect();
+        let mut peers = Vec::new();
+        let mut i = 0;
+        while i < lines.len() {
+            if let Some(mac) = lines[i].strip_prefix("Station ") {
+                let mac = mac.split_whitespace().next().unwrap_or("").to_owned();
+                let mut established = false;
+                i += 1;
+                while i < lines.len() && !lines[i].starts_with("Station ") {
+                    if lines[i].contains("mesh plink:") && lines[i].contains("ESTAB") {
+                        established = true;
+                    }
+                    i += 1;
+                }
+                if established {
+                    peers.push(mac);
+                }
+                continue;
+            }
+            i += 1;
+        }
+        assert_eq!(peers, vec!["d6:f3:37:42:d3:cd"]);
     }
 
     #[test]
