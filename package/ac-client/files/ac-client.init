@@ -70,8 +70,10 @@ start_service() {
 	# Wire the DHCP fingerprint capture hook into dnsmasq. dnsmasq sources
 	# USER_DHCPSCRIPT on every DHCP event; our hook persists the client's
 	# vendor class + requested options so ac-client can report them.
+	# The UCI option is `dhcpscript` (dnsmasq init reads it via config_get),
+	# which also adds the hook to the ujail mount list.
 	if [ -f /usr/lib/ac-client/dhcp-fingerprint.sh ]; then
-		uci -q set dhcp.@dnsmasq[0].user_dhcpscript=/usr/lib/ac-client/dhcp-fingerprint.sh
+		uci -q set dhcp.@dnsmasq[0].dhcpscript=/usr/lib/ac-client/dhcp-fingerprint.sh
 		uci -q commit dhcp
 		/etc/init.d/dnsmasq restart >/dev/null 2>&1
 	fi
