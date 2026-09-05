@@ -220,7 +220,47 @@ pub fn get(_cfg: &ClientConfig, path: &str) -> HashMap<String, String> {
         "Device.X_OptimACS_Mesh.WingCapable".into(),
         if wing_capable() { "1" } else { "0" }.into(),
     );
+
+    // The mesh interface's layer-3 address, read back from the network
+    // interface the controller created via IPAddress. Reported so the
+    // controller can see what address the device actually has (which may be a
+    // mactoip-derived address the device self-assigned at boot, not the one the
+    // controller pushed).
+    m.insert(
+        "Device.X_OptimACS_Mesh.IPAddress".into(),
+        uci_get(&net_opt("ipaddr")).trim().to_owned(),
+    );
+
+    // Whether this device is the mesh's internet gateway. A device is the
+    // gateway if its WAN interface has an IP and a default route (i.e. it has
+    // an uplink). Reported so the controller can draw the gateway role on the
+    // map and emit default routes on the non-gateway nodes.
+    m.insert(
+        "Device.X_OptimACS_Mesh.Role".into(),
+        if is_gateway() { "gateway" } else { "client" }.into(),
+    );
     m
+}
+
+/// Whether this device is the mesh's internet gateway: its WAN interface has
+/// an IP and a default route (i.e. it has an uplink).
+fn is_gateway() -> bool {
+    let wan_ip = std::process::Command::new("ip")
+        .args(["-4", "addr", "show", "wan"])
+        .output()
+        .ok()
+        .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+        .unwrap_or_default();
+    if !wan_ip.contains("inet ") {
+        return false;
+    }
+    // A default route out `wan` confirms the uplink is live.
+    std::process::Command::new("ip")
+        .args(["route", "show", "default"])
+        .output()
+        .ok()
+        .map(|o| String::from_utf8_lossy(&o.stdout).contains("dev wan"))
+        .unwrap_or(false)
 }
 
 /// Apply a mesh parameter.
