@@ -67,6 +67,15 @@ fn configured() -> bool {
 /// assigns the name). Scanning `iw dev` for a `type mesh point` interface is
 /// the only spelling that is guaranteed to match the real one.
 fn mesh_peers() -> Option<Vec<String>> {
+    mesh_peers_with_signal().map(|pairs| pairs.into_iter().map(|(mac, _)| mac).collect())
+}
+
+/// Established mesh peers with their signal strength, from `iw station dump`.
+///
+/// Returns `(peer_mac, signal_dbm)` pairs, aligned with the `Peers` list so
+/// the controller can show per-link quality. Signal is the `signal:` field
+/// (e.g. `-59 dBm`), parsed to an integer dBm.
+fn mesh_peers_with_signal() -> Option<Vec<(String, i32)>> {
     // Find the mesh interface by scanning `iw dev` output for a mesh point.
     let iface = discover_mesh_iface()?;
     let out = std::process::Command::new("iw")
@@ -87,18 +96,26 @@ fn mesh_peers() -> Option<Vec<String>> {
         let line = lines[i];
         if let Some(mac) = line.strip_prefix("Station ") {
             let mac = mac.split_whitespace().next().unwrap_or("").to_owned();
-            // Scan the station's block for its plink state (it may not be the
-            // immediate next line).
+            // Scan the station's block for its plink state and signal (they
+            // may not be the immediate next lines).
             let mut established = false;
+            let mut signal: Option<i32> = None;
             i += 1;
             while i < lines.len() && !lines[i].starts_with("Station ") {
                 if lines[i].contains("mesh plink:") && lines[i].contains("ESTAB") {
                     established = true;
                 }
+                if let Some(sig) = lines[i].strip_prefix("signal:") {
+                    signal = sig
+                        .trim()
+                        .split_whitespace()
+                        .next()
+                        .and_then(|s| s.parse::<i32>().ok());
+                }
                 i += 1;
             }
             if established {
-                peers.push(mac);
+                peers.push((mac, signal.unwrap_or(0)));
             }
             continue;
         }
@@ -214,6 +231,22 @@ pub fn get(_cfg: &ClientConfig, path: &str) -> HashMap<String, String> {
         "Device.X_OptimACS_Mesh.Peers".into(),
         mesh_peers()
             .map(|p| p.join(","))
+            .unwrap_or_default(),
+    );
+
+    // Per-neighbor signal strength (dBm), comma-separated in the same order as
+    // `Peers`. Lets the controller show link quality per mesh link, not just
+    // which links exist. Empty when no mesh is configured or no peer is up.
+    m.insert(
+        "Device.X_OptimACS_Mesh.NeighborSignal".into(),
+        mesh_peers_with_signal()
+            .map(|pairs| {
+                pairs
+                    .into_iter()
+                    .map(|(_, sig)| sig.to_string())
+                    .collect::<Vec<_>>()
+                    .join(",")
+            })
             .unwrap_or_default(),
     );
 
