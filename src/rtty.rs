@@ -114,8 +114,10 @@ async fn run_once(cfg: &ClientConfig) -> anyhow::Result<()> {
     let (ws, _resp) = connect_async_tls_with_config(req, None, false, Some(connector)).await?;
     info!("rtty: connected to {url}");
 
-    // Spawn the shell on a PTY.
-    let (master, _child) = spawn_shell_pty()?;
+    // Spawn the shell on a PTY. Keep the child pid so we can kill it when the
+    // session ends — otherwise the reconnect loop leaks an orphaned ash per
+    // attempt (the master fd dropping does NOT reap the child).
+    let (master, child) = spawn_shell_pty()?;
     let master = tokio::fs::File::from_std(std::fs::File::from(master));
 
     // Bridge: WS <-> PTY master.
@@ -124,31 +126,47 @@ async fn run_once(cfg: &ClientConfig) -> anyhow::Result<()> {
     let mut pty_writer = master;
     let mut buf = vec![0u8; 4096];
 
-    loop {
-        tokio::select! {
-            // WS → PTY (keystrokes)
-            msg = ws_stream.next() => {
-                match msg {
-                    Some(Ok(Message::Binary(b))) => {
-                        pty_writer.write_all(&b).await?;
-                        pty_writer.flush().await?;
+    let result = async {
+        loop {
+            tokio::select! {
+                // WS → PTY (keystrokes)
+                msg = ws_stream.next() => {
+                    match msg {
+                        Some(Ok(Message::Binary(b))) => {
+                            pty_writer.write_all(&b).await?;
+                            pty_writer.flush().await?;
+                        }
+                        Some(Ok(Message::Text(t))) => {
+                            pty_writer.write_all(t.as_bytes()).await?;
+                            pty_writer.flush().await?;
+                        }
+                        Some(Ok(Message::Close(_))) | None => break,
+                        _ => {}
                     }
-                    Some(Ok(Message::Text(t))) => {
-                        pty_writer.write_all(t.as_bytes()).await?;
-                        pty_writer.flush().await?;
-                    }
-                    Some(Ok(Message::Close(_))) | None => break,
-                    _ => {}
+                }
+                // PTY → WS (shell output)
+                n = pty_reader.read(&mut buf) => {
+                    let n = n?;
+                    if n == 0 { break; }
+                    ws_sink.send(Message::Binary(buf[..n].to_vec())).await?;
                 }
             }
-            // PTY → WS (shell output)
-            n = pty_reader.read(&mut buf) => {
-                let n = n?;
-                if n == 0 { break; }
-                ws_sink.send(Message::Binary(buf[..n].to_vec())).await?;
-            }
         }
+        Ok::<(), anyhow::Error>(())
+    }
+    .await;
+
+    // Kill the child shell so it cannot outlive the session. SIGHUP is what a
+    // real terminal hangup sends; SIGKILL as a fallback if it ignores that.
+    unsafe {
+        libc::kill(child, libc::SIGHUP);
+    }
+    // Give it a moment to die, then force it.
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    unsafe {
+        libc::kill(child, libc::SIGKILL);
     }
 
+    result?;
     Ok(())
 }
