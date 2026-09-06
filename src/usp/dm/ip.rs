@@ -684,18 +684,23 @@ async fn get_interface_mac(iface: &str) -> String {
 
 /// Get interface operational status
 async fn get_interface_status(iface: &str) -> String {
-    if let Ok(content) =
-        tokio::fs::read_to_string(format!("/sys/class/net/{}/operstate", iface)).await
-    {
-        match content.trim() {
-            "up" => "Up",
-            "down" => "Down",
-            _ => "Unknown",
+    // The caller passes `br-{section}` for bridge-backed interfaces, but a
+    // static iface like `bat0_ip` has no `br-` prefix — it is a plain netdev.
+    // Try the exact name first, then the `br-` form, so non-bridge interfaces
+    // report their real operstate instead of always "Down".
+    for candidate in [iface, &format!("br-{iface}")] {
+        if let Ok(content) =
+            tokio::fs::read_to_string(format!("/sys/class/net/{candidate}/operstate")).await
+        {
+            return match content.trim() {
+                "up" => "Up",
+                "down" => "Down",
+                _ => "Unknown",
+            }
+            .to_string();
         }
-        .to_string()
-    } else {
-        "Down".to_string()
     }
+    "Down".to_string()
 }
 
 /// Return raw byte count as a string (UI handles formatting)
