@@ -11,6 +11,7 @@ mod est;
 mod gnss;
 mod ndpid;
 mod proto;
+mod rtty;
 mod tls;
 mod usp;
 mod util;
@@ -166,6 +167,16 @@ async fn main() {
     // shipped config, so on most devices this finds no socket, says so once,
     // and retries quietly. Nothing here starts nDPId or changes its consent.
     ndpid::spawn();
+
+    // Remote terminal (rtty) — isolated device-side WebSocket + PTY. Runs on
+    // its own connection, fully separate from the USP MTP channel, so a hung
+    // terminal can never stall device reporting.
+    {
+        let cfg = Arc::clone(&cfg);
+        tokio::spawn(async move {
+            rtty::run(cfg).await;
+        });
+    }
 
     // Obtain an operational certificate before the first connection.
     //
