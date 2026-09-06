@@ -128,6 +128,93 @@ fn mesh_peers_with_signal() -> Option<Vec<(String, i32)>> {
     }
 }
 
+/// Parse `batctl meshif bat0 originators` into per-originator routing rows.
+///
+/// Each row: `[ *] <originator>  <last-seen>  (<tq>/255) <nexthop> [iface]`.
+/// The `*` marks the selected (best) path. Returns `(originator, tq, last_seen,
+/// nexthop, selected)` tuples. Empty when batman is not active.
+fn mesh_originators() -> Vec<(String, u16, String, String, bool)> {
+    let out = std::process::Command::new("batctl")
+        .args(["meshif", "bat0", "originators"])
+        .output()
+        .ok();
+    let Some(out) = out else { return Vec::new() };
+    if !out.status.success() {
+        return Vec::new();
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    let mut rows = Vec::new();
+    for line in text.lines() {
+        let line = line.trim();
+        // Skip the header and the B.A.T.M.A.N. banner line.
+        if line.is_empty()
+            || line.starts_with("B.A.T.M.A.N.")
+            || line.starts_with("Originator")
+            || line.starts_with("  ")
+        {
+            continue;
+        }
+        let selected = line.starts_with('*');
+        let rest = line.trim_start_matches('*').trim();
+        let mut parts = rest.split_whitespace();
+        let originator = parts.next().unwrap_or("").to_owned();
+        let last_seen = parts.next().unwrap_or("").to_owned();
+        // TQ is parenthesized: `(179)`.
+        let tq = parts
+            .next()
+            .and_then(|s| s.trim_matches(['(', ')']).parse::<u16>().ok())
+            .unwrap_or(0);
+        let nexthop = parts.next().unwrap_or("").to_owned();
+        if !originator.is_empty() {
+            rows.push((originator, tq, last_seen, nexthop, selected));
+        }
+    }
+    rows
+}
+
+/// Parse `batctl meshif bat0 s` (statistics) into a key/value map.
+///
+/// Each line is `\t<key>: <value>`. Returns the raw counters (tx/rx packets
+/// and bytes, dropped, forwarded, etc.) so the controller can show mesh
+/// traffic health. Empty when batman is not active.
+fn mesh_stats() -> std::collections::HashMap<String, u64> {
+    let out = std::process::Command::new("batctl")
+        .args(["meshif", "bat0", "s"])
+        .output()
+        .ok();
+    let Some(out) = out else { return std::collections::HashMap::new() };
+    if !out.status.success() {
+        return std::collections::HashMap::new();
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    let mut stats = std::collections::HashMap::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if let Some((k, v)) = line.split_once(':') {
+            if let Ok(n) = v.trim().parse::<u64>() {
+                stats.insert(k.trim().to_owned(), n);
+            }
+        }
+    }
+    stats
+}
+
+/// Parse `batctl meshif bat0 mj` (mesh JSON) into a value map.
+///
+/// `batctl ... mj` prints the mesh configuration/status as JSON (version,
+/// algorithm, gw_mode, gw_bandwidth, hop_penalty, orig_interval, etc.).
+/// Returned as a serde_json::Value so the controller can show mesh config.
+fn mesh_json() -> Option<serde_json::Value> {
+    let out = std::process::Command::new("batctl")
+        .args(["meshif", "bat0", "mj"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    serde_json::from_slice(&out.stdout).ok()
+}
+
 /// Find the name of the mesh interface, if any.
 ///
 /// `iw dev` prints one block per interface, each with a `type mesh point`
@@ -249,6 +336,48 @@ pub fn get(_cfg: &ClientConfig, path: &str) -> HashMap<String, String> {
             })
             .unwrap_or_default(),
     );
+
+    // The batman originators table: per-originator TQ, last-seen, nexthop and
+    // whether it is the selected path. Encoded as a compact JSON array so the
+    // controller can render the full routing view (which node reaches which,
+    // at what quality, via which hop). Empty when batman is not active.
+    let originators = mesh_originators();
+    if !originators.is_empty() {
+        let arr: Vec<serde_json::Value> = originators
+            .into_iter()
+            .map(|(originator, tq, last_seen, nexthop, selected)| {
+                serde_json::json!({
+                    "originator": originator,
+                    "tq": tq,
+                    "last_seen": last_seen,
+                    "nexthop": nexthop,
+                    "selected": selected,
+                })
+            })
+            .collect();
+        m.insert(
+            "Device.X_OptimACS_Mesh.Originators".into(),
+            serde_json::to_string(&arr).unwrap_or_default(),
+        );
+    }
+
+    // The batman traffic statistics (tx/rx packets+bytes, dropped, forwarded).
+    // Encoded as a JSON object so the controller can show mesh traffic health.
+    let stats = mesh_stats();
+    if !stats.is_empty() {
+        m.insert(
+            "Device.X_OptimACS_Mesh.Stats".into(),
+            serde_json::to_string(&stats).unwrap_or_default(),
+        );
+    }
+
+    // The batman mesh config/status (gw_mode, bandwidth, hop_penalty, etc.).
+    if let Some(v) = mesh_json() {
+        m.insert(
+            "Device.X_OptimACS_Mesh.MeshJson".into(),
+            serde_json::to_string(&v).unwrap_or_default(),
+        );
+    }
 
     // The mesh interface's own MAC. Peers are reported as the *mesh* MACs of
     // the other nodes, which differ from the agent MACs the controller keys
