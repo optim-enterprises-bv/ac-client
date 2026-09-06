@@ -46,9 +46,10 @@ fn rtty_url(cfg: &ClientConfig) -> Option<String> {
         .strip_suffix("/usp")
         .unwrap_or(ws.trim_end_matches('/'));
     let id = if !cfg.usp_endpoint_id.is_empty() {
-        cfg.usp_endpoint_id.as_str()
+        cfg.usp_endpoint_id.clone()
     } else {
-        cfg.mac_addr.as_str()
+        // Match the agent's own derivation (usp/agent.rs): oui:00005A:<mac>.
+        crate::usp::endpoint::EndpointId::from_mac("00005A", &cfg.mac_addr).0
     };
     Some(format!("{base}/rtty/device/{id}"))
 }
