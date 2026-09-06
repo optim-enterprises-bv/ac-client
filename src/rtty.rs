@@ -33,14 +33,24 @@ use crate::tls::build_tls_config;
 
 /// Derive the rtty device WebSocket URL from the USP ws_url.
 ///
-/// `wss://gw.aether-io.com/usp` → `wss://gw.aether-io.com/rtty/device/<serial>`.
+/// `wss://gw.aether-io.com/usp` → `wss://gw.aether-io.com/rtty/device/<id>`.
+///
+/// The id must match the `:serial` the browser uses in
+/// `/api/v1/devices/:serial/rtty`, which is the device's USP endpoint id
+/// (e.g. `oui:00005A:...`), NOT the MAC. Using the MAC here means the bridge
+/// registry (keyed by the browser's serial) never matches the device's entry.
 fn rtty_url(cfg: &ClientConfig) -> Option<String> {
     let ws = cfg.ws_url.as_deref()?;
     let base = ws
         .trim_end_matches('/')
         .strip_suffix("/usp")
         .unwrap_or(ws.trim_end_matches('/'));
-    Some(format!("{base}/rtty/device/{}", cfg.mac_addr))
+    let id = if !cfg.usp_endpoint_id.is_empty() {
+        cfg.usp_endpoint_id.as_str()
+    } else {
+        cfg.mac_addr.as_str()
+    };
+    Some(format!("{base}/rtty/device/{id}"))
 }
 
 /// Spawn `/bin/ash` on a PTY and return the master fd.
