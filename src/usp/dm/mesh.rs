@@ -492,10 +492,13 @@ fn remove_section() -> Result<(), String> {
 const NETWORK_SECTION: &str = "aethermesh";
 
 // batman-adv UCI section names. `BAT0_SECTION` is the `proto batadv` network
-// iface that creates `bat0` (the L2 mesh interface + gateway mode);
-// `BAT0_HARDIF_SECTION` is the `proto batadv_hardif` iface that attaches the
-// 802.11s mesh vif to `bat0` so batman-adv forwards frames over it.
+// iface that creates `bat0` (the L2 mesh interface + gateway mode) — it sets
+// `no_device=1`, so per the shipped `batadv.sh` proto this section NEVER
+// carries an IP. The address instead lives on a separate static interface bound
+// to `device=bat0` (`BAT0_IP_SECTION`). `BAT0_HARDIF_SECTION` is the
+// `proto batadv_hardif` iface that attaches the 802.11s mesh vif to `bat0`.
 const BAT0_SECTION: &str = "bat0";
+const BAT0_IP_SECTION: &str = "bat0_ip";
 const BAT0_HARDIF_SECTION: &str = "bat0_hardif";
 const BAT0_IFNAME: &str = "bat0";
 
@@ -523,6 +526,9 @@ fn ensure_batman(gw_mode: &str, ipaddr: &str) -> Result<(), String> {
     };
 
     // --- bat0 interface (proto batadv) -------------------------------------
+    // IMPORTANT: per the shipped `batadv.sh` proto handler, `proto batadv` sets
+    // `no_device=1` and NEVER carries an IP — the IP goes on a separate static
+    // interface bound to `device=bat0` (see BAT0_IP_SECTION below).
     let bat0_exists = !uci_get(&format!("network.{BAT0_SECTION}")).trim().is_empty();
     if !bat0_exists {
         uci_set(&format!("network.{BAT0_SECTION}"), "interface")?;
@@ -530,10 +536,20 @@ fn ensure_batman(gw_mode: &str, ipaddr: &str) -> Result<(), String> {
     uci_set(&format!("network.{BAT0_SECTION}.proto"), "batadv")?;
     uci_set(&format!("network.{BAT0_SECTION}.routing_algo"), "BATMAN_IV")?;
     uci_set(&format!("network.{BAT0_SECTION}.gw_mode"), gw_mode)?;
+    info!("mesh: bat0 gw_mode={gw_mode}");
+
+    // --- static IP on bat0 (proto static, device=bat0) ----------------------
+    // This is where the layer-3 address lives. The batadv proto cannot hold it.
     if !ipaddr.trim().is_empty() {
-        uci_set(&format!("network.{BAT0_SECTION}.ipaddr"), ipaddr.trim())?;
+        let ip_exists = !uci_get(&format!("network.{BAT0_IP_SECTION}")).trim().is_empty();
+        if !ip_exists {
+            uci_set(&format!("network.{BAT0_IP_SECTION}"), "interface")?;
+        }
+        uci_set(&format!("network.{BAT0_IP_SECTION}.proto"), "static")?;
+        uci_set(&format!("network.{BAT0_IP_SECTION}.device"), BAT0_IFNAME)?;
+        uci_set(&format!("network.{BAT0_IP_SECTION}.ipaddr"), ipaddr.trim())?;
+        info!("mesh: bat0 ipaddr={ipaddr} (static iface)");
     }
-    info!("mesh: bat0 gw_mode={gw_mode} ip={ipaddr}");
 
     // --- hardif (proto batadv_hardif): attach mesh vif to bat0 --------------
     // If the hardif section exists with a stale ifname/master, update it rather
@@ -569,14 +585,14 @@ fn ensure_batman(gw_mode: &str, ipaddr: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Remove the batman-adv config (bat0 + hardif) but leave the 802.11s mesh
-/// intact — tearing down batman should not kill the underlying link.
+/// Remove the batman-adv config (bat0 + its static IP iface + hardif) but leave
+/// the 802.11s mesh intact — tearing down batman should not kill the underlying
+/// link.
 fn remove_batman() -> Result<(), String> {
-    if !uci_get(&format!("network.{BAT0_SECTION}")).trim().is_empty() {
-        uci_delete(&format!("network.{BAT0_SECTION}"))?;
-    }
-    if !uci_get(&format!("network.{BAT0_HARDIF_SECTION}")).trim().is_empty() {
-        uci_delete(&format!("network.{BAT0_HARDIF_SECTION}"))?;
+    for section in [BAT0_SECTION, BAT0_IP_SECTION, BAT0_HARDIF_SECTION] {
+        if !uci_get(&format!("network.{section}")).trim().is_empty() {
+            uci_delete(&format!("network.{section}"))?;
+        }
     }
     uci_commit("network")?;
     Ok(())
