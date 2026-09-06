@@ -328,13 +328,21 @@ pub async fn set(_cfg: &ClientConfig, path: &str, value: &str) -> Result<(), Str
             let on = usp_bool(value)?;
             if on {
                 ensure_section()?;
-                ensure_network_interface()?;
-                // batman-adv on top of the 802.11s link, if the controller asked
-                // for it (Batman=1). The gateway mode is the controller's call.
-                if uci_get(&opt("mesh_batman")).trim() == "1" {
+                // Whether this is a batman-adv mesh (controller set Batman=1).
+                let is_batman = uci_get(&opt("mesh_batman")).trim() == "1";
+                if is_batman {
+                    // batman-adv data plane (doc model): the mesh vif binds to
+                    // the batadv_hardif and carries NO IP; the layer-3 address
+                    // lives on the bat0_ip static iface (device=bat0). Do NOT
+                    // create the 802.11s static-IP mesh iface — that is the
+                    // doubled-address setup the doc forbids.
                     let gw = uci_get(&opt("mesh_batman_gwmode")).trim().to_owned();
                     let ip = uci_get(&opt("ipaddr")).trim().to_owned();
                     ensure_batman(if gw.is_empty() { "client" } else { &gw }, &ip)?;
+                } else {
+                    // Plain 802.11s mesh: the mesh vif carries the IP on a
+                    // static iface.
+                    ensure_network_interface()?;
                 }
             } else {
                 remove_section()?;
@@ -524,6 +532,14 @@ fn ensure_batman(gw_mode: &str, ipaddr: &str) -> Result<(), String> {
     } else {
         mesh_if
     };
+
+    // --- 802.11s mesh vif must be a pure batman hardif (doc model) ---------
+    // Per the OpenWrt batman-adv doc: run 802.11s as an address-less
+    // `batadv_hardif` and let batman do all routing. That means the mesh vif
+    // binds its `network` to the hardif section, carries NO IP, and MUST have
+    // `mesh_fwding 0` (802.11s HWMP forwarding is incompatible with batman).
+    uci_set(&opt("network"), BAT0_HARDIF_SECTION)?;
+    uci_set(&opt("mesh_fwding"), "0")?;
 
     // --- bat0 interface (proto batadv) -------------------------------------
     // IMPORTANT: per the shipped `batadv.sh` proto handler, `proto batadv` sets
