@@ -190,6 +190,10 @@ pub fn get(_cfg: &ClientConfig, path: &str) -> HashMap<String, String> {
         ("Radio", "device"),
         ("Forwarding", "mesh_fwding"),
         ("MFP", "ieee80211w"),
+        // batman: whether bat0 was requested and its gateway mode, so the
+        // controller can see whether the batman layer is configured.
+        ("Batman", "mesh_batman"),
+        ("BatmanGwMode", "mesh_batman_gwmode"),
     ] {
         let v = if present {
             uci_get(&opt(uci)).trim().to_owned()
@@ -325,9 +329,17 @@ pub async fn set(_cfg: &ClientConfig, path: &str, value: &str) -> Result<(), Str
             if on {
                 ensure_section()?;
                 ensure_network_interface()?;
+                // batman-adv on top of the 802.11s link, if the controller asked
+                // for it (Batman=1). The gateway mode is the controller's call.
+                if uci_get(&opt("mesh_batman")).trim() == "1" {
+                    let gw = uci_get(&opt("mesh_batman_gwmode")).trim().to_owned();
+                    let ip = uci_get(&opt("ipaddr")).trim().to_owned();
+                    ensure_batman(if gw.is_empty() { "client" } else { &gw }, &ip)?;
+                }
             } else {
                 remove_section()?;
                 remove_network_interface()?;
+                remove_batman()?;
             }
             uci_commit("wireless")?;
             uci_commit("network")?;
@@ -397,6 +409,17 @@ pub async fn set(_cfg: &ClientConfig, path: &str, value: &str) -> Result<(), Str
                 return Err("IPAddress must not be empty".into());
             }
             ("ipaddr", value.to_owned())
+        }
+        // batman-adv toggle (Batman=1) and gateway mode (server/client).
+        // Stored on the section so the batman config can be built when the mesh
+        // is enabled; the device does NOT decide gw_mode — the controller did.
+        "Batman" => ("mesh_batman", value.to_owned()),
+        "BatmanGwMode" => {
+            let v = value.trim().to_ascii_lowercase();
+            if !["server", "client"].contains(&v.as_str()) {
+                return Err(format!("BatmanGwMode must be server or client, got {v}"));
+            }
+            ("mesh_batman_gwmode", v)
         }
         other => return Err(format!("unknown mesh parameter: {other}")),
     };
@@ -468,8 +491,95 @@ fn remove_section() -> Result<(), String> {
 /// controller sets via `Device.X_OptimACS_Mesh.IPAddress`.
 const NETWORK_SECTION: &str = "aethermesh";
 
+// batman-adv UCI section names. `BAT0_SECTION` is the `proto batadv` network
+// iface that creates `bat0` (the L2 mesh interface + gateway mode);
+// `BAT0_HARDIF_SECTION` is the `proto batadv_hardif` iface that attaches the
+// 802.11s mesh vif to `bat0` so batman-adv forwards frames over it.
+const BAT0_SECTION: &str = "bat0";
+const BAT0_HARDIF_SECTION: &str = "bat0_hardif";
+const BAT0_IFNAME: &str = "bat0";
+
 fn net_opt(name: &str) -> String {
     format!("network.{NETWORK_SECTION}.{name}")
+}
+
+/// Configure batman-adv on top of this node's 802.11s mesh link: create the
+/// `bat0` interface (`proto batadv`) with this node's address and gateway mode,
+/// attach the mesh vif to it as a hardif (`proto batadv_hardif`), and bind bat0
+/// to the lan firewall zone so batman traffic is accepted.
+///
+/// `gw_mode` is `"server"` on the mesh's internet gateway (announces itself)
+/// or `"client"` elsewhere (auto-learns the gateway over the mesh). The device
+/// does NOT decide this — the controller computed it from upstream-WAN state
+/// and sent it via `Device.X_OptimACS_Mesh.BatmanGwMode`.
+fn ensure_batman(gw_mode: &str, ipaddr: &str) -> Result<(), String> {
+    // The mesh vif name (mesh0, phy1-mesh0, ...) this node's 802.11s link runs on.
+    let mesh_if = uci_get(&opt("ifname")).trim().to_owned();
+    let mesh_if = if mesh_if.is_empty() {
+        // Fall back to the discovered mesh point, then OpenWrt's default.
+        discover_mesh_iface().unwrap_or_else(|| "mesh0".to_owned())
+    } else {
+        mesh_if
+    };
+
+    // --- bat0 interface (proto batadv) -------------------------------------
+    let bat0_exists = !uci_get(&format!("network.{BAT0_SECTION}")).trim().is_empty();
+    if !bat0_exists {
+        uci_set(&format!("network.{BAT0_SECTION}"), "interface")?;
+    }
+    uci_set(&format!("network.{BAT0_SECTION}.proto"), "batadv")?;
+    uci_set(&format!("network.{BAT0_SECTION}.routing_algo"), "BATMAN_IV")?;
+    uci_set(&format!("network.{BAT0_SECTION}.gw_mode"), gw_mode)?;
+    if !ipaddr.trim().is_empty() {
+        uci_set(&format!("network.{BAT0_SECTION}.ipaddr"), ipaddr.trim())?;
+    }
+    info!("mesh: bat0 gw_mode={gw_mode} ip={ipaddr}");
+
+    // --- hardif (proto batadv_hardif): attach mesh vif to bat0 --------------
+    // If the hardif section exists with a stale ifname/master, update it rather
+    // than leaving a dead bond.
+    let hif = uci_get(&format!("network.{BAT0_HARDIF_SECTION}")).trim().to_owned();
+    if hif.is_empty() {
+        uci_set(&format!("network.{BAT0_HARDIF_SECTION}"), "interface")?;
+    }
+    uci_set(&format!("network.{BAT0_HARDIF_SECTION}.proto"), "batadv_hardif")?;
+    uci_set(&format!("network.{BAT0_HARDIF_SECTION}.ifname"), &mesh_if)?;
+    uci_set(&format!("network.{BAT0_HARDIF_SECTION}.master"), BAT0_IFNAME)?;
+    info!("mesh: bat0 hardif {mesh_if} -> bat0");
+
+    // --- firewall: bind bat0 to the lan zone -------------------------------
+    let zone = uci_get("firewall.@zone[0].name");
+    if zone.trim() == "lan" {
+        // `network` membership (bat0 in the zone's network set).
+        let networks = uci_get("firewall.@zone[0].network");
+        if !networks.split_whitespace().any(|n| n == BAT0_IFNAME) {
+            uci_add_list("firewall.@zone[0].network", BAT0_IFNAME)?;
+        }
+        // `device` membership — fw4 only accepts bat0-origin traffic when bat0
+        // is in the zone's *device* set (it is created by the batadv proto, not
+        // netifd, so it never appears there automatically).
+        let devices = uci_get("firewall.@zone[0].device");
+        if !devices.split_whitespace().any(|d| d == BAT0_IFNAME) {
+            uci_add_list("firewall.@zone[0].device", BAT0_IFNAME)?;
+        }
+    }
+
+    uci_commit("network")?;
+    uci_commit("firewall")?;
+    Ok(())
+}
+
+/// Remove the batman-adv config (bat0 + hardif) but leave the 802.11s mesh
+/// intact — tearing down batman should not kill the underlying link.
+fn remove_batman() -> Result<(), String> {
+    if !uci_get(&format!("network.{BAT0_SECTION}")).trim().is_empty() {
+        uci_delete(&format!("network.{BAT0_SECTION}"))?;
+    }
+    if !uci_get(&format!("network.{BAT0_HARDIF_SECTION}")).trim().is_empty() {
+        uci_delete(&format!("network.{BAT0_HARDIF_SECTION}"))?;
+    }
+    uci_commit("network")?;
+    Ok(())
 }
 
 /// Create the static network interface + firewall zone binding for the mesh.
