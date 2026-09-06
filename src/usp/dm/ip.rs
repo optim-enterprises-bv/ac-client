@@ -136,11 +136,14 @@ pub async fn get(_cfg: &ClientConfig, path: &str) -> HashMap<String, String> {
                 }
             }
 
-            // Get interface name and stats
-            let bridge_name = format!("br-{section}");
-            let stats = get_interface_stats(&bridge_name).await;
-            let mac = get_interface_mac(&bridge_name).await;
-            let status = get_interface_status(&bridge_name).await;
+            // Get interface name and stats. The UCI section name (e.g. `bat0_ip`)
+            // is not always the netdev — a static iface binds to `device=bat0`.
+            // Resolve the real netdev from the section's `device` option, falling
+            // back to the `br-{section}` bridge form for bridge-backed ifaces.
+            let netdev = resolve_netdev(section);
+            let stats = get_interface_stats(&netdev).await;
+            let mac = get_interface_mac(&netdev).await;
+            let status = get_interface_status(&netdev).await;
 
             // Insert name
             m.insert(
@@ -679,6 +682,21 @@ async fn get_interface_mac(iface: &str) -> String {
         content.trim().to_string()
     } else {
         String::new()
+    }
+}
+
+/// Resolve the real netdev name for a UCI network section.
+///
+/// A section like `bat0_ip` is a static iface whose `device` option names the
+/// actual kernel interface (`bat0`). Bridge-backed sections (e.g. `lan`) have
+/// no `device` option and use the `br-{section}` form. Returns the netdev to
+/// read stats/status from.
+fn resolve_netdev(section: &str) -> String {
+    let dev = uci_get(&format!("network.{section}.device"));
+    if !dev.trim().is_empty() {
+        dev.trim().to_string()
+    } else {
+        format!("br-{section}")
     }
 }
 
