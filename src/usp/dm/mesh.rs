@@ -105,7 +105,10 @@ fn mesh_peers_with_signal() -> Option<Vec<(String, i32)>> {
                 if lines[i].contains("mesh plink:") && lines[i].contains("ESTAB") {
                     established = true;
                 }
-                if let Some(sig) = lines[i].strip_prefix("signal:") {
+                // The signal line is tab-indented (`\tsignal:  \t-59 dBm`), so
+                // trim before matching the prefix.
+                let t = lines[i].trim();
+                if let Some(sig) = t.strip_prefix("signal:") {
                     signal = sig
                         .trim()
                         .split_whitespace()
