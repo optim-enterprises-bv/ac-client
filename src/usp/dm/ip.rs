@@ -713,6 +713,21 @@ async fn get_interface_status(iface: &str) -> String {
             return match content.trim() {
                 "up" => "Up",
                 "down" => "Down",
+                // Virtual interfaces (bat0, bridges) report "unknown" even when
+                // up. Treat "unknown" with carrier=1 as Up — the interface is
+                // administratively up and passing traffic.
+                "unknown" => {
+                    let carrier = tokio::fs::read_to_string(format!(
+                        "/sys/class/net/{candidate}/carrier"
+                    ))
+                    .await
+                    .unwrap_or_default();
+                    if carrier.trim() == "1" {
+                        "Up"
+                    } else {
+                        "Unknown"
+                    }
+                }
                 _ => "Unknown",
             }
             .to_string();
