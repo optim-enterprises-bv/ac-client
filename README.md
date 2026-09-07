@@ -1,6 +1,6 @@
 # ac-client — USP Agent for OpenWrt Access Points
 
-`ac-client` is a Rust daemon implementing the **TR-369 / USP 1.3 Agent** (User Services Platform, Broadband Forum) for OpenWrt-based access-point devices managed by an [OptimACS](https://acs.optimcloud.com) controller (`ac-server`).
+`ac-client` is a Rust daemon implementing the **TR-369 / USP 1.3 Agent** (User Services Platform, Broadband Forum) for OpenWrt-based access-point devices. It reports to a USP controller — by default the **Aether** management platform ([aether-io.com](https://www.aether-io.com)), and it also works with the standalone **OptimACS** controller ([acs.optimcloud.com](https://acs.optimcloud.com)), both from Optim Enterprises ([optimcloud.com](https://www.optimcloud.com)).
 
 **Key Features:**
 - ✅ **Post-Quantum Cryptography** - Hybrid X25519Kyber768 (ML-KEM-768) key exchange for quantum-resistant TLS
@@ -49,9 +49,9 @@ See [UCI_BACKEND_OPERATIONS.md](UCI_BACKEND_OPERATIONS.md) for the complete API 
 
 ---
 
-## Getting Started with OptimACS
+## Getting Started with Aether / OptimACS
 
-`ac-client` reports to an [OptimACS](https://acs.optimcloud.com) controller. This section walks through creating an account and configuring your first tenant so devices can connect.
+`ac-client` reports to a **USP controller**. The default is **Aether** ([aether-io.com](https://www.aether-io.com)); this section walks through connecting a device. If you're using the standalone **OptimACS** controller ([acs.optimcloud.com](https://acs.optimcloud.com)), the same flow applies against that endpoint.
 
 ### 1. Create an account
 
@@ -147,7 +147,7 @@ The controller URL is the same for all tenants — authentication is handled via
 
 ---
 
-## Why ac-client? Why OptimACS?
+## Why ac-client? Which controller?
 
 ### The problem with managing fleets of access points
 
@@ -163,7 +163,16 @@ The Broadband Forum's **TR-369 User Services Platform** (USP) defines a vendor-n
 - **Minimal binary**: the release build strips to a small self-contained binary with no runtime dependencies beyond musl libc. No Python, no JRE, no heavyweight runtime on the AP.
 - **Post-quantum TLS**: ac-client uses `rustls-post-quantum` to negotiate **X25519 + ML-KEM-768** hybrid key exchange — a NIST PQC standard — on every connection. Device deployments live for years; their communications should be safe against harvest-now/decrypt-later attacks.
 - **Standards compliance**: the implementation is audited against the TR-369 v1.3 conformance requirements — Boot! event parameters, Record routing, WebSocket subprotocol enforcement, version negotiation, and error codes.
-- **Open source**: the full protocol stack, data model, and OpenWrt packaging are available for inspection, extension, and contribution. No binary blobs, no vendor lock-in.
+- **Source-available**: the full protocol stack, data model, and OpenWrt packaging are available for inspection, extension, and contribution. Source is licensed under **Business Source License 1.1** (source-available, not OSI-open). No binary blobs, no vendor lock-in.
+
+### Which controller? Aether vs OptimACS
+
+`ac-client` is a standards-compliant USP agent and will register with any controller that speaks USP. It ships configured for two Optim Enterprises products:
+
+- **[Aether](https://www.aether-io.com)** — the unified wireless infrastructure management platform. Terminates USP/MQTT, renders the full TR-181 tree, and adds telemetry, firmware, and remote-terminal (rtty) on top. This is the default and recommended target.
+- **[OptimACS](https://acs.optimcloud.com)** — a standalone ACS controller offered as its own commercial product, `ac-server`.
+
+Both are from **Optim Enterprises** ([optimcloud.com](https://www.optimcloud.com)).
 
 ### What OptimACS gives you out of the box
 
