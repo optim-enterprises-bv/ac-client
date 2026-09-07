@@ -126,6 +126,14 @@ async fn run_once(cfg: &ClientConfig) -> anyhow::Result<()> {
     let mut pty_writer = master;
     let mut buf = vec![0u8; 4096];
 
+    // Keepalive. Without this the rtty WS is reaped while idle: Cloudflare's
+    // `stream_idle_timeout` closes a socket neither end is writing to, and the
+    // device rtty channel carries no data when no browser is attached. The USP
+    // channel answers Ping with Pong for the same reason; mirror it here so the
+    // terminal stays reachable between browser sessions.
+    let mut keepalive = tokio::time::interval(std::time::Duration::from_secs(30));
+    keepalive.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
     let result = async {
         loop {
             tokio::select! {
@@ -140,6 +148,9 @@ async fn run_once(cfg: &ClientConfig) -> anyhow::Result<()> {
                             pty_writer.write_all(t.as_bytes()).await?;
                             pty_writer.flush().await?;
                         }
+                        Some(Ok(Message::Ping(d))) => {
+                            ws_sink.send(Message::Pong(d)).await?;
+                        }
                         Some(Ok(Message::Close(_))) | None => break,
                         _ => {}
                     }
@@ -149,6 +160,10 @@ async fn run_once(cfg: &ClientConfig) -> anyhow::Result<()> {
                     let n = n?;
                     if n == 0 { break; }
                     ws_sink.send(Message::Binary(buf[..n].to_vec())).await?;
+                }
+                // Keepalive ping so an idle link is not reaped.
+                _ = keepalive.tick() => {
+                    ws_sink.send(Message::Ping(vec![])).await?;
                 }
             }
         }
