@@ -24,6 +24,7 @@ pub mod qos;
 pub mod reputation;
 pub mod security;
 pub mod sensing;
+pub mod usteer;
 pub mod wifi;
 
 use crate::config::ClientConfig;
@@ -195,6 +196,8 @@ async fn dispatch_get(cfg: &ClientConfig, path: &str) -> Params {
         appfilter::get(cfg, path)
     } else if path.starts_with("Device.X_OptimACS_Mesh") {
         mesh::get(cfg, path)
+    } else if path.starts_with("Device.X_OptimACS_Usteer") {
+        usteer::get(cfg, path)
     } else if path.starts_with("Device.X_OptimACS_Enforcement") {
         enforcement::get(cfg, path)
     } else if path.starts_with("Device.X_OptimACS_Reputation") {
