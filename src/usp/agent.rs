@@ -149,7 +149,7 @@ pub async fn handle_incoming(
             };
             let params = dm::get_params(&cfg, &paths, max_depth).await;
             debug!("GET completed: {} parameter sets retrieved", params.len());
-            build_get_resp(&msg_id, params)
+            build_get_resp(&msg_id, &paths, params)
         }
 
         MessageType::Set => {
@@ -428,8 +428,63 @@ async fn status_loop(
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-fn build_get_resp(msg_id: &str, params: HashMap<String, String>) -> Option<super::usp_msg::Msg> {
+/// Group retrieved parameters under the paths the controller actually asked for.
+///
+/// TR-369 `requested_path` is meant to echo the path from the Get request, so a
+/// controller that asked for an object (`Device.IP.Interface.`) can tell that the
+/// response is a COMPLETE snapshot of that subtree. This agent used to emit one
+/// `RequestedPathResult` per leaf, with `requested_path` set to the leaf itself —
+/// so a subtree request came back as ~90 unrelated single-leaf results and the
+/// controller could never distinguish "the device no longer has this parameter"
+/// from "I only asked about something else". Stale values then live forever in
+/// the controller's cache; the lab gateway advertised addresses it had not had
+/// for days.
+///
+/// A parameter is assigned to the **most specific** request that covers it, so
+/// overlapping asks (`Device.IP.` and `Device.IP.Interface.`) never duplicate it.
+/// A parameter nobody asked for is still reported under its own path, so
+/// widening the data model cannot silently drop data.
+fn group_by_requested(
+    paths: &[String],
+    params: HashMap<String, String>,
+) -> Vec<(String, Vec<(String, String)>)> {
+    let mut groups: Vec<(String, Vec<(String, String)>)> =
+        paths.iter().map(|p| (p.clone(), Vec::new())).collect();
+
+    for (key, value) in params {
+        // Longest match wins: the most specific subtree owns the parameter.
+        let best = groups
+            .iter()
+            .enumerate()
+            .filter(|(_, (rp, _))| {
+                if rp.ends_with('.') {
+                    key.starts_with(rp.as_str())
+                } else {
+                    key == *rp
+                }
+            })
+            .max_by_key(|(_, (rp, _))| rp.len())
+            .map(|(i, _)| i);
+
+        match best {
+            Some(i) => groups[i].1.push((key, value)),
+            // Asked for by nobody — still report it, under its own path.
+            None => groups.push((key.clone(), vec![(key, value)])),
+        }
+    }
+    groups
+}
+
+fn build_get_resp(
+    msg_id: &str,
+    paths: &[String],
+    params: HashMap<String, String>,
+) -> Option<super::usp_msg::Msg> {
     use super::usp_msg::{get_resp::*, *};
+    // One RequestedPathResult per path the controller asked for, carrying every
+    // parameter under it — so `requested_path` means what TR-369 says it means
+    // and a subtree request is recognisable as a complete snapshot.
+    let grouped = group_by_requested(paths, params);
     Some(super::usp_msg::Msg {
         header: Some(Header {
             msg_id: msg_id.into(),
@@ -438,20 +493,23 @@ fn build_get_resp(msg_id: &str, params: HashMap<String, String>) -> Option<super
         body: Some(Body {
             msg_body: Some(MsgBody::Response(Response {
                 resp_type: Some(response::RespType::GetResp(GetResp {
-                    req_path_results: params
+                    req_path_results: grouped
                         .into_iter()
-                        .map(|(k, v)| {
-                            let mut result_params = std::collections::HashMap::new();
-                            result_params.insert(String::new(), v);
-                            RequestedPathResult {
-                                requested_path: k.clone(),
-                                err_code: 0,
-                                err_msg: String::new(),
-                                resolved_path_results: vec![ResolvedPathResult {
-                                    resolved_path: k,
-                                    result_params,
-                                }],
-                            }
+                        .map(|(requested, leaves)| RequestedPathResult {
+                            requested_path: requested,
+                            err_code: 0,
+                            err_msg: String::new(),
+                            resolved_path_results: leaves
+                                .into_iter()
+                                .map(|(leaf, value)| {
+                                    let mut result_params = std::collections::HashMap::new();
+                                    result_params.insert(String::new(), value);
+                                    ResolvedPathResult {
+                                        resolved_path: leaf,
+                                        result_params,
+                                    }
+                                })
+                                .collect(),
                         })
                         .collect(),
                 })),
@@ -656,5 +714,113 @@ fn build_delete_resp(msg_id: &str, results: Vec<tp469::DeleteResult>) -> super::
                 })),
             })),
         }),
+    }
+}
+
+#[cfg(test)]
+mod requested_path_tests {
+    use super::*;
+
+    fn m(pairs: &[(&str, &str)]) -> HashMap<String, String> {
+        pairs
+            .iter()
+            .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+            .collect()
+    }
+
+    /// A controller that asks for a subtree must get that subtree back as the
+    /// `requested_path`, not one entry per leaf. Without it the controller
+    /// cannot tell a complete snapshot from a scattering of leaves, so it can
+    /// never know which stored parameters the device has stopped reporting.
+    #[test]
+    fn params_are_grouped_under_the_subtree_that_was_asked_for() {
+        let paths = vec!["Device.IP.Interface.".to_owned(), "Device.WiFi.".to_owned()];
+        let params = m(&[
+            ("Device.IP.Interface.1.Status", "Up"),
+            ("Device.IP.Interface.2.Status", "Down"),
+            ("Device.WiFi.Radio.1.Channel", "36"),
+        ]);
+        let grouped = group_by_requested(&paths, params);
+        let ip = grouped
+            .iter()
+            .find(|(rp, _)| rp == "Device.IP.Interface.")
+            .expect("ip group");
+        let wifi = grouped
+            .iter()
+            .find(|(rp, _)| rp == "Device.WiFi.")
+            .expect("wifi group");
+        assert_eq!(ip.1.len(), 2, "both interface params belong to the subtree");
+        assert_eq!(wifi.1.len(), 1);
+    }
+
+    /// Guards the WIRING, not just the helper: build_get_resp must actually use
+    /// the grouping. The helper-level test above still passes if build_get_resp
+    /// is reverted to one result per leaf, so it does not protect the fix.
+    #[test]
+    fn build_get_resp_emits_the_requested_subtree_as_requested_path() {
+        use super::super::usp_msg::{body::MsgBody, response::RespType};
+        let paths = vec!["Device.IP.Interface.".to_owned()];
+        let params = m(&[
+            ("Device.IP.Interface.1.Status", "Up"),
+            ("Device.IP.Interface.2.Status", "Down"),
+        ]);
+        let msg = build_get_resp("m1", &paths, params).expect("a GetResp");
+        let body = msg.body.expect("body");
+        let MsgBody::Response(resp) = body.msg_body.expect("msg_body") else {
+            panic!("not a response");
+        };
+        let RespType::GetResp(gr) = resp.resp_type.expect("resp_type") else {
+            panic!("not a GetResp");
+        };
+        assert_eq!(
+            gr.req_path_results.len(),
+            1,
+            "one result for the one subtree asked for, not one per leaf"
+        );
+        assert_eq!(
+            gr.req_path_results[0].requested_path,
+            "Device.IP.Interface."
+        );
+        assert_eq!(
+            gr.req_path_results[0].resolved_path_results.len(),
+            2,
+            "both leaves carried under that subtree"
+        );
+    }
+
+    /// Overlapping requests must not duplicate a parameter: it belongs to the
+    /// most specific subtree that was actually asked for.
+    #[test]
+    fn a_param_is_assigned_to_the_most_specific_request() {
+        let paths = vec!["Device.IP.".to_owned(), "Device.IP.Interface.".to_owned()];
+        let params = m(&[("Device.IP.Interface.1.Status", "Up")]);
+        let grouped = group_by_requested(&paths, params);
+        let total: usize = grouped.iter().map(|(_, v)| v.len()).sum();
+        assert_eq!(total, 1, "assigned once, not to both prefixes");
+        let owner = grouped.iter().find(|(_, v)| !v.is_empty()).unwrap();
+        assert_eq!(owner.0, "Device.IP.Interface.");
+    }
+
+    /// An exact-leaf request still works.
+    #[test]
+    fn an_exact_leaf_request_keeps_its_own_path() {
+        let paths = vec!["Device.DeviceInfo.SoftwareVersion".to_owned()];
+        let params = m(&[("Device.DeviceInfo.SoftwareVersion", "1.2.3")]);
+        let grouped = group_by_requested(&paths, params);
+        assert_eq!(grouped.len(), 1);
+        assert_eq!(grouped[0].0, "Device.DeviceInfo.SoftwareVersion");
+        assert_eq!(grouped[0].1.len(), 1);
+    }
+
+    /// A parameter nobody asked for is still reported, under its own path, so
+    /// widening the data model never silently drops data.
+    #[test]
+    fn unmatched_params_are_still_reported() {
+        let paths = vec!["Device.WiFi.".to_owned()];
+        let params = m(&[("Device.Orphan.Thing", "x")]);
+        let grouped = group_by_requested(&paths, params);
+        assert!(grouped
+            .iter()
+            .any(|(rp, v)| rp == "Device.Orphan.Thing" && v.len() == 1));
     }
 }
