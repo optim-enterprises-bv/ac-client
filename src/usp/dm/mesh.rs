@@ -32,7 +32,7 @@ use log::{info, warn};
 use crate::config::ClientConfig;
 use crate::usp::dm::wifi::mark_wifi_reload;
 use crate::usp::tp469::uci_backend::{
-    uci_add_list, uci_commit, uci_delete, uci_del_list, uci_get, uci_set,
+    uci_add_list, uci_commit, uci_del_list, uci_delete, uci_get, uci_set,
 };
 
 /// UCI `wifi-iface` section owned by the controller.
@@ -145,16 +145,69 @@ fn mesh_originators() -> Vec<(String, u16, String, String, bool)> {
     if !out.status.success() {
         return Vec::new();
     }
-    let text = String::from_utf8_lossy(&out.stdout);
+    parse_originators(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// The bridge's **live** port list, read from sysfs.
+///
+/// `/sys/class/net/<bridge>/brif/` has one entry per enslaved port, so this is
+/// what the kernel is actually bridging — not what UCI asked for. That
+/// distinction is the point: a `ports` list can be committed and never applied,
+/// and the controller cannot tell the difference from config alone.
+///
+/// Sorted for a stable report, so an unchanged bridge does not look changed.
+/// Empty when the bridge does not exist.
+fn bridge_ports(bridge: &str) -> Vec<String> {
+    let mut ports: Vec<String> = std::fs::read_dir(format!("/sys/class/net/{bridge}/brif"))
+        .map(|d| {
+            d.filter_map(|e| e.ok())
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .collect()
+        })
+        .unwrap_or_default();
+    ports.sort();
+    ports
+}
+
+/// Whether this node runs the DHCP server for `lan`.
+///
+/// Exactly one node on a bridged mesh may serve DHCP; every other node sets
+/// `dhcp.lan.ignore=1`. Two servers on one broadcast domain is the failure
+/// bridging introduces, and nothing else reports it.
+///
+/// `ignore` unset means serving — that is dnsmasq's default, so absence is not
+/// ambiguity here.
+fn dhcp_serving_lan() -> bool {
+    uci_get("dhcp.lan.ignore").trim() != "1"
+}
+
+/// `aa:bb:cc:dd:ee:ff` — six colon-separated hex pairs. The one reliable way to
+/// tell an originator row from batctl's banner and headers.
+fn is_mac(s: &str) -> bool {
+    let parts: Vec<&str> = s.split(':').collect();
+    parts.len() == 6
+        && parts
+            .iter()
+            .all(|p| p.len() == 2 && p.chars().all(|c| c.is_ascii_hexdigit()))
+}
+
+/// Pure parse of `batctl ... originators` output, split out so the format can
+/// be tested against real device output without invoking batctl.
+fn parse_originators(text: &str) -> Vec<(String, u16, String, String, bool)> {
     let mut rows = Vec::new();
     for line in text.lines() {
         let line = line.trim();
-        // Skip the header and the B.A.T.M.A.N. banner line.
-        if line.is_empty()
-            || line.starts_with("B.A.T.M.A.N.")
-            || line.starts_with("Originator")
-            || line.starts_with("  ")
-        {
+        // Skip blanks and the column header. The banner is NOT filtered by name
+        // here: it reads `[B.A.T.M.A.N. adv 2026.3-openwrt-1, MainIF/MAC: ...]`,
+        // so it starts with '[' and a `starts_with("B.A.T.M.A.N.")` guard never
+        // fires — which is exactly how the banner was reported to the controller
+        // as an originator called `[B.A.T.M.A.N.` with nexthop `MainIF/MAC:`,
+        // making a node with no peers at all look adjacent.
+        //
+        // The durable filter is the MAC check below: a row is an originator only
+        // if its first field is a MAC. That holds whatever cosmetic changes
+        // batctl makes to its banner or headers.
+        if line.is_empty() || line.starts_with("Originator") {
             continue;
         }
         let selected = line.starts_with('*');
@@ -168,7 +221,7 @@ fn mesh_originators() -> Vec<(String, u16, String, String, bool)> {
             .and_then(|s| s.trim_matches(['(', ')']).parse::<u16>().ok())
             .unwrap_or(0);
         let nexthop = parts.next().unwrap_or("").to_owned();
-        if !originator.is_empty() {
+        if is_mac(&originator) {
             rows.push((originator, tq, last_seen, nexthop, selected));
         }
     }
@@ -185,7 +238,9 @@ fn mesh_stats() -> std::collections::HashMap<String, u64> {
         .args(["meshif", "bat0", "s"])
         .output()
         .ok();
-    let Some(out) = out else { return std::collections::HashMap::new() };
+    let Some(out) = out else {
+        return std::collections::HashMap::new();
+    };
     if !out.status.success() {
         return std::collections::HashMap::new();
     }
@@ -319,9 +374,7 @@ pub fn get(_cfg: &ClientConfig, path: &str) -> HashMap<String, String> {
     // not just a count. Empty when no mesh is configured or no peer is up.
     m.insert(
         "Device.X_OptimACS_Mesh.Peers".into(),
-        mesh_peers()
-            .map(|p| p.join(","))
-            .unwrap_or_default(),
+        mesh_peers().map(|p| p.join(",")).unwrap_or_default(),
     );
 
     // Per-neighbor signal strength (dBm), comma-separated in the same order as
@@ -413,15 +466,33 @@ pub fn get(_cfg: &ClientConfig, path: &str) -> HashMap<String, String> {
         if batman_capable() { "1" } else { "0" }.into(),
     );
 
+    // --- What the controller needs to verify the CLIENT path ----------------
+    //
+    // Adjacency is not sufficient. On 2026-09-08 two nodes held a perfect mesh
+    // (TQ 252/255) while no client behind the non-gateway node could obtain a
+    // lease, because bat0 was addressed and never bridged into br-lan. Neither
+    // of the two facts that would have shown it — the bridge's real port list,
+    // and which node runs the DHCP server — was reported at all, so the
+    // controller could only see "formed".
+    //
+    // Both are read LIVE from the kernel/runtime rather than from UCI: UCI says
+    // what was asked for, and the entire failure was config that had been
+    // accepted and not taken effect.
+    m.insert(
+        "Device.X_OptimACS_Mesh.BridgePorts".into(),
+        bridge_ports("br-lan").join(","),
+    );
+    m.insert(
+        "Device.X_OptimACS_Mesh.DhcpServer".into(),
+        if dhcp_serving_lan() { "1" } else { "0" }.into(),
+    );
+
     // The mesh interface's layer-3 address. Prefer the bat0 IP when batman-adv
     // is active (the mesh data-plane address the controller routes to);
     // otherwise the 802.11s mesh iface IP. Report the *actual* address on the
     // interface, not the UCI config, so the controller sees what the device
     // really has (which may be a mactoip-derived address self-assigned at boot).
-    m.insert(
-        "Device.X_OptimACS_Mesh.IPAddress".into(),
-        mesh_ipaddr(),
-    );
+    m.insert("Device.X_OptimACS_Mesh.IPAddress".into(), mesh_ipaddr());
 
     // Whether this device is the mesh's internet gateway. A device is the
     // gateway if its WAN interface has an IP and a default route (i.e. it has
@@ -710,7 +781,9 @@ fn ensure_batman(gw_mode: &str, ipaddr: &str) -> Result<(), String> {
     // IMPORTANT: per the shipped `batadv.sh` proto handler, `proto batadv` sets
     // `no_device=1` and NEVER carries an IP — the IP goes on a separate static
     // interface bound to `device=bat0` (see BAT0_IP_SECTION below).
-    let bat0_exists = !uci_get(&format!("network.{BAT0_SECTION}")).trim().is_empty();
+    let bat0_exists = !uci_get(&format!("network.{BAT0_SECTION}"))
+        .trim()
+        .is_empty();
     if !bat0_exists {
         uci_set(&format!("network.{BAT0_SECTION}"), "interface")?;
     }
@@ -722,7 +795,9 @@ fn ensure_batman(gw_mode: &str, ipaddr: &str) -> Result<(), String> {
     // --- static IP on bat0 (proto static, device=bat0) ----------------------
     // This is where the layer-3 address lives. The batadv proto cannot hold it.
     if !ipaddr.trim().is_empty() {
-        let ip_exists = !uci_get(&format!("network.{BAT0_IP_SECTION}")).trim().is_empty();
+        let ip_exists = !uci_get(&format!("network.{BAT0_IP_SECTION}"))
+            .trim()
+            .is_empty();
         if !ip_exists {
             uci_set(&format!("network.{BAT0_IP_SECTION}"), "interface")?;
         }
@@ -735,13 +810,21 @@ fn ensure_batman(gw_mode: &str, ipaddr: &str) -> Result<(), String> {
     // --- hardif (proto batadv_hardif): attach mesh vif to bat0 --------------
     // If the hardif section exists with a stale ifname/master, update it rather
     // than leaving a dead bond.
-    let hif = uci_get(&format!("network.{BAT0_HARDIF_SECTION}")).trim().to_owned();
+    let hif = uci_get(&format!("network.{BAT0_HARDIF_SECTION}"))
+        .trim()
+        .to_owned();
     if hif.is_empty() {
         uci_set(&format!("network.{BAT0_HARDIF_SECTION}"), "interface")?;
     }
-    uci_set(&format!("network.{BAT0_HARDIF_SECTION}.proto"), "batadv_hardif")?;
+    uci_set(
+        &format!("network.{BAT0_HARDIF_SECTION}.proto"),
+        "batadv_hardif",
+    )?;
     uci_set(&format!("network.{BAT0_HARDIF_SECTION}.ifname"), &mesh_if)?;
-    uci_set(&format!("network.{BAT0_HARDIF_SECTION}.master"), BAT0_IFNAME)?;
+    uci_set(
+        &format!("network.{BAT0_HARDIF_SECTION}.master"),
+        BAT0_IFNAME,
+    )?;
     info!("mesh: bat0 hardif {mesh_if} -> bat0");
 
     // --- firewall: bind bat0 to the lan zone -------------------------------
@@ -784,10 +867,17 @@ fn ensure_network_interface() -> Result<(), String> {
     // The mesh device is the wifi-iface's ifname (mesh0, mesh1, ...). Resolve it
     // from the wireless section; fall back to `mesh0` (OpenWrt's default).
     let ifname = uci_get(&opt("ifname")).trim().to_owned();
-    let ifname = if ifname.is_empty() { "mesh0".to_owned() } else { ifname };
+    let ifname = if ifname.is_empty() {
+        "mesh0".to_owned()
+    } else {
+        ifname
+    };
 
     // Create the network interface if it does not exist.
-    if uci_get(&format!("network.{NETWORK_SECTION}")).trim().is_empty() {
+    if uci_get(&format!("network.{NETWORK_SECTION}"))
+        .trim()
+        .is_empty()
+    {
         uci_set(&format!("network.{NETWORK_SECTION}"), "interface")?;
         uci_set(&net_opt("device"), &ifname)?;
         uci_set(&net_opt("proto"), "static")?;
@@ -817,7 +907,10 @@ fn ensure_network_interface() -> Result<(), String> {
 /// Remove the network interface + firewall zone binding when the mesh is torn
 /// down. Best-effort: a missing section is not an error.
 fn remove_network_interface() -> Result<(), String> {
-    if !uci_get(&format!("network.{NETWORK_SECTION}")).trim().is_empty() {
+    if !uci_get(&format!("network.{NETWORK_SECTION}"))
+        .trim()
+        .is_empty()
+    {
         uci_delete(&format!("network.{NETWORK_SECTION}"))?;
         info!("mesh: removed network interface '{NETWORK_SECTION}'");
     }
@@ -843,6 +936,73 @@ fn usp_bool(v: &str) -> Result<bool, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Verbatim `batctl meshif bat0 originators` from the lab D50, 2026-09-08.
+    ///
+    /// The banner starts with `[`, NOT with `B.A.T.M.A.N.`, so the old
+    /// `starts_with("B.A.T.M.A.N.")` guard never fired and the banner was
+    /// reported to the controller as an originator named `[B.A.T.M.A.N.` with
+    /// nexthop `MainIF/MAC:`. A node with no peers therefore looked adjacent.
+    const REAL_ORIGINATORS: &str = "\
+[B.A.T.M.A.N. adv 2026.3-openwrt-1, MainIF/MAC: phy1-mesh0/d6:f3:37:42:d3:cd (bat0/0a:b4:48:f7:91:4e BATMAN_IV)]
+   Originator        last-seen (#/255) Nexthop           [outgoingIF]
+ * d6:f3:37:24:73:81    0.510s   (246) d6:f3:37:24:73:81 [phy1-mesh0]
+";
+
+    #[test]
+    fn the_batctl_banner_is_not_an_originator() {
+        let rows = parse_originators(REAL_ORIGINATORS);
+        assert_eq!(
+            rows.len(),
+            1,
+            "expected exactly one originator, got {rows:?}"
+        );
+        let (orig, tq, _last, nexthop, selected) = &rows[0];
+        assert_eq!(orig, "d6:f3:37:24:73:81");
+        assert_eq!(*tq, 246);
+        assert_eq!(nexthop, "d6:f3:37:24:73:81");
+        assert!(selected, "the '*' row is the selected path");
+    }
+
+    /// No peers at all must yield no originators — not a banner-shaped one.
+    #[test]
+    fn a_lone_banner_yields_no_originators() {
+        let only_header = "\
+[B.A.T.M.A.N. adv 2026.3-openwrt-1, MainIF/MAC: phy1-mesh0/d6:f3:37:42:d3:cd (bat0/0a:b4:48:f7:91:4e BATMAN_IV)]
+   Originator        last-seen (#/255) Nexthop           [outgoingIF]
+";
+        assert!(parse_originators(only_header).is_empty());
+    }
+
+    /// Anything whose first field is not a MAC is not an originator, whatever
+    /// cosmetic changes batctl makes to its output.
+    #[test]
+    fn non_mac_rows_are_discarded() {
+        let junk = "not-a-mac 0.5s (200) also-not-a-mac [x]\nWARNING: something\n";
+        assert!(parse_originators(junk).is_empty());
+    }
+
+    /// The two client-path parameters must be present on a prefix GET, or the
+    /// controller cannot verify anything and this module is wired to nothing.
+    #[test]
+    fn the_client_path_parameters_are_reported() {
+        let cfg = ClientConfig::default();
+        let m = get(&cfg, "Device.X_OptimACS_Mesh.");
+        assert!(
+            m.contains_key("Device.X_OptimACS_Mesh.BridgePorts"),
+            "BridgePorts missing: the controller cannot see whether bat0 is bridged"
+        );
+        assert!(
+            m.contains_key("Device.X_OptimACS_Mesh.DhcpServer"),
+            "DhcpServer missing: the controller cannot detect two DHCP servers"
+        );
+    }
+
+    /// A bridge that does not exist reports nothing, not a fabricated port.
+    #[test]
+    fn a_missing_bridge_reports_no_ports() {
+        assert!(bridge_ports("definitely-not-a-bridge-xyz").is_empty());
+    }
 
     /// A prefix GET must return the switch, not only an exact leaf.
     ///
