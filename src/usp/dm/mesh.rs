@@ -528,24 +528,82 @@ fn mesh_ipaddr() -> String {
     String::new()
 }
 
-/// Whether this device is the mesh's internet gateway: its WAN interface has
-/// an IP and a default route (i.e. it has an uplink).
+/// Whether batman-adv itself says this node is the mesh gateway.
+///
+/// `gw_mode server` is set by the controller on the uplink node and `client`
+/// everywhere else, so this is a mesh-wide fact every node agrees on rather
+/// than a local guess. Returns None when gw_mode is `off` or batctl is absent,
+/// in which case the caller falls back to inspecting the routing table.
+fn batman_says_gateway() -> Option<bool> {
+    let out = std::process::Command::new("batctl")
+        .arg("gw_mode")
+        .output()
+        .ok()?;
+    parse_gw_mode(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// Parse `batctl gw_mode` output. Split out so it is directly testable.
+fn parse_gw_mode(out: &str) -> Option<bool> {
+    let first = out.split_whitespace().next()?;
+    match first {
+        "server" => Some(true),
+        "client" => Some(false),
+        _ => None, // "off", or anything unrecognised
+    }
+}
+
+/// The netdev carrying the default route, if it is a real uplink.
+///
+/// Deliberately makes no assumption about the interface being called `wan`.
+/// The previous implementation matched the literal string `wan`, which is the
+/// netdev name on a D50 but not on a BPI-R4, where the same logical interface
+/// is a bridge (`br-wan`) - so the real internet gateway reported itself as a
+/// client. Mesh and LAN devices are excluded: a default route out of those is
+/// a route *to* the gateway, not evidence of being one.
+fn uplink_device(routes: &str) -> Option<String> {
+    for line in routes.lines() {
+        if !line.starts_with("default") {
+            continue;
+        }
+        let mut it = line.split_whitespace();
+        let dev = loop {
+            match it.next() {
+                Some("dev") => break it.next()?,
+                Some(_) => continue,
+                None => return None,
+            }
+        };
+        if dev == "bat0" || dev.starts_with("br-lan") {
+            continue;
+        }
+        return Some(dev.to_owned());
+    }
+    None
+}
+
+/// Whether this device is the mesh's internet gateway.
+///
+/// Prefers batman-adv's own gateway election; falls back to "there is a
+/// default route out of a device that is neither the mesh nor the LAN, and
+/// that device holds an address".
 fn is_gateway() -> bool {
-    let wan_ip = std::process::Command::new("ip")
-        .args(["-4", "addr", "show", "wan"])
+    if let Some(v) = batman_says_gateway() {
+        return v;
+    }
+    let routes = std::process::Command::new("ip")
+        .args(["route", "show", "default"])
         .output()
         .ok()
         .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
         .unwrap_or_default();
-    if !wan_ip.contains("inet ") {
+    let Some(dev) = uplink_device(&routes) else {
         return false;
-    }
-    // A default route out `wan` confirms the uplink is live.
+    };
     std::process::Command::new("ip")
-        .args(["route", "show", "default"])
+        .args(["-4", "addr", "show", &dev])
         .output()
         .ok()
-        .map(|o| String::from_utf8_lossy(&o.stdout).contains("dev wan"))
+        .map(|o| String::from_utf8_lossy(&o.stdout).contains("inet "))
         .unwrap_or(false)
 }
 
@@ -1117,5 +1175,59 @@ Station ae:5e:ca:cf:3f:1a (on phy1-mesh0)
         assert!(VALID_ENCRYPTION.contains(&"none"));
         assert!(!VALID_ENCRYPTION.contains(&"psk2"));
         assert!(!VALID_ENCRYPTION.contains(&"wpa2"));
+    }
+}
+
+#[cfg(test)]
+mod gateway_detection_tests {
+    use super::{parse_gw_mode, uplink_device};
+
+    #[test]
+    fn batman_gw_mode_is_authoritative() {
+        assert_eq!(parse_gw_mode("server\n"), Some(true));
+        assert_eq!(parse_gw_mode("client\n"), Some(false));
+        // batctl prints bandwidth after "server" on some versions
+        assert_eq!(parse_gw_mode("server 10000/2000\n"), Some(true));
+    }
+
+    #[test]
+    fn gw_mode_off_defers_to_the_routing_table() {
+        assert_eq!(parse_gw_mode("off\n"), None);
+        assert_eq!(parse_gw_mode(""), None);
+    }
+
+    #[test]
+    fn uplink_is_found_whatever_the_interface_is_called() {
+        // BPI-R4: bridged WAN. The old code matched the literal "wan" and so
+        // reported the real internet gateway as a client.
+        assert_eq!(
+            uplink_device("default via 192.168.20.1 dev br-wan proto static src 192.168.20.84\n")
+                .as_deref(),
+            Some("br-wan")
+        );
+        // D50: plain netdev.
+        assert_eq!(
+            uplink_device("default via 192.168.50.1 dev wan  src 192.168.50.182\n").as_deref(),
+            Some("wan")
+        );
+        assert_eq!(
+            uplink_device("default via 10.0.0.1 dev eth0.2\n").as_deref(),
+            Some("eth0.2")
+        );
+    }
+
+    #[test]
+    fn a_default_route_over_the_mesh_or_lan_is_not_an_uplink() {
+        // Non-gateway nodes get a default route pointing at the gateway over
+        // the mesh/LAN bridge. That must not read as being a gateway.
+        assert_eq!(uplink_device("default via 192.168.1.1 dev bat0\n"), None);
+        assert_eq!(uplink_device("default via 192.168.1.1 dev br-lan\n"), None);
+        assert_eq!(uplink_device(""), None);
+        // ...but a real uplink alongside one still counts.
+        assert_eq!(
+            uplink_device("default via 192.168.1.1 dev br-lan\ndefault via 10.0.0.1 dev br-wan\n")
+                .as_deref(),
+            Some("br-wan")
+        );
     }
 }
