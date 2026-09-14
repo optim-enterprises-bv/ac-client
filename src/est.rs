@@ -280,10 +280,7 @@ pub async fn enrol_if_needed(cfg: &ClientConfig) -> bool {
     // Symbol 10 is a newline at exactly the wrap column. The controller was
     // behaving correctly and the certificate had already been issued -- see
     // the note in `enrol_if_needed` about what that costs.
-    let compact: Vec<u8> = b64
-        .bytes()
-        .filter(|b| !b.is_ascii_whitespace())
-        .collect();
+    let compact: Vec<u8> = b64.bytes().filter(|b| !b.is_ascii_whitespace()).collect();
     let der = match base64::engine::general_purpose::STANDARD.decode(&compact) {
         Ok(d) => d,
         Err(e) => {
@@ -550,7 +547,10 @@ mod response_encoding_tests {
             .map(|c| String::from_utf8_lossy(c).to_string())
             .collect::<Vec<_>>()
             .join("\n");
-        assert!(wrapped.contains('\n'), "the fixture must actually be wrapped");
+        assert!(
+            wrapped.contains('\n'),
+            "the fixture must actually be wrapped"
+        );
 
         // What the code does: strip all whitespace, then decode.
         let compact: Vec<u8> = wrapped
