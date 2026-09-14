@@ -11,6 +11,7 @@ pub mod claim;
 pub mod consent;
 pub mod device_info;
 pub mod dhcp;
+pub mod diagnostics;
 pub mod dpi;
 pub mod dpi_flows;
 pub mod enforcement;
@@ -198,6 +199,10 @@ async fn dispatch_get(cfg: &ClientConfig, path: &str) -> Params {
         mesh::get(cfg, path)
     } else if path.starts_with("Device.X_OptimACS_Usteer") {
         usteer::get(cfg, path)
+    } else if path.starts_with("Device.IP.Diagnostics") {
+        // Ahead of the ip:: arm: Device.IP.Diagnostics is a TR-143 object with
+        // its own state machine, not part of the interface model ip:: reports.
+        diagnostics::get(cfg, path)
     } else if path.starts_with("Device.X_OptimACS_Enforcement") {
         enforcement::get(cfg, path)
     } else if path.starts_with("Device.X_OptimACS_Reputation") {
@@ -254,6 +259,10 @@ async fn dispatch_set(cfg: &ClientConfig, path: &str, value: &str) -> Result<(),
         device_info::set(cfg, path, value)
     } else if path.starts_with("Device.WiFi.") {
         wifi::set(cfg, path, value).await
+    } else if path.starts_with("Device.IP.Diagnostics") {
+        // Before the Device.IP.Interface. arm, and narrower than it: TR-143
+        // diagnostics are a separate object with their own writable state.
+        diagnostics::set(cfg, path, value)
     } else if path.starts_with("Device.IP.Interface.") {
         ip::set(cfg, path, value).await
     } else if path.starts_with("Device.DHCPv4.") {
