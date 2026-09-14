@@ -677,6 +677,35 @@ pub async fn get(_cfg: &ClientConfig, path: &str) -> HashMap<String, String> {
                     if let Some(rx_bytes) = sta.get("rx_bytes") {
                         m.insert(format!("{base}.BytesReceived"), rx_bytes.clone());
                     }
+                    // Reliability. TR-181 issue 2 defines RetransCount and
+                    // FailedRetransCount under AssociatedDevice.Stats, and
+                    // Retransmissions directly on AssociatedDevice.
+                    if let Some(v) = sta.get("tx_retries") {
+                        m.insert(format!("{base}.Retransmissions"), v.clone());
+                        m.insert(format!("{base}.Stats.RetransCount"), v.clone());
+                    }
+                    if let Some(v) = sta.get("tx_failed") {
+                        m.insert(format!("{base}.Stats.FailedRetransCount"), v.clone());
+                    }
+                    if let Some(v) = sta.get("rx_drop_misc") {
+                        m.insert(format!("{base}.Stats.ErrorsReceived"), v.clone());
+                    }
+                    // No standard TR-181 parameter covers these, so they take the
+                    // vendor prefix this data model already uses for
+                    // Radio.X_OptimACS_ChannelUtilization.
+                    if let Some(v) = sta.get("signal_avg") {
+                        m.insert(format!("{base}.X_OptimACS_SignalStrengthAvg"), v.clone());
+                    }
+                    if let Some(v) = sta.get("inactive_ms") {
+                        m.insert(format!("{base}.X_OptimACS_InactiveTimeMs"), v.clone());
+                    }
+                    if let Some(v) = sta.get("connected_secs") {
+                        m.insert(format!("{base}.X_OptimACS_ConnectedTimeSecs"), v.clone());
+                    }
+                    if let Some(v) = sta.get("beacon_loss") {
+                        m.insert(format!("{base}.X_OptimACS_BeaconLoss"), v.clone());
+                    }
+
                     // Try to resolve IP from ARP table
                     if let Some(mac) = sta.get("mac") {
                         let ip = resolve_ip_from_arp(mac);
@@ -1045,7 +1074,16 @@ fn get_station_dump(iface: &str) -> Vec<HashMap<String, String>> {
         .ok()
         .and_then(|o| String::from_utf8(o.stdout).ok())
         .unwrap_or_default();
+    parse_station_dump(&output)
+}
 
+/// Parse `iw dev <iface> station dump` output.
+///
+/// Split from `get_station_dump` so the parsing is testable without a radio:
+/// the field names here are exactly what the platform's experience scoring
+/// consumes, and a silently-dropped key looks identical to a client that has
+/// no problems.
+fn parse_station_dump(output: &str) -> Vec<HashMap<String, String>> {
     let mut stations = Vec::new();
     let mut current: Option<HashMap<String, String>> = None;
 
@@ -1102,6 +1140,40 @@ fn get_station_dump(iface: &str) -> Vec<HashMap<String, String>> {
                     }
                     "tx bytes" => {
                         sta.insert("tx_bytes".to_string(), val.to_string());
+                    }
+                    // `iw` already prints these for every station; they were
+                    // parsed past and dropped. They are what judges link
+                    // reliability rather than link speed: a client can
+                    // negotiate 866 Mbit/s and still be unusable if most of
+                    // its frames are retried or failing.
+                    "tx retries" => {
+                        sta.insert("tx_retries".to_string(), val.to_string());
+                    }
+                    "tx failed" => {
+                        sta.insert("tx_failed".to_string(), val.to_string());
+                    }
+                    "rx drop misc" => {
+                        sta.insert("rx_drop_misc".to_string(), val.to_string());
+                    }
+                    "beacon loss" => {
+                        sta.insert("beacon_loss".to_string(), val.to_string());
+                    }
+                    "signal avg" => {
+                        // "signal avg: -47 [-47, -53] dBm" → first number
+                        let dbm = val.split_whitespace().next().unwrap_or(val);
+                        sta.insert("signal_avg".to_string(), dbm.to_string());
+                    }
+                    "inactive time" => {
+                        // "inactive time: 120 ms"
+                        if let Some(n) = val.split_whitespace().next() {
+                            sta.insert("inactive_ms".to_string(), n.to_string());
+                        }
+                    }
+                    "connected time" => {
+                        // "connected time: 8421 seconds"
+                        if let Some(n) = val.split_whitespace().next() {
+                            sta.insert("connected_secs".to_string(), n.to_string());
+                        }
                     }
                     _ => {}
                 }
@@ -1579,5 +1651,85 @@ mod set_tests {
             offenders.is_empty(),
             "branches commit UCI without marking the radio for reload: {offenders:#?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod station_dump_tests {
+    use super::parse_station_dump;
+
+    /// A real `iw station dump` block, including the fields that were being
+    /// parsed past before reliability scoring needed them.
+    const DUMP: &str = "\
+Station aa:bb:cc:11:22:33 (on wlan0)
+        inactive time:  120 ms
+        rx bytes:       98765432
+        rx packets:     12345
+        tx bytes:       12345678
+        tx packets:     9876
+        tx retries:     1420
+        tx failed:      37
+        rx drop misc:   4
+        signal:         -52 [-55, -58] dBm
+        signal avg:     -47 [-47, -53] dBm
+        tx bitrate:     866.7 MBit/s VHT-MCS 9 80MHz short GI VHT-NSS 2
+        rx bitrate:     650.0 MBit/s VHT-MCS 7 80MHz short GI VHT-NSS 2
+        connected time: 8421 seconds
+        beacon loss:    0
+Station dd:ee:ff:44:55:66 (on wlan0)
+        signal:         -77 dBm
+        tx retries:     20
+        tx failed:      0
+";
+
+    #[test]
+    fn both_stations_are_parsed() {
+        let s = parse_station_dump(DUMP);
+        assert_eq!(s.len(), 2);
+        assert_eq!(s[0].get("mac").map(String::as_str), Some("AA:BB:CC:11:22:33"));
+        assert_eq!(s[1].get("mac").map(String::as_str), Some("DD:EE:FF:44:55:66"));
+    }
+
+    #[test]
+    fn reliability_fields_are_captured() {
+        let s = parse_station_dump(DUMP);
+        assert_eq!(s[0].get("tx_retries").map(String::as_str), Some("1420"));
+        assert_eq!(s[0].get("tx_failed").map(String::as_str), Some("37"));
+        assert_eq!(s[0].get("rx_drop_misc").map(String::as_str), Some("4"));
+        assert_eq!(s[0].get("beacon_loss").map(String::as_str), Some("0"));
+    }
+
+    #[test]
+    fn signal_and_signal_avg_are_distinct_and_both_first_number() {
+        let s = parse_station_dump(DUMP);
+        assert_eq!(s[0].get("signal").map(String::as_str), Some("-52"));
+        assert_eq!(s[0].get("signal_avg").map(String::as_str), Some("-47"));
+    }
+
+    #[test]
+    fn times_drop_their_units() {
+        let s = parse_station_dump(DUMP);
+        assert_eq!(s[0].get("inactive_ms").map(String::as_str), Some("120"));
+        assert_eq!(s[0].get("connected_secs").map(String::as_str), Some("8421"));
+    }
+
+    #[test]
+    fn bitrates_are_still_converted_to_kbps() {
+        let s = parse_station_dump(DUMP);
+        assert_eq!(s[0].get("tx_bitrate").map(String::as_str), Some("866700"));
+        assert_eq!(s[0].get("rx_bitrate").map(String::as_str), Some("650000"));
+    }
+
+    #[test]
+    fn a_station_missing_fields_yields_only_what_it_had() {
+        let s = parse_station_dump(DUMP);
+        assert_eq!(s[1].get("signal").map(String::as_str), Some("-77"));
+        assert!(s[1].get("signal_avg").is_none());
+        assert!(s[1].get("inactive_ms").is_none());
+    }
+
+    #[test]
+    fn empty_output_is_no_stations_rather_than_a_panic() {
+        assert!(parse_station_dump("").is_empty());
     }
 }
