@@ -690,6 +690,16 @@ pub async fn get(_cfg: &ClientConfig, path: &str) -> HashMap<String, String> {
                     if let Some(v) = sta.get("rx_drop_misc") {
                         m.insert(format!("{base}.Stats.ErrorsReceived"), v.clone());
                     }
+                    // PacketsSent/PacketsReceived are standard TR-181 issue 2
+                    // under AssociatedDevice.Stats. Without them the ACS has
+                    // FailedRetransCount but nothing to divide it by, so it
+                    // cannot report a loss rate at all.
+                    if let Some(v) = sta.get("tx_packets") {
+                        m.insert(format!("{base}.Stats.PacketsSent"), v.clone());
+                    }
+                    if let Some(v) = sta.get("rx_packets") {
+                        m.insert(format!("{base}.Stats.PacketsReceived"), v.clone());
+                    }
                     // No standard TR-181 parameter covers these, so they take the
                     // vendor prefix this data model already uses for
                     // Radio.X_OptimACS_ChannelUtilization.
@@ -1189,6 +1199,15 @@ fn parse_station_dump(output: &str) -> Vec<HashMap<String, String>> {
                     }
                     "tx bytes" => {
                         sta.insert("tx_bytes".to_string(), val.to_string());
+                    }
+                    // Packet counts are the denominator a loss rate needs.
+                    // "tx failed" alone is a count: 47 failures means nothing
+                    // without knowing whether 100 or 100000 frames were sent.
+                    "rx packets" => {
+                        sta.insert("rx_packets".to_string(), val.to_string());
+                    }
+                    "tx packets" => {
+                        sta.insert("tx_packets".to_string(), val.to_string());
                     }
                     // `iw` already prints these for every station; they were
                     // parsed past and dropped. They are what judges link
@@ -1735,8 +1754,14 @@ Station dd:ee:ff:44:55:66 (on wlan0)
     fn both_stations_are_parsed() {
         let s = parse_station_dump(DUMP);
         assert_eq!(s.len(), 2);
-        assert_eq!(s[0].get("mac").map(String::as_str), Some("AA:BB:CC:11:22:33"));
-        assert_eq!(s[1].get("mac").map(String::as_str), Some("DD:EE:FF:44:55:66"));
+        assert_eq!(
+            s[0].get("mac").map(String::as_str),
+            Some("AA:BB:CC:11:22:33")
+        );
+        assert_eq!(
+            s[1].get("mac").map(String::as_str),
+            Some("DD:EE:FF:44:55:66")
+        );
     }
 
     #[test]
@@ -1778,6 +1803,46 @@ Station dd:ee:ff:44:55:66 (on wlan0)
     }
 
     #[test]
+    fn packet_counters_are_captured() {
+        let s = parse_station_dump(DUMP);
+        assert_eq!(s[0].get("tx_packets").map(String::as_str), Some("9876"));
+        assert_eq!(s[0].get("rx_packets").map(String::as_str), Some("12345"));
+    }
+
+    /// The point of the packet counters: `tx failed` on its own is a count,
+    /// and a count cannot be scored. Paired with `tx packets` it becomes a
+    /// rate the ACS can turn into a reliability dimension.
+    #[test]
+    fn failed_frames_have_a_denominator_to_divide_by() {
+        let s = parse_station_dump(DUMP);
+        let failed: f64 = s[0]
+            .get("tx_failed")
+            .expect("tx failed")
+            .parse()
+            .expect("number");
+        let sent: f64 = s[0]
+            .get("tx_packets")
+            .expect("tx packets")
+            .parse()
+            .expect("number");
+
+        let loss_pct = failed / (sent + failed) * 100.0;
+        assert!(
+            (loss_pct - 0.373).abs() < 0.01,
+            "37 failed of 9876+37 frames is ~0.373% loss, got {loss_pct}"
+        );
+    }
+
+    #[test]
+    fn a_station_without_packet_counters_reports_none() {
+        // Second station has tx failed but no tx packets -- no denominator,
+        // so the ACS must not be handed a loss rate for it.
+        let s = parse_station_dump(DUMP);
+        assert_eq!(s[1].get("tx_failed").map(String::as_str), Some("0"));
+        assert!(!s[1].contains_key("tx_packets"));
+    }
+
+    #[test]
     fn empty_output_is_no_stations_rather_than_a_panic() {
         assert!(parse_station_dump("").is_empty());
     }
@@ -1799,7 +1864,10 @@ mod path_coverage_tests {
     /// answer that part".
     #[test]
     fn an_access_point_subtree_request_covers_associated_devices() {
-        assert!(covers(AP, ASSOC), "AccessPoint. must cover AssociatedDevice");
+        assert!(
+            covers(AP, ASSOC),
+            "AccessPoint. must cover AssociatedDevice"
+        );
     }
 
     #[test]
