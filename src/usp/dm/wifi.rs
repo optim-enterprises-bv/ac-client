@@ -282,7 +282,7 @@ pub async fn get(_cfg: &ClientConfig, path: &str) -> HashMap<String, String> {
     }
 
     // Handle AccessPoint requests
-    if path.contains("AccessPoint.") || path.ends_with("Device.WiFi.") {
+    if covers(path, "Device.WiFi.AccessPoint.") {
         for (idx, iface) in ifaces.iter().enumerate() {
             let ap_idx = idx + 1;
             let enc = uci_get(&format!("wireless.{iface}.encryption"));
@@ -640,7 +640,7 @@ pub async fn get(_cfg: &ClientConfig, path: &str) -> HashMap<String, String> {
     }
 
     // Handle AssociatedDevice requests (connected WiFi clients)
-    if path.contains("AssociatedDevice.") || path.ends_with("Device.WiFi.") {
+    if covers(path, "Device.WiFi.AccessPoint.{i}.AssociatedDevice.") {
         for (idx, iface) in ifaces.iter().enumerate() {
             let ap_idx = idx + 1;
             let device = uci_get(&format!("wireless.{iface}.device"));
@@ -719,7 +719,7 @@ pub async fn get(_cfg: &ClientConfig, path: &str) -> HashMap<String, String> {
     }
 
     // Handle AccessPoint extra params (IsolationEnable, MaxAssociatedDevices, WMMEnable)
-    if path.contains("AccessPoint.") || path.ends_with("Device.WiFi.") {
+    if covers(path, "Device.WiFi.AccessPoint.") {
         for (idx, iface) in ifaces.iter().enumerate() {
             let ap_idx = idx + 1;
             let maxassoc = uci_get(&format!("wireless.{iface}.maxassoc"));
@@ -1067,6 +1067,55 @@ fn get_iw_bitrate(iface: &str) -> String {
 }
 
 /// Parse `iw dev <iface> station dump` into per-station maps
+/// Does a Get on `requested` cover parameters under `object`?
+///
+/// USP asks for object paths: a Get on `Device.WiFi.AccessPoint.` must return
+/// everything beneath it, including `AccessPoint.3.AssociatedDevice.1.*`.
+///
+/// The checks here used to be `path.contains("AssociatedDevice.")` — a
+/// substring test standing in for a prefix relationship. It answered correctly
+/// for a leaf request and for the whole-tree `Device.WiFi.` case, and wrongly
+/// for every object path in between: a controller asking for
+/// `Device.WiFi.AccessPoint.` got the access-point parameters and none of the
+/// associated devices, with nothing to say the rest had been withheld. The
+/// controller could not tell "this AP has no clients" from "the agent did not
+/// answer that part", and per-client signal aged in the ACS for days while the
+/// agent reported happily every cycle.
+///
+/// Comparison ignores instance numbers, because `AccessPoint.3.` and
+/// `AccessPoint.1.` are the same place in the data model and a controller may
+/// legitimately ask for either or for neither.
+fn covers(requested: &str, object: &str) -> bool {
+    if requested.is_empty() {
+        return false;
+    }
+    let r = normalise_instances(requested);
+    let o = normalise_instances(object);
+    // Requested sits inside the object (a leaf, or a deeper object).
+    if r.starts_with(&o) {
+        return true;
+    }
+    // Requested is an ancestor of the object: everything below it is covered.
+    o.starts_with(&r)
+}
+
+/// Replace `.<digits>.` with `.{i}.` so two paths can be compared by shape.
+/// Also handles a trailing `.<digits>` with no closing dot.
+fn normalise_instances(path: &str) -> String {
+    let mut out = String::with_capacity(path.len());
+    for (i, seg) in path.split('.').enumerate() {
+        if i > 0 {
+            out.push('.');
+        }
+        if !seg.is_empty() && seg.chars().all(|c| c.is_ascii_digit()) {
+            out.push_str("{i}");
+        } else {
+            out.push_str(seg);
+        }
+    }
+    out
+}
+
 fn get_station_dump(iface: &str) -> Vec<HashMap<String, String>> {
     let output = std::process::Command::new("iw")
         .args(["dev", iface, "station", "dump"])
@@ -1731,5 +1780,67 @@ Station dd:ee:ff:44:55:66 (on wlan0)
     #[test]
     fn empty_output_is_no_stations_rather_than_a_panic() {
         assert!(parse_station_dump("").is_empty());
+    }
+}
+
+#[cfg(test)]
+mod path_coverage_tests {
+    use super::covers;
+
+    const ASSOC: &str = "Device.WiFi.AccessPoint.{i}.AssociatedDevice.";
+    const AP: &str = "Device.WiFi.AccessPoint.";
+
+    /// The request that was silently returning nothing.
+    ///
+    /// A controller polling `Device.WiFi.AccessPoint.` got the access-point
+    /// parameters and none of the associated devices. Per-client signal went
+    /// stale in the ACS for days while the agent reported every cycle, and
+    /// nothing distinguished "this AP has no clients" from "the agent did not
+    /// answer that part".
+    #[test]
+    fn an_access_point_subtree_request_covers_associated_devices() {
+        assert!(covers(AP, ASSOC), "AccessPoint. must cover AssociatedDevice");
+    }
+
+    #[test]
+    fn the_whole_wifi_tree_still_covers_everything() {
+        assert!(covers("Device.WiFi.", ASSOC));
+        assert!(covers("Device.WiFi.", AP));
+    }
+
+    #[test]
+    fn a_leaf_request_still_matches_its_own_object() {
+        assert!(covers(
+            "Device.WiFi.AccessPoint.3.AssociatedDevice.1.SignalStrength",
+            ASSOC
+        ));
+        assert!(covers("Device.WiFi.AccessPoint.2.Status", AP));
+    }
+
+    #[test]
+    fn an_indexed_access_point_covers_its_associated_devices() {
+        assert!(covers("Device.WiFi.AccessPoint.3.", ASSOC));
+    }
+
+    #[test]
+    fn the_device_root_covers_everything_below_it() {
+        assert!(covers("Device.", AP));
+        assert!(covers("Device.", ASSOC));
+    }
+
+    /// Coverage must not become "return everything to everyone". A poll for
+    /// radio state should not drag every associated device with it — that is
+    /// the volume concern the original narrow match was protecting.
+    #[test]
+    fn an_unrelated_subtree_does_not_match() {
+        assert!(!covers("Device.WiFi.Radio.", ASSOC));
+        assert!(!covers("Device.DeviceInfo.", ASSOC));
+        assert!(!covers("Device.IP.Interface.", AP));
+        assert!(!covers("Device.X_OptimACS_Mesh.", ASSOC));
+    }
+
+    #[test]
+    fn an_empty_request_matches_nothing() {
+        assert!(!covers("", ASSOC));
     }
 }
