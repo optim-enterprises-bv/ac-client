@@ -214,10 +214,18 @@ pub async fn get(_cfg: &ClientConfig, path: &str) -> HashMap<String, String> {
                     format!("Device.IP.Interface.{iface_idx}.X_OptimACS_RXBytes"),
                     rx_bytes.clone(),
                 );
+                m.insert(
+                    format!("Device.IP.Interface.{iface_idx}.Stats.BytesReceived"),
+                    rx_bytes.clone(),
+                );
             }
             if let Some(rx_packets) = stats.get("rx_packets") {
                 m.insert(
                     format!("Device.IP.Interface.{iface_idx}.X_OptimACS_RXPackets"),
+                    rx_packets.clone(),
+                );
+                m.insert(
+                    format!("Device.IP.Interface.{iface_idx}.Stats.PacketsReceived"),
                     rx_packets.clone(),
                 );
             }
@@ -226,10 +234,18 @@ pub async fn get(_cfg: &ClientConfig, path: &str) -> HashMap<String, String> {
                     format!("Device.IP.Interface.{iface_idx}.X_OptimACS_TXBytes"),
                     tx_bytes.clone(),
                 );
+                m.insert(
+                    format!("Device.IP.Interface.{iface_idx}.Stats.BytesSent"),
+                    tx_bytes.clone(),
+                );
             }
             if let Some(tx_packets) = stats.get("tx_packets") {
                 m.insert(
                     format!("Device.IP.Interface.{iface_idx}.X_OptimACS_TXPackets"),
+                    tx_packets.clone(),
+                );
+                m.insert(
+                    format!("Device.IP.Interface.{iface_idx}.Stats.PacketsSent"),
                     tx_packets.clone(),
                 );
             }
@@ -372,10 +388,18 @@ pub async fn get(_cfg: &ClientConfig, path: &str) -> HashMap<String, String> {
                         format!("Device.IP.Interface.{idx}.X_OptimACS_RXBytes"),
                         rx_bytes.clone(),
                     );
+                    m.insert(
+                        format!("Device.IP.Interface.{idx}.Stats.BytesReceived"),
+                        rx_bytes.clone(),
+                    );
                 }
                 if let Some(rx_packets) = stats.get("rx_packets") {
                     m.insert(
                         format!("Device.IP.Interface.{idx}.X_OptimACS_RXPackets"),
+                        rx_packets.clone(),
+                    );
+                    m.insert(
+                        format!("Device.IP.Interface.{idx}.Stats.PacketsReceived"),
                         rx_packets.clone(),
                     );
                 }
@@ -384,10 +408,18 @@ pub async fn get(_cfg: &ClientConfig, path: &str) -> HashMap<String, String> {
                         format!("Device.IP.Interface.{idx}.X_OptimACS_TXBytes"),
                         tx_bytes.clone(),
                     );
+                    m.insert(
+                        format!("Device.IP.Interface.{idx}.Stats.BytesSent"),
+                        tx_bytes.clone(),
+                    );
                 }
                 if let Some(tx_packets) = stats.get("tx_packets") {
                     m.insert(
                         format!("Device.IP.Interface.{idx}.X_OptimACS_TXPackets"),
+                        tx_packets.clone(),
+                    );
+                    m.insert(
+                        format!("Device.IP.Interface.{idx}.Stats.PacketsSent"),
                         tx_packets.clone(),
                     );
                 }
@@ -717,11 +749,10 @@ async fn get_interface_status(iface: &str) -> String {
                 // up. Treat "unknown" with carrier=1 as Up — the interface is
                 // administratively up and passing traffic.
                 "unknown" => {
-                    let carrier = tokio::fs::read_to_string(format!(
-                        "/sys/class/net/{candidate}/carrier"
-                    ))
-                    .await
-                    .unwrap_or_default();
+                    let carrier =
+                        tokio::fs::read_to_string(format!("/sys/class/net/{candidate}/carrier"))
+                            .await
+                            .unwrap_or_default();
                     if carrier.trim() == "1" {
                         "Up"
                     } else {
@@ -761,5 +792,50 @@ fn format_duration(seconds: u64) -> String {
         format!("{}m {}s", mins, secs)
     } else {
         format!("{}s", secs)
+    }
+}
+
+#[cfg(test)]
+mod interface_stats_tests {
+    use std::fs;
+
+    /// Interface counters must be reported under the standard TR-181 names as
+    /// well as the vendor ones.
+    ///
+    /// The agent has always emitted `X_OptimACS_RXBytes`/`TXBytes`, which works
+    /// for this controller and for nothing else: a TR-369 controller looking
+    /// for `Device.IP.Interface.{i}.Stats.BytesReceived` -- the name the data
+    /// model actually defines -- finds nothing, and concludes the device
+    /// reports no traffic. It cost this platform a dashboard that drew an empty
+    /// traffic chart while every AP was forwarding hundreds of megabytes.
+    ///
+    /// The vendor names stay: they are what is deployed today, and removing
+    /// them would break the controller that reads them.
+    #[test]
+    fn standard_and_vendor_counter_names_are_both_emitted() {
+        let src = fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/usp/dm/ip.rs"))
+            .expect("ip.rs must be readable");
+        let src: String = src
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        for (vendor, standard) in [
+            ("X_OptimACS_RXBytes", "Stats.BytesReceived"),
+            ("X_OptimACS_TXBytes", "Stats.BytesSent"),
+            ("X_OptimACS_RXPackets", "Stats.PacketsReceived"),
+            ("X_OptimACS_TXPackets", "Stats.PacketsSent"),
+        ] {
+            assert!(
+                src.contains(vendor),
+                "{vendor} is deployed and read today; removing it breaks the controller"
+            );
+            assert!(
+                src.contains(standard),
+                "{standard} is the TR-181 name; without it no other controller can \
+                 read this device's traffic"
+            );
+        }
     }
 }
