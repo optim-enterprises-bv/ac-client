@@ -76,21 +76,28 @@ fn set_state_value(v: &str) {
     }
 }
 
-/// Wireless interfaces grouped by the radio that carries them.
+/// Wireless interfaces grouped by the radio that actually carries them.
 ///
-/// A scan takes the **radio** off channel, not one interface, and a single phy
-/// commonly carries several. Measured on the two platforms in the lab:
+/// A scan takes a **radio** off channel. Neither the interface nor the wiphy is
+/// that radio:
 ///
 /// ```text
-///   D50 (ath11k)     phy#1 -> phy1-mesh0, phy1-ap0
-///   BPI-R4 (mt7996)  phy#0 -> phy0.0-ap0, phy0.1-ap0, phy0.1-mesh0, phy0.2-ap0
+///   D50 (ath11k, 6.12)      phy#1 -> phy1-mesh0, phy1-ap0        one radio
+///                           phy#0 -> phy0-ap0                    one radio
+///   BPI-R4 (mt7996, 6.18)   phy#0 -> phy0.0-ap0    Radios: 0     2.4 GHz
+///                                    phy0.1-ap0    Radios: 1     5 GHz
+///                                    phy0.1-mesh0  Radios: 1     5 GHz
+///                                    phy0.2-ap0    Radios: 2     6 GHz
 /// ```
 ///
-/// Both put a mesh interface on the same radio as an AP interface, and the BPI
-/// puts every interface it has on one radio. Deciding per interface would scan
-/// an idle AP and take the busy mesh down with it -- which is exactly what the
-/// first version of this did. The D50's mesh happened to survive it; that was
-/// the driver being tolerant, not the guard being right.
+/// Deciding per *interface* scans an idle AP and takes the mesh sharing its
+/// radio down with it. Deciding per *wiphy* is right on the D50 and wrong on the
+/// BPI, which presents three independent radios as one wiphy under MLO -- it
+/// would refuse to scan 2.4 and 6 GHz because the 5 GHz mesh is busy.
+///
+/// The kernel states the answer: `iw dev <if> info` reports `Radios: N` where
+/// multi-radio wiphys are supported. Where it does not (6.12 on the D50), a
+/// wiphy is a radio and grouping by wiphy is correct.
 fn radios() -> Vec<(String, Vec<String>)> {
     let Some(out) = std::process::Command::new("iw")
         .arg("dev")
@@ -100,7 +107,42 @@ fn radios() -> Vec<(String, Vec<String>)> {
     else {
         return Vec::new();
     };
-    parse_iw_dev(&out)
+    let by_wiphy = parse_iw_dev(&out);
+
+    // Subdivide each wiphy by the kernel's radio index where it reports one.
+    let mut out_groups: Vec<(String, Vec<String>)> = Vec::new();
+    for (phy, ifaces) in by_wiphy {
+        let mut grouped: std::collections::BTreeMap<String, Vec<String>> = Default::default();
+        for i in ifaces {
+            let key = match radio_index(&i) {
+                Some(n) => format!("{phy}/radio{n}"),
+                // No index reported: this kernel has one radio per wiphy.
+                None => phy.clone(),
+            };
+            grouped.entry(key).or_default().push(i);
+        }
+        out_groups.extend(grouped);
+    }
+    out_groups
+}
+
+/// The kernel's radio index for an interface, where the kernel reports one.
+fn radio_index(ifname: &str) -> Option<u32> {
+    let out = std::process::Command::new("iw")
+        .args(["dev", ifname, "info"])
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())?;
+    parse_radio_index(&out)
+}
+
+/// `Radios: 1` in `iw dev <if> info`. Absent on kernels without multi-radio
+/// wiphy support, which is not an error -- it means one radio per wiphy.
+pub fn parse_radio_index(info: &str) -> Option<u32> {
+    info.lines()
+        .map(str::trim)
+        .find_map(|l| l.strip_prefix("Radios:"))
+        .and_then(|v| v.trim().parse().ok())
 }
 
 /// `iw dev` lists each `phy#N` followed by the interfaces on it.
@@ -354,6 +396,49 @@ phy#1
 phy#0
 \tInterface phy0-ap0
 ";
+
+    /// Real `iw dev <if> info` from the BPI-R4 (kernel 6.18): the kernel names
+    /// the radio, so three bands on one wiphy are three groups.
+    #[test]
+    fn the_kernel_radio_index_is_read_when_present() {
+        let info =
+            "Interface phy0.1-mesh0\n\tifindex 25\n\ttype mesh point\n\twiphy 0\n\tRadios: 1\n";
+        assert_eq!(parse_radio_index(info), Some(1));
+    }
+
+    /// And from a D50 (kernel 6.12), which has no such field. That is not a
+    /// failure: one wiphy is one radio there, and grouping by wiphy is correct.
+    #[test]
+    fn an_older_kernel_reports_no_radio_index() {
+        let info = "Interface phy1-mesh0\n\tifindex 12\n\ttype mesh point\n\twiphy 1\n";
+        assert_eq!(parse_radio_index(info), None);
+    }
+
+    /// The BPI regression in one assertion: 2.4 and 6 GHz are independent radios
+    /// and must stay scannable while the 5 GHz mesh is busy. Grouping by wiphy
+    /// made the whole device unscannable; grouping by interface would have taken
+    /// the mesh off channel.
+    #[test]
+    fn independent_bands_on_one_wiphy_are_separate_radios() {
+        let by_iface = [
+            ("phy0.0-ap0", Some(0u32)),
+            ("phy0.1-ap0", Some(1)),
+            ("phy0.1-mesh0", Some(1)),
+            ("phy0.2-ap0", Some(2)),
+        ];
+        let mut groups: std::collections::BTreeSet<String> = Default::default();
+        for (_, idx) in by_iface {
+            groups.insert(match idx {
+                Some(n) => format!("phy0/radio{n}"),
+                None => "phy0".to_string(),
+            });
+        }
+        assert_eq!(
+            groups.len(),
+            3,
+            "three bands, three radios -- not one because they share a wiphy"
+        );
+    }
 
     #[test]
     fn interfaces_are_grouped_by_the_radio_that_carries_them() {
