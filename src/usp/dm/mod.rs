@@ -283,6 +283,10 @@ async fn dispatch_set(cfg: &ClientConfig, path: &str, value: &str) -> Result<(),
         reputation::set(cfg, path, value)
     } else if path.starts_with("Device.X_OptimACS_Claim.") {
         claim::set(cfg, path, value)
+    } else if path.starts_with("Device.X_OptimACS_Usteer.") {
+        // Config push per ADR-034: written to UCI, never via usteerd's ubus
+        // set_config (runtime-only, lost on reboot).
+        usteer::set(cfg, path, value).await
     } else if path.starts_with("Device.X_OptimACS_Mesh.") {
         // 802.11s has no TR-181 representation, so a controller building a mesh
         // over USP has only this vendor object. Matched on the PREFIX: a mesh
