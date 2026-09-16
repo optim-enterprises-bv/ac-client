@@ -76,8 +76,22 @@ fn set_state_value(v: &str) {
     }
 }
 
-/// Wireless interfaces, from `iw dev`.
-fn wifi_interfaces() -> Vec<String> {
+/// Wireless interfaces grouped by the radio that carries them.
+///
+/// A scan takes the **radio** off channel, not one interface, and a single phy
+/// commonly carries several. Measured on the two platforms in the lab:
+///
+/// ```text
+///   D50 (ath11k)     phy#1 -> phy1-mesh0, phy1-ap0
+///   BPI-R4 (mt7996)  phy#0 -> phy0.0-ap0, phy0.1-ap0, phy0.1-mesh0, phy0.2-ap0
+/// ```
+///
+/// Both put a mesh interface on the same radio as an AP interface, and the BPI
+/// puts every interface it has on one radio. Deciding per interface would scan
+/// an idle AP and take the busy mesh down with it -- which is exactly what the
+/// first version of this did. The D50's mesh happened to survive it; that was
+/// the driver being tolerant, not the guard being right.
+fn radios() -> Vec<(String, Vec<String>)> {
     let Some(out) = std::process::Command::new("iw")
         .arg("dev")
         .output()
@@ -86,12 +100,28 @@ fn wifi_interfaces() -> Vec<String> {
     else {
         return Vec::new();
     };
-    out.lines()
-        .filter_map(|l| {
-            let t = l.trim();
-            t.strip_prefix("Interface ").map(str::to_owned)
-        })
-        .collect()
+    parse_iw_dev(&out)
+}
+
+/// `iw dev` lists each `phy#N` followed by the interfaces on it.
+pub fn parse_iw_dev(out: &str) -> Vec<(String, Vec<String>)> {
+    let mut radios: Vec<(String, Vec<String>)> = Vec::new();
+    for line in out.lines() {
+        let t = line.trim();
+        if let Some(phy) = t.strip_prefix("phy#") {
+            radios.push((format!("phy{phy}"), Vec::new()));
+        } else if let Some(ifname) = t.strip_prefix("Interface ") {
+            if let Some(last) = radios.last_mut() {
+                last.1.push(ifname.to_owned());
+            }
+        }
+    }
+    radios
+}
+
+/// Every interface, for the cached-table read, which disturbs nothing.
+fn wifi_interfaces() -> Vec<String> {
+    radios().into_iter().flat_map(|(_, ifs)| ifs).collect()
 }
 
 /// Is any client associated to this interface?
@@ -185,14 +215,22 @@ fn cached_neighbors() -> Vec<Neighbor> {
 /// should not drop its clients without having asked for that.
 fn active_scan() -> (usize, usize) {
     let (mut scanned, mut skipped) = (0, 0);
-    for ifname in wifi_interfaces() {
-        if has_stations(&ifname) {
-            info!("neighbors: {ifname}: skipping active scan, stations associated");
-            skipped += 1;
+    for (phy, ifaces) in radios() {
+        // One busy interface makes the whole radio off limits. On a device whose
+        // mesh and AP share a phy -- both platforms here -- scanning the idle one
+        // takes the other off channel too.
+        if let Some(busy) = ifaces.iter().find(|i| has_stations(i)) {
+            info!("neighbors: {phy}: skipping active scan, {busy} has stations associated");
+            skipped += ifaces.len();
             continue;
         }
+        // One scan per radio, not per interface: the second would repeat the
+        // disruption for the same result.
+        let Some(ifname) = ifaces.first() else {
+            continue;
+        };
         match std::process::Command::new("iw")
-            .args(["dev", &ifname, "scan"])
+            .args(["dev", ifname, "scan"])
             .output()
         {
             Ok(_) => scanned += 1,
@@ -297,6 +335,58 @@ BSS 00:5c:c2:8e:9b:15(on phy0-ap0)
 \tsignal: -75.00 dBm
 \tSSID: \n\tDS Parameter set: channel 11
 ";
+
+    /// Real `iw dev` output from the BPI-R4: one radio, four interfaces, one of
+    /// them the mesh.
+    const IW_DEV_BPI: &str = "\
+phy#0
+\tInterface phy0.2-ap0
+\tInterface phy0.1-mesh0
+\tInterface phy0.1-ap0
+\tInterface phy0.0-ap0
+";
+
+    /// And from a D50: two radios, with mesh and AP sharing the second.
+    const IW_DEV_D50: &str = "\
+phy#1
+\tInterface phy1-mesh0
+\tInterface phy1-ap0
+phy#0
+\tInterface phy0-ap0
+";
+
+    #[test]
+    fn interfaces_are_grouped_by_the_radio_that_carries_them() {
+        let r = parse_iw_dev(IW_DEV_BPI);
+        assert_eq!(r.len(), 1, "the BPI has one radio carrying everything");
+        assert_eq!(r[0].1.len(), 4);
+
+        let r = parse_iw_dev(IW_DEV_D50);
+        assert_eq!(r.len(), 2);
+        assert!(
+            r[0].1.contains(&"phy1-mesh0".to_string()) && r[0].1.contains(&"phy1-ap0".to_string()),
+            "mesh and AP share phy1 on the D50, which is the whole point"
+        );
+    }
+
+    /// The defect this replaced: deciding per interface would scan an idle AP
+    /// that shares a radio with a busy mesh, taking the mesh off channel. On the
+    /// BPI every interface shares one radio, so a per-interface guard would scan
+    /// three of four while the fourth carried four batman peers.
+    #[test]
+    fn a_busy_interface_protects_every_interface_on_its_radio() {
+        let r = parse_iw_dev(IW_DEV_BPI);
+        let (_, ifaces) = &r[0];
+        assert!(
+            ifaces.iter().any(|i| i.contains("mesh")),
+            "the mesh is on this radio, so nothing on it may be scanned"
+        );
+        assert_eq!(
+            ifaces.len(),
+            4,
+            "and skipping it must account for all four, not one"
+        );
+    }
 
     #[test]
     fn a_bssid_is_not_the_interface_suffix() {
