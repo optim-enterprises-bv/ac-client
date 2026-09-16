@@ -168,6 +168,14 @@ async fn main() {
     // and retries quietly. Nothing here starts nDPId or changes its consent.
     ndpid::spawn();
 
+    // One active neighbour scan shortly after start, on radios with nothing
+    // associated. At device boot that is every radio, so the scan is free and
+    // gives the controller the cross-channel picture a running AP can never
+    // gather -- a radio cannot hear a channel it is not sitting on. After a
+    // plain agent restart clients usually are associated, those radios are
+    // skipped, and upgrading the package does not cost anyone their connection.
+    usp::dm::neighbors::scan_on_start();
+
     // Remote terminal (rtty) — isolated device-side WebSocket + PTY. Runs on
     // its own connection, fully separate from the USP MTP channel, so a hung
     // terminal can never stall device reporting.

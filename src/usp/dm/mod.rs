@@ -21,6 +21,7 @@ pub mod ip;
 pub mod mesh;
 pub mod misc;
 pub mod ndpid_flows;
+pub mod neighbors;
 pub mod qos;
 pub mod reputation;
 pub mod security;
@@ -177,6 +178,11 @@ pub async fn operate(
 async fn dispatch_get(cfg: &ClientConfig, path: &str) -> Params {
     if path.starts_with("Device.DeviceInfo.") {
         device_info::get(cfg, path)
+    } else if path.starts_with("Device.WiFi.NeighboringWiFiDiagnostic") {
+        // Ahead of the Device.WiFi. arm and narrower than it: the neighbouring-AP
+        // diagnostic is its own object with its own writable state, the same
+        // shape as Device.IP.Diagnostics sitting ahead of Device.IP.Interface.
+        neighbors::get(cfg, path)
     } else if path.starts_with("Device.WiFi.") {
         wifi::get(cfg, path).await
     } else if path.starts_with("Device.IP.Interface.") {
@@ -257,6 +263,8 @@ async fn dispatch_get(cfg: &ClientConfig, path: &str) -> Params {
 async fn dispatch_set(cfg: &ClientConfig, path: &str, value: &str) -> Result<(), String> {
     if path.starts_with("Device.DeviceInfo.") {
         device_info::set(cfg, path, value)
+    } else if path.starts_with("Device.WiFi.NeighboringWiFiDiagnostic") {
+        neighbors::set(cfg, path, value)
     } else if path.starts_with("Device.WiFi.") {
         wifi::set(cfg, path, value).await
     } else if path.starts_with("Device.IP.Diagnostics") {
