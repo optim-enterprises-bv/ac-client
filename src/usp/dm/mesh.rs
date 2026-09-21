@@ -278,7 +278,7 @@ fn mesh_json() -> Option<serde_json::Value> {
 /// `iw dev` prints one block per interface, each with a `type mesh point`
 /// line. Prefer the interface the controller created (`aethermesh`'s device),
 /// falling back to any mesh point.
-fn discover_mesh_iface() -> Option<String> {
+pub(crate) fn discover_mesh_iface() -> Option<String> {
     let out = std::process::Command::new("iw").arg("dev").output().ok()?;
     if !out.status.success() {
         return None;

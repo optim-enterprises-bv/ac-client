@@ -20,6 +20,38 @@ const PORT: u16 = 3490;
 const STATUS_INTERVAL: u64 = 60;
 const UPDATE_INTERVAL: u64 = 60;
 
+/// How often the motion sampler reads each link's signal, in milliseconds.
+///
+/// 500 ms because the thing being measured is a body crossing a path, which
+/// takes on the order of a second: sampling much slower misses the crossing
+/// entirely, and much faster costs a fork of `iw` per interface for readings
+/// the driver has not refreshed.
+const MOTION_PERIOD_MS: u64 = 500;
+
+/// Bounds on `motion_period_ms`.
+///
+/// Below 200 ms the sampler forks `iw` faster than a 400 MHz router can retire
+/// the processes, and the agent starves everything else it does. Above 5 s the
+/// short window spans nearly a minute and no crossing survives it, so the
+/// feature would appear configured and silently never fire -- the worst
+/// failure of the two.
+const MOTION_PERIOD_MIN_MS: u64 = 200;
+const MOTION_PERIOD_MAX_MS: u64 = 5000;
+
+/// Read a `motion_period_ms` setting, clamped to what the sampler can honour.
+///
+/// Clamped rather than rejected: a bad period is not worth refusing to boot an
+/// agent over, and silently ignoring it would leave the operator reading a
+/// value from their own config that the device is not using.
+fn motion_period(raw: &str) -> u64 {
+    let v = raw.parse().unwrap_or(MOTION_PERIOD_MS);
+    let clamped = v.clamp(MOTION_PERIOD_MIN_MS, MOTION_PERIOD_MAX_MS);
+    if clamped != v {
+        info!("Config: motion_period_ms {v} out of range, using {clamped}");
+    }
+    clamped
+}
+
 /// MTP selection for the USP Agent.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MtpType {
@@ -88,6 +120,16 @@ pub struct ClientConfig {
     pub mqtt_url: Option<String>,
     /// Which MTP(s) to use.
     pub mtp: MtpType,
+    // ── Motion sensing ────────────────────────────────────────────────────────
+    /// Compute presence from RSSI variance and report state changes.
+    ///
+    /// Off unless an operator says otherwise. Who is moving about a house, and
+    /// when, is personal data whoever derives it, and a device that ships with
+    /// it switched on has collected that data before anyone was asked. With
+    /// this false the sampler is never started, so nothing is computed at all.
+    pub motion_enabled: bool,
+    /// How often each link is sampled, in milliseconds. See `motion_period`.
+    pub motion_period_ms: u64,
 }
 
 impl Default for ClientConfig {
@@ -119,6 +161,8 @@ impl Default for ClientConfig {
             ws_url: None,
             mqtt_url: None,
             mtp: MtpType::WebSocket,
+            motion_enabled: false,
+            motion_period_ms: MOTION_PERIOD_MS,
         }
     }
 }
@@ -276,6 +320,15 @@ pub fn load_config(path: &Path) -> Result<ClientConfig> {
                     }
                 };
             }
+            // Motion sensing
+            "motion_enabled" => {
+                cfg.motion_enabled = val == "true" || val == "1" || val == "yes";
+                debug!("Config: motion_enabled = {}", cfg.motion_enabled);
+            }
+            "motion_period_ms" => {
+                cfg.motion_period_ms = motion_period(&val);
+                debug!("Config: motion_period_ms = {}", cfg.motion_period_ms);
+            }
             _ => {
                 trace!("Config: ignoring unknown key '{}'", key);
             }
@@ -410,6 +463,12 @@ pub fn load_config_uci() -> Result<ClientConfig> {
     }
     if let Some(v) = uci_get_str("mqtt_url") {
         cfg.mqtt_url = Some(v);
+    }
+    if let Some(v) = uci_get_str("motion_enabled") {
+        cfg.motion_enabled = v == "1" || v == "true" || v == "yes";
+    }
+    if let Some(v) = uci_get_str("motion_period_ms") {
+        cfg.motion_period_ms = motion_period(&v);
     }
     if let Some(v) = uci_get_str("mtp") {
         cfg.mtp = match v.to_ascii_lowercase().as_str() {

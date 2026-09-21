@@ -66,6 +66,27 @@ pub async fn run(cfg: Arc<ClientConfig>, gnss: Arc<std::sync::Mutex<Option<GnssP
         });
     }
 
+    // Passive motion sensing, if the operator consented to it.
+    //
+    // Spawned here rather than from `main` -- where the other background tasks
+    // start -- because the only way to send a Notify is this `StatusSender`,
+    // and it does not exist until the channel above is built. Returns
+    // immediately, having logged why, when `motion_enabled` is false, which is
+    // the shipped default.
+    //
+    // THE BINDING IS LOAD-BEARING. This function is called again by `main`
+    // after every connection failure, and returns immediately on some
+    // configurations, so the sampler needs an owner whose life is exactly one
+    // run. Holding the handle here is what gives it one: dropping it at the
+    // end of `run` retires the sampler within a sampling period, in time for
+    // the next run to start a fresh one. `let _ = ...` would drop it at once
+    // and the sampler would never take a sample.
+    let _motion_stop = {
+        let cfg2 = Arc::clone(&cfg);
+        let agent2 = agent_id.clone();
+        dm::motion::spawn(cfg2, status_tx.clone(), agent2)
+    };
+
     // Connect MTP
     info!("Starting MTP connection...");
     match cfg.mtp {

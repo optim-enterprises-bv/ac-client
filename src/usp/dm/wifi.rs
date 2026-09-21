@@ -1142,7 +1142,7 @@ fn get_station_dump(iface: &str) -> Vec<HashMap<String, String>> {
 /// the field names here are exactly what the platform's experience scoring
 /// consumes, and a silently-dropped key looks identical to a client that has
 /// no problems.
-fn parse_station_dump(output: &str) -> Vec<HashMap<String, String>> {
+pub(crate) fn parse_station_dump(output: &str) -> Vec<HashMap<String, String>> {
     let mut stations = Vec::new();
     let mut current: Option<HashMap<String, String>> = None;
 
@@ -1225,6 +1225,14 @@ fn parse_station_dump(output: &str) -> Vec<HashMap<String, String>> {
                     }
                     "beacon loss" => {
                         sta.insert("beacon_loss".to_string(), val.to_string());
+                    }
+                    // 802.11s peering state. Only mesh interfaces print it,
+                    // and only an ESTAB peer is a usable link -- a peer stuck
+                    // in OPN_SNT reports a plausible signal over a path that
+                    // carries nothing. Kept as raw text: the gate belongs to
+                    // the caller that knows which kind of interface this is.
+                    "mesh plink" => {
+                        sta.insert("mesh_plink".to_string(), val.to_string());
                     }
                     "signal avg" => {
                         // "signal avg: -47 [-47, -53] dBm" → first number
