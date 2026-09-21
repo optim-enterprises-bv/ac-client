@@ -80,6 +80,16 @@ pub enum State {
     Idle,
     /// The link's short-term variance is well above its own ambient.
     Motion,
+    /// The link is too strong to sense and is left alone.
+    ///
+    /// Found on the lab mesh the day this shipped: two nodes a metre apart
+    /// peer at -8 dBm, and at that level the receiver's gain stage toggles
+    /// between two readings 7 dB apart with nobody in the room. The other end
+    /// of the same path, at -12 dBm, was quiet the whole time -- so it is the
+    /// receiver, not the air. Reported as its own state rather than folded
+    /// into `Idle`, because "we are not looking" and "nobody is there" must
+    /// never read the same on the controller.
+    Saturated,
 }
 
 impl State {
@@ -89,6 +99,7 @@ impl State {
             State::Learning => "Learning",
             State::Idle => "Idle",
             State::Motion => "Motion",
+            State::Saturated => "Saturated",
         }
     }
 }
@@ -124,6 +135,11 @@ pub struct LinkDetector {
     // ── Baseline ─────────────────────────────────────────────────────────────
     /// How long to watch a link before believing its ambient statistics.
     pub baseline_secs: f64,
+    /// A learnt baseline stronger than this, in dBm, puts the link in
+    /// [`State::Saturated`] instead of [`State::Idle`]. -20 dBm is well above
+    /// anything a link across a room produces (the lab's longer links sit at
+    /// -28 to -68) and well below the -8 that misbehaved.
+    pub saturation_dbm: f64,
     /// EWMA rate at which the frozen baseline follows a drifting link.
     pub baseline_alpha: f64,
     // ── Detection ────────────────────────────────────────────────────────────
@@ -182,6 +198,7 @@ impl Default for LinkDetector {
             hampel_sigmas: 3.0,
             mad_floor: 0.5,
             baseline_secs: 60.0,
+            saturation_dbm: -20.0,
             baseline_alpha: 0.01,
             short_window: 10,
             var_floor: 0.25,
@@ -228,6 +245,9 @@ impl LinkDetector {
 
         if self.state == State::Learning {
             self.learn(value, now_secs);
+            return None;
+        }
+        if self.state == State::Saturated {
             return None;
         }
         if self.short.len() < self.short_window() {
@@ -336,6 +356,14 @@ impl LinkDetector {
         let n = self.ambient_n as f64;
         self.baseline_mean = self.ambient_sum / n;
         self.baseline_var = (self.ambient_sumsq / n - self.baseline_mean * self.baseline_mean).max(0.0);
+        if self.baseline_mean > self.saturation_dbm {
+            self.state = State::Saturated;
+            info!(
+                "motion: link at {:.1} dBm is saturated (> {:.0} dBm); not sensing it",
+                self.baseline_mean, self.saturation_dbm
+            );
+            return;
+        }
         self.state = State::Idle;
         debug!(
             "motion: baseline ready after {:.0}s — {:.1} dBm, var {:.2} dB²",
@@ -355,7 +383,7 @@ impl LinkDetector {
         self.score = short_var / self.baseline_var.max(self.var_floor).max(f64::EPSILON);
 
         match self.state {
-            State::Learning => None,
+            State::Learning | State::Saturated => None,
             State::Idle => {
                 if self.score > self.on_ratio && short_var >= self.min_short_var {
                     self.above += 1;
@@ -1872,5 +1900,48 @@ Station ae:5e:ca:cf:3f:1a (on phy1-mesh0)
             table[0].detector.short_len() < full,
             "the nominal gap did not resync"
         );
+    }
+
+    #[test]
+    fn a_saturated_link_is_named_and_never_fires() {
+        // The -8 dBm link from the lab: flat, with the receiver's 7 dB gain
+        // flicker clustered now and then. On a sensible link that cluster is
+        // exactly what motion looks like, which is why it fired ten times in
+        // eight minutes with nobody there.
+        let mut d = LinkDetector::default();
+        let mut t = 0.0;
+        for _ in 0..200 {
+            d.push(-8, t);
+            t += DT;
+        }
+        assert_eq!(d.state(), State::Saturated);
+        assert_eq!(d.baseline_dbm(), Some(-8.0));
+
+        let mut fired = Vec::new();
+        for i in 0..60 {
+            let v = if (10..14).contains(&i) || (30..33).contains(&i) { -15 } else { -8 };
+            fired.extend(d.push(v, t));
+            t += DT;
+        }
+        assert!(fired.is_empty(), "a saturated link fired: {fired:?}");
+        assert_eq!(d.state(), State::Saturated);
+        assert_eq!(d.state().as_str(), "Saturated");
+
+        // And the same shape on a link across a room is still motion: the
+        // gate is about level, not about the pattern.
+        let mut far = LinkDetector::default();
+        let mut t = 0.0;
+        for _ in 0..200 {
+            far.push(-45, t);
+            t += DT;
+        }
+        assert_eq!(far.state(), State::Idle);
+        let mut fired = Vec::new();
+        for i in 0..60 {
+            let v = if (10..14).contains(&i) || (30..33).contains(&i) { -52 } else { -45 };
+            fired.extend(far.push(v, t));
+            t += DT;
+        }
+        assert!(fired.contains(&Transition::ToMotion));
     }
 }
