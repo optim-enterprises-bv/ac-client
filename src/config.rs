@@ -52,6 +52,66 @@ fn motion_period(raw: &str) -> u64 {
     clamped
 }
 
+/// How often the CFR driver is asked for one channel-sounding record per peer,
+/// in milliseconds.
+///
+/// 100 ms gives ten looks a second at the channel, which is the rate at which
+/// a body crossing a path actually changes it. It is also what the relay can
+/// carry: each record is ~4.2 KB, so one peer at 100 ms is 42 KB/s and the
+/// 255 x 16.7 KB per-radio buffer drains comfortably.
+const CSI_PERIOD_MS: u64 = 100;
+
+/// Bounds on `csi_period_ms`.
+///
+/// The driver takes the period in units of 10 ms and treats 0 as "one shot",
+/// so anything under 20 ms is either rejected or turns a periodic capture into
+/// a single record -- a feature that appears configured and produces one
+/// sample. Above 1 s the 2 s feature window holds two records and its variance
+/// is meaningless, which fails the same silent way.
+const CSI_PERIOD_MIN_MS: u64 = 20;
+const CSI_PERIOD_MAX_MS: u64 = 1000;
+
+/// How many seconds of records one motion-energy figure is computed over.
+const CSI_WINDOW_SECS: u64 = 2;
+const CSI_WINDOW_MIN_SECS: u64 = 1;
+const CSI_WINDOW_MAX_SECS: u64 = 10;
+
+/// Read a `csi_period_ms` setting, clamped AND rounded to what the driver can
+/// honour.
+///
+/// The rounding is not cosmetic. `cfr_capture` takes the period in units of
+/// 10 ms, so the driver truncates anything else: an operator asking for 105 ms
+/// gets 100 ms on the radio while every window-size calculation in the agent
+/// still believes 105. The two then disagree about how many records a window
+/// holds, which shows up as a window that is never quite full. Rounding here
+/// means the agent and the driver are working from the same number.
+fn csi_period(raw: &str) -> u64 {
+    let v: u64 = raw.parse().unwrap_or(CSI_PERIOD_MS);
+    let clamped = v.clamp(CSI_PERIOD_MIN_MS, CSI_PERIOD_MAX_MS);
+    // Rounded to the nearest 10 ms, then re-clamped: rounding 1000 up is not
+    // possible here, but rounding is the kind of arithmetic that acquires an
+    // off-by-one later, and the clamp costs nothing.
+    let rounded = ((clamped + 5) / 10 * 10).clamp(CSI_PERIOD_MIN_MS, CSI_PERIOD_MAX_MS);
+    if rounded != v {
+        info!("Config: csi_period_ms {v} not usable, using {rounded}");
+    }
+    rounded
+}
+
+/// Read a `csi_window_secs` setting, clamped to a window that means something.
+///
+/// Below a second the window holds a handful of records and its variance is
+/// dominated by the receiver rather than the room. Above ten a person has
+/// crossed and left before the window notices.
+fn csi_window(raw: &str) -> u64 {
+    let v: u64 = raw.parse().unwrap_or(CSI_WINDOW_SECS);
+    let clamped = v.clamp(CSI_WINDOW_MIN_SECS, CSI_WINDOW_MAX_SECS);
+    if clamped != v {
+        info!("Config: csi_window_secs {v} out of range, using {clamped}");
+    }
+    clamped
+}
+
 /// MTP selection for the USP Agent.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MtpType {
@@ -130,6 +190,21 @@ pub struct ClientConfig {
     pub motion_enabled: bool,
     /// How often each link is sampled, in milliseconds. See `motion_period`.
     pub motion_period_ms: u64,
+    // ── CSI sensing ───────────────────────────────────────────────────────────
+    /// Sense motion from the 5 GHz radio's channel-frequency-response captures.
+    ///
+    /// Off unless an operator says otherwise, and for a stronger version of the
+    /// reason `motion_enabled` is: CSI does not merely say that somebody moved,
+    /// it measures the shape of the multipath they moved through. It is the
+    /// same personal data with more of it, and it additionally puts the radio
+    /// into a mode that sounds the channel with extra frames. With this false
+    /// the reader is never started and `enable_cfr` is never written, so the
+    /// driver never allocates the relay buffer either.
+    pub csi_enabled: bool,
+    /// How often each peer is sounded, in milliseconds. See `csi_period`.
+    pub csi_period_ms: u64,
+    /// Seconds of records behind one motion-energy figure. See `csi_window`.
+    pub csi_window_secs: u64,
 }
 
 impl Default for ClientConfig {
@@ -163,6 +238,9 @@ impl Default for ClientConfig {
             mtp: MtpType::WebSocket,
             motion_enabled: false,
             motion_period_ms: MOTION_PERIOD_MS,
+            csi_enabled: false,
+            csi_period_ms: CSI_PERIOD_MS,
+            csi_window_secs: CSI_WINDOW_SECS,
         }
     }
 }
@@ -329,6 +407,19 @@ pub fn load_config(path: &Path) -> Result<ClientConfig> {
                 cfg.motion_period_ms = motion_period(&val);
                 debug!("Config: motion_period_ms = {}", cfg.motion_period_ms);
             }
+            // CSI sensing
+            "csi_enabled" => {
+                cfg.csi_enabled = val == "true" || val == "1" || val == "yes";
+                debug!("Config: csi_enabled = {}", cfg.csi_enabled);
+            }
+            "csi_period_ms" => {
+                cfg.csi_period_ms = csi_period(&val);
+                debug!("Config: csi_period_ms = {}", cfg.csi_period_ms);
+            }
+            "csi_window_secs" => {
+                cfg.csi_window_secs = csi_window(&val);
+                debug!("Config: csi_window_secs = {}", cfg.csi_window_secs);
+            }
             _ => {
                 trace!("Config: ignoring unknown key '{}'", key);
             }
@@ -469,6 +560,15 @@ pub fn load_config_uci() -> Result<ClientConfig> {
     }
     if let Some(v) = uci_get_str("motion_period_ms") {
         cfg.motion_period_ms = motion_period(&v);
+    }
+    if let Some(v) = uci_get_str("csi_enabled") {
+        cfg.csi_enabled = v == "1" || v == "true" || v == "yes";
+    }
+    if let Some(v) = uci_get_str("csi_period_ms") {
+        cfg.csi_period_ms = csi_period(&v);
+    }
+    if let Some(v) = uci_get_str("csi_window_secs") {
+        cfg.csi_window_secs = csi_window(&v);
     }
     if let Some(v) = uci_get_str("mtp") {
         cfg.mtp = match v.to_ascii_lowercase().as_str() {

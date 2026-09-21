@@ -161,6 +161,79 @@ config optimacs 'agent'
 	# 4% of one core.
 	# option motion_period_ms '500'
 
+	# ── Channel-state (CSI) sensing ────────────────────────────────────────
+	# A second, sharper motion sensor on the same links. Where motion
+	# sensing above watches one number per link -- the RSSI, which is the
+	# whole channel collapsed to a scalar -- this watches the channel
+	# itself: for every sounding the 5 GHz radio reports the complex
+	# response of each receive chain on each of 256 subcarriers, about a
+	# thousand numbers where RSSI has one. A person changes some
+	# subcarriers and leaves others alone, which is visible well before the
+	# sum of them moves a whole dB. Reported as
+	# Device.X_OptimACS_Sensing.Csi.{i}.State.
+	#
+	# REQUIRES THE CFR-CAPABLE DRIVER. This reads
+	#   /sys/kernel/debug/ieee80211/phy1/ath11k/{enable_cfr,cfr_capture0}
+	# which exist only on the r37 image's patched ath11k, and only on a
+	# radio whose hardware can sound the channel -- on the Xunison D50 that
+	# is the QCN9074 on phy1 (5 GHz). On any other build or radio the agent
+	# logs "CFR not available on this radio; csi disabled" once and does
+	# nothing further. It is not an error and needs no configuration.
+	#
+	# COSTS ~5 MB OF RAM AT BOOT, per capable radio, from the moment the
+	# agent writes enable_cfr: the driver then allocates the relay buffer
+	# the records are delivered through (255 sub-buffers of ~16.7 KB). On a
+	# 128 MB board that is real memory, and it is allocated for as long as
+	# this is switched on, whether or not anybody is moving. The agent
+	# writes enable_cfr back to 0 when it stops, so the memory comes back
+	# on a clean shutdown.
+	#
+	# OFF BY DEFAULT, and for a stronger reason than motion sensing is.
+	# Motion says somebody moved. CSI measures the SHAPE of the multipath
+	# they moved through -- more information about the inside of a home,
+	# about people who never agreed to anything and own none of the
+	# equipment -- and obtaining it puts the radio into a mode that sounds
+	# the channel with extra frames addressed to each peer. Consenting to
+	# motion_enabled is NOT consenting to this; it has its own switch so
+	# that saying yes to one is not silently saying yes to both. Switch it
+	# on only where the occupants have been asked about this specifically
+	# and have said yes.
+	#
+	# Nothing else turns it on: with this unset the reader is never
+	# started, enable_cfr is never written, and the driver never allocates
+	# the buffer -- the feature is absent, not merely quiet.
+	# option csi_enabled     '0'
+
+	# How often each peer is sounded, in milliseconds (20-1000, default
+	# 100). Values outside the range are clamped, and values that are not a
+	# multiple of 10 are ROUNDED to one.
+	#
+	# The rounding is not cosmetic: the driver takes this in units of 10 ms
+	# and truncates anything else, so an unrounded 105 would leave the radio
+	# on 100 ms while the agent still sized its windows for 105 -- a window
+	# that is never quite full and a sensor that never fires.
+	#
+	# 100 ms is ten looks a second, which is the rate at which a body
+	# crossing a path actually changes it. It is also what the relay can
+	# carry: each record is ~4.2 KB, so one peer at 100 ms is 42 KB/s. At
+	# most 8 peers are captured at once across all radios, because a busy
+	# AP asking for every associated client would overrun the relay and
+	# lose captures from every peer -- including the mesh links worth
+	# having -- with nothing in the record stream to say so.
+	# option csi_period_ms   '100'
+
+	# Seconds of records behind one motion-energy figure (1-10, default 2).
+	# Clamped. At the default period a 2 s window holds 20 records.
+	#
+	# Below a second the window holds a handful of records and its variance
+	# is dominated by the receiver rather than the room. Above ten a person
+	# has crossed and left before the window notices.
+	#
+	# Measured 2026-09-22 on a QCN9074 mesh link with nobody moving: the
+	# reported MotionEnergyDb sat at -22 dB and held it to within 0.6 dB
+	# across every 2 s window of a 97-record capture.
+	# option csi_window_secs '2'
+
 	# ── Process behaviour ──────────────────────────────────────────────────
 	# Send log messages to syslog (1) or stderr (0).
 	option log_syslog    '1'
