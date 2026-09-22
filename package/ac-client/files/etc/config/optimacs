@@ -220,6 +220,14 @@ config optimacs 'agent'
 	# AP asking for every associated client would overrun the relay and
 	# lose captures from every peer -- including the mesh links worth
 	# having -- with nothing in the record stream to say so.
+	#
+	# THE VITALS STAGE BELOW NEEDS THIS AT 120 OR LESS. It needs at least 5
+	# records a second to reach the top of the heart band, and the radio
+	# delivers 8-9 a second at the default 100 ms rather than 10 -- soundings
+	# are missed whenever a peer is not awake to answer. Above about 180 ms
+	# there is no margin left and breathing and heart go permanently empty;
+	# the agent says so once per link when that happens. Fall detection is
+	# unaffected: it reads the same motion energy the detector does.
 	# option csi_period_ms   '100'
 
 	# Seconds of records behind one motion-energy figure (1-10, default 2).
@@ -233,6 +241,120 @@ config optimacs 'agent'
 	# reported MotionEnergyDb sat at -22 dB and held it to within 0.6 dB
 	# across every 2 s window of a 97-record capture.
 	# option csi_window_secs '2'
+
+	# ── Vital signs and falls (EXPERIMENTAL) ───────────────────────────────
+	# On top of the motion energy above, the agent can look for two much
+	# smaller things in the same captures: a periodicity consistent with a
+	# chest, and the signature of somebody falling and then not getting up.
+	# Reported as Device.X_OptimACS_Sensing.Csi.{i}.{BreathingBpm, HeartBpm,
+	# VitalsConfidence, FallCandidate, LastFallAt}. They need no switch of
+	# their own: they are computed whenever csi_enabled is set, from records
+	# that are already being captured, and they cost the radio nothing extra.
+	#
+	# READ THIS BEFORE USING THE BREATHING AND HEART NUMBERS.
+	#
+	# THEY ARE NOT MEDICAL MEASUREMENTS. They are experimental candidates.
+	# This is not a medical device, nothing here is approved as one, and no
+	# alarm, dosage, call, or clinical decision should be wired to these
+	# values. What the agent actually reports is a periodicity in a radio
+	# channel that falls inside a band a chest also falls inside. It cannot
+	# tell a chest from a fan, a fish-tank pump, a washing machine on a
+	# shared wall, or a curtain in a draught.
+	#
+	# THEY NEED A STILL SUBJECT INSIDE THE LINK'S OWN PATH. The link has to
+	# have been Idle -- no gross motion at all -- for a whole window before
+	# anything is estimated, and the person has to be sitting or lying in
+	# the volume the radio path actually passes through. Somebody breathing
+	# in the next room, or in the same room but off the path, changes
+	# nothing the radio can see.
+	#
+	# A MESH LINK BETWEEN ROOMS MAY NEVER SEE ONE. The links this runs on
+	# are the ones the device already has, and a backhaul between a hallway
+	# and a landing may have no chair, no bed, and nobody still in it from
+	# one year to the next. On such a link the honest output is empty
+	# BreathingBpm and HeartBpm for ever, and that is what it will report.
+	# Empty is the normal answer. It is not a fault and there is nothing to
+	# configure to change it.
+	#
+	# FallCandidate is a shape in the energy -- a fast rise well above the
+	# link's own ambient, a return to that ambient within a few seconds, and
+	# then a long stillness -- not a diagnosis. A dropped chair followed by
+	# somebody leaving the room has the same shape.
+	#
+	# Only FallCandidate sends a ValueChange notification, on both edges.
+	# The breathing and heart values change every couple of seconds and are
+	# picked up by the ordinary poll.
+
+	# Seconds of records behind one vitals estimate, and the stillness
+	# required before one is made at all (20-120, default 30). Clamped.
+	#
+	# Below twenty a 0.1 Hz breath -- six a minute, the slow end of the band
+	# -- has two cycles in the window and cannot be told from a drift. Above
+	# two minutes the subject has to hold still for two minutes, which
+	# nobody does, and the answer is stale by the time it is reported.
+	#
+	# The window has to be CONTINUOUS. A gap of more than five sounding
+	# periods -- 500 ms at the default -- empties it and the agent starts
+	# again, because the transform assumes records are evenly spaced and a
+	# hole puts every sample after it at the wrong time rather than merely
+	# leaving one out. The live links deliver 8-9 of every 10 soundings and
+	# drop them in ones and twos, which five periods absorbs; a link that
+	# loses half a second at a time will report vitals rarely or never,
+	# which is the honest outcome: the alternative is a breathing rate read
+	# off a smeared spectrum. The values also go blank as soon as the link has
+	# been quiet for longer than one window, rather than standing until the
+	# link ages out of the table a minute later.
+	# option csi_vitals_window_secs   '30'
+
+	# Confidence below which nothing is reported (0.1-0.9, default 0.35).
+	# Clamped. Reported as VitalsConfidence whether or not it clears the
+	# floor, so a near miss is visible.
+	#
+	# The confidence is how much MORE of the 0.05-4 Hz power sits in the
+	# band than would sit there if the link were just noise, rescaled so
+	# that 0 is exactly what an empty room gives and 1 is a pure tone. The
+	# raw share could not be used for this: a band's share of a flat
+	# spectrum is only its share of the width, which is 0.10 for the 0.4 Hz
+	# breathing band and 0.31 for the 1.2 Hz heart band -- one threshold
+	# would have meant two different things. With the chance level taken
+	# out it means one thing in both: measured over twelve windows of white
+	# noise, breathing averages 0.036 and the heart 0.025, and no window of
+	# either came within a factor of two of the shipped 0.35, while a clean
+	# tone in either band scores 0.99.
+	#
+	# One thing the floor cannot fix: within ONE series the two bands still
+	# compete for the same total, so a breath four times the amplitude of a
+	# pulse takes sixteen times the power and leaves the pulse below any
+	# useful floor. That is why the agent transforms the magnitude and the
+	# phase separately and lets each band take whichever carries it better
+	# -- in practice the breath shows in the magnitude and the pulse in the
+	# phase. A link whose phase is too noisy will report breathing and
+	# nothing else however still the subject is.
+	# option csi_vitals_min_confidence '0.35'
+
+	# dB above a link's learnt ambient that opens a fall candidate (6-30,
+	# default 12). Clamped.
+	#
+	# A body hitting the floor inside the path is the largest thing that
+	# happens to a channel short of the radio changing channel. Twelve is
+	# well above the few dB somebody walking through produces. Below six is
+	# inside what a door closing does; above thirty is past the top of the
+	# reported MotionEnergyDb range.
+	# option csi_fall_rise_db         '12'
+
+	# Seconds of stillness after the energy comes back down before a
+	# candidate is raised (5-60, default 10). Clamped.
+	#
+	# This is the whole discriminator. A rise and a return is somebody
+	# sitting down; a rise, a return, and then nobody moving for ten seconds
+	# is the thing worth reporting. Under five seconds a person who sat down
+	# heavily and then reached for something is a fall. Over a minute the
+	# report arrives long after it was any use.
+	#
+	# A raised candidate clears itself after 60 s, or as soon as motion
+	# resumes on the link, and no second candidate is raised within 5 s of
+	# the first.
+	# option csi_fall_still_secs      '10'
 
 	# ── Process behaviour ──────────────────────────────────────────────────
 	# Send log messages to syslog (1) or stderr (0).

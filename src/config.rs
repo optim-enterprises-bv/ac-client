@@ -112,6 +112,108 @@ fn csi_window(raw: &str) -> u64 {
     clamped
 }
 
+/// Seconds of per-record scalars behind one vitals estimate.
+///
+/// Thirty is three breaths at the slow end of the band and enough cycles for a
+/// transform to separate a chest from the noise around it.
+const CSI_VITALS_WINDOW_SECS: u64 = 30;
+/// Bounds on `csi_vitals_window_secs`.
+///
+/// Below twenty a 0.1 Hz breath has two cycles in the window and cannot be told
+/// from a drift. Above two minutes a subject has to hold still for two minutes,
+/// which nobody does, and the estimate is stale by the time it is reported.
+const CSI_VITALS_WINDOW_MIN_SECS: u64 = 20;
+const CSI_VITALS_WINDOW_MAX_SECS: u64 = 120;
+
+/// Confidence below which a vitals estimate is not reported.
+///
+/// Not a raw in-band power share: the agent takes the band's chance level out
+/// first, so 0 is what an empty room gives in EITHER band and 1 is a pure tone.
+/// See `usp::dm::vitals::band` for why the raw share could not carry a single
+/// threshold. Measured: white noise averages 0.036 in the breathing band and
+/// 0.025 in the heart band, a clean tone in either scores 0.99.
+const CSI_VITALS_MIN_CONFIDENCE: f64 = 0.35;
+/// Bounds on `csi_vitals_min_confidence`.
+///
+/// Below 0.1 the floor is inside the spread of what noise alone produces and
+/// the agent reports a breathing rate for an empty room. Above 0.9 nothing
+/// short of a pure sinusoid clears it, and a chest is not a pure sinusoid.
+const CSI_VITALS_MIN_CONFIDENCE_MIN: f64 = 0.1;
+const CSI_VITALS_MIN_CONFIDENCE_MAX: f64 = 0.9;
+
+/// dB above a link's learnt ambient that opens a fall candidate.
+///
+/// A body hitting the floor inside the path is the largest thing that happens
+/// to a channel short of the radio changing channel. Twelve is well above the
+/// few dB a person walking through produces and well below the ~30 the energy
+/// can reach.
+const CSI_FALL_RISE_DB: f64 = 12.0;
+/// Bounds on `csi_fall_rise_db`. Under six is inside what a door closing does;
+/// over thirty is above the reporting range of the energy itself.
+const CSI_FALL_RISE_DB_MIN: f64 = 6.0;
+const CSI_FALL_RISE_DB_MAX: f64 = 30.0;
+
+/// Seconds of stillness after the impact before a fall candidate is raised.
+const CSI_FALL_STILL_SECS: u64 = 10;
+/// Bounds on `csi_fall_still_secs`.
+///
+/// Under five seconds a person who sat down heavily and then reached for
+/// something is a fall. Over a minute the report arrives long after it was any
+/// use.
+const CSI_FALL_STILL_MIN_SECS: u64 = 5;
+const CSI_FALL_STILL_MAX_SECS: u64 = 60;
+
+/// Read a `csi_vitals_window_secs` setting, clamped to a window a breath fits
+/// in. See the constants.
+fn csi_vitals_window(raw: &str) -> u64 {
+    let v: u64 = raw.parse().unwrap_or(CSI_VITALS_WINDOW_SECS);
+    let clamped = v.clamp(CSI_VITALS_WINDOW_MIN_SECS, CSI_VITALS_WINDOW_MAX_SECS);
+    if clamped != v {
+        info!("Config: csi_vitals_window_secs {v} out of range, using {clamped}");
+    }
+    clamped
+}
+
+/// Read a `csi_vitals_min_confidence` setting.
+///
+/// A NaN parses as a float and would then compare false against every
+/// threshold, so nothing would ever be reported and nothing would say why;
+/// `is_finite` sends it to the default instead.
+fn csi_vitals_confidence(raw: &str) -> f64 {
+    let v: f64 = raw.parse().unwrap_or(CSI_VITALS_MIN_CONFIDENCE);
+    let v = if v.is_finite() {
+        v
+    } else {
+        CSI_VITALS_MIN_CONFIDENCE
+    };
+    let clamped = v.clamp(CSI_VITALS_MIN_CONFIDENCE_MIN, CSI_VITALS_MIN_CONFIDENCE_MAX);
+    if clamped != v {
+        info!("Config: csi_vitals_min_confidence {v} out of range, using {clamped}");
+    }
+    clamped
+}
+
+/// Read a `csi_fall_rise_db` setting, clamped. See the constants.
+fn csi_fall_rise(raw: &str) -> f64 {
+    let v: f64 = raw.parse().unwrap_or(CSI_FALL_RISE_DB);
+    let v = if v.is_finite() { v } else { CSI_FALL_RISE_DB };
+    let clamped = v.clamp(CSI_FALL_RISE_DB_MIN, CSI_FALL_RISE_DB_MAX);
+    if clamped != v {
+        info!("Config: csi_fall_rise_db {v} out of range, using {clamped}");
+    }
+    clamped
+}
+
+/// Read a `csi_fall_still_secs` setting, clamped. See the constants.
+fn csi_fall_still(raw: &str) -> u64 {
+    let v: u64 = raw.parse().unwrap_or(CSI_FALL_STILL_SECS);
+    let clamped = v.clamp(CSI_FALL_STILL_MIN_SECS, CSI_FALL_STILL_MAX_SECS);
+    if clamped != v {
+        info!("Config: csi_fall_still_secs {v} out of range, using {clamped}");
+    }
+    clamped
+}
+
 /// MTP selection for the USP Agent.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MtpType {
@@ -205,6 +307,21 @@ pub struct ClientConfig {
     pub csi_period_ms: u64,
     /// Seconds of records behind one motion-energy figure. See `csi_window`.
     pub csi_window_secs: u64,
+    /// Seconds of per-record scalars behind one vitals estimate.
+    ///
+    /// Also the stillness the link must have had before an estimate is made at
+    /// all: a window still half full of somebody walking through it has nothing
+    /// in it that a breath could be told from. See `csi_vitals_window`.
+    pub csi_vitals_window_secs: u64,
+    /// Confidence below which breathing and heart rates are not reported, with
+    /// the band's chance level already taken out. See `csi_vitals_confidence`.
+    pub csi_vitals_min_confidence: f64,
+    /// dB above a link's learnt ambient that opens a fall candidate. See
+    /// `csi_fall_rise`.
+    pub csi_fall_rise_db: f64,
+    /// Seconds of stillness after the impact before a fall candidate is
+    /// raised. See `csi_fall_still`.
+    pub csi_fall_still_secs: u64,
 }
 
 impl Default for ClientConfig {
@@ -241,6 +358,10 @@ impl Default for ClientConfig {
             csi_enabled: false,
             csi_period_ms: CSI_PERIOD_MS,
             csi_window_secs: CSI_WINDOW_SECS,
+            csi_vitals_window_secs: CSI_VITALS_WINDOW_SECS,
+            csi_vitals_min_confidence: CSI_VITALS_MIN_CONFIDENCE,
+            csi_fall_rise_db: CSI_FALL_RISE_DB,
+            csi_fall_still_secs: CSI_FALL_STILL_SECS,
         }
     }
 }
@@ -420,6 +541,28 @@ pub fn load_config(path: &Path) -> Result<ClientConfig> {
                 cfg.csi_window_secs = csi_window(&val);
                 debug!("Config: csi_window_secs = {}", cfg.csi_window_secs);
             }
+            "csi_vitals_window_secs" => {
+                cfg.csi_vitals_window_secs = csi_vitals_window(&val);
+                debug!(
+                    "Config: csi_vitals_window_secs = {}",
+                    cfg.csi_vitals_window_secs
+                );
+            }
+            "csi_vitals_min_confidence" => {
+                cfg.csi_vitals_min_confidence = csi_vitals_confidence(&val);
+                debug!(
+                    "Config: csi_vitals_min_confidence = {}",
+                    cfg.csi_vitals_min_confidence
+                );
+            }
+            "csi_fall_rise_db" => {
+                cfg.csi_fall_rise_db = csi_fall_rise(&val);
+                debug!("Config: csi_fall_rise_db = {}", cfg.csi_fall_rise_db);
+            }
+            "csi_fall_still_secs" => {
+                cfg.csi_fall_still_secs = csi_fall_still(&val);
+                debug!("Config: csi_fall_still_secs = {}", cfg.csi_fall_still_secs);
+            }
             _ => {
                 trace!("Config: ignoring unknown key '{}'", key);
             }
@@ -569,6 +712,18 @@ pub fn load_config_uci() -> Result<ClientConfig> {
     }
     if let Some(v) = uci_get_str("csi_window_secs") {
         cfg.csi_window_secs = csi_window(&v);
+    }
+    if let Some(v) = uci_get_str("csi_vitals_window_secs") {
+        cfg.csi_vitals_window_secs = csi_vitals_window(&v);
+    }
+    if let Some(v) = uci_get_str("csi_vitals_min_confidence") {
+        cfg.csi_vitals_min_confidence = csi_vitals_confidence(&v);
+    }
+    if let Some(v) = uci_get_str("csi_fall_rise_db") {
+        cfg.csi_fall_rise_db = csi_fall_rise(&v);
+    }
+    if let Some(v) = uci_get_str("csi_fall_still_secs") {
+        cfg.csi_fall_still_secs = csi_fall_still(&v);
     }
     if let Some(v) = uci_get_str("mtp") {
         cfg.mtp = match v.to_ascii_lowercase().as_str() {
