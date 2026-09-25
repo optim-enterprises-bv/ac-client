@@ -7,7 +7,7 @@
 //!
 //! On the test device the enforcement path was demonstrably working and had
 //! nothing to enforce: `nft list set inet fw4 aether_rep4` held zero elements
-//! and `/var/spool/aether-sensord/feed` was empty. `aether-sensord` reads feed
+//! and the daemon's spool was empty. `aether-sensord` reads feed
 //! messages from that directory and opens no network socket of its own — by
 //! design, because this agent already holds the device's mTLS identity — but
 //! nothing was delivering them. A canary that proves the firewall can drop a
@@ -43,8 +43,15 @@ use log::{debug, info};
 use crate::config::ClientConfig;
 use std::collections::HashMap;
 
-/// Where `aether-sensord` reads feed messages. Matches its `spool_dir` default.
-const SPOOL: &str = "/var/spool/aether-sensord/feed";
+/// Where `aether-sensord` reads feed messages.
+///
+/// This MUST equal the daemon's `spool_dir`. On FreeBSD/pf that default is
+/// `/var/spool/aether/in` (see `dpf_config_defaults` in `daemon_pf.c` and
+/// `contrib/freebsd/aether-sensord.conf.sample`). A mismatch is invisible from
+/// both ends: the agent reports the SET succeeded and the daemon reports an
+/// empty spool, so nothing is blocked and no counter shows a problem -- the
+/// daemon simply never sees a message.
+const SPOOL: &str = "/var/spool/aether/in";
 
 /// Largest feed message accepted, in bytes.
 ///
@@ -66,11 +73,31 @@ fn serial_of(v: &serde_json::Value) -> Option<u64> {
     v.get("serial").and_then(|s| s.as_u64())
 }
 
+/// Width of the zero-padded serial in the spool filename.
+///
+/// `aether-sensord` sorts spool entries with `strcmp` and applies them in that
+/// order, on the documented assumption that "the transport names files so that
+/// lexicographic order is serial order". Unpadded, that assumption is FALSE:
+/// `feed-10.json` sorts before `feed-2.json`, so a pass that sees both applies
+/// serial 10 first and then rejects serial 2 as STALE -- and removes it. The
+/// update is lost, silently: the daemon logs `stale`, which is a normal
+/// duplicate-suppression outcome, and the controller is told the SET succeeded.
+///
+/// A gap is worse than a stall. `feed_client_accept` refuses a gap and waits
+/// for a snapshot, which recovers; a stale is applied-order corruption that
+/// nothing repairs, because both ends believe the set is current.
+///
+/// 12 digits holds a u64 serial and keeps filenames sortable by construction
+/// rather than by convention.
+const SERIAL_PAD: usize = 12;
+
 fn write_message(dir: &Path, serial: u64, body: &str) -> Result<PathBuf, String> {
     fs::create_dir_all(dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
 
-    let path = dir.join(format!("feed-{serial}.json"));
-    let tmp = dir.join(format!("feed-{serial}.json.partial"));
+    // Zero-padded so strcmp ordering equals serial ordering. See SERIAL_PAD.
+    let name = format!("feed-{serial:0width$}", width = SERIAL_PAD);
+    let path = dir.join(format!("{name}.json"));
+    let tmp = dir.join(format!("{name}.json.partial"));
 
     // Written then renamed, because the daemon scans this directory on a timer
     // and would otherwise read a half-written message. It skips dotfiles and
@@ -176,8 +203,57 @@ mod tests {
         let dir = tempdir("serial");
         let body = r#"{"type":"delta","serial":41,"add":["203.0.113.7"],"remove":[]}"#;
         let p = write_message(&dir, 41, body).unwrap();
-        assert_eq!(p.file_name().unwrap(), "feed-41.json");
+        // Zero-padded: see SERIAL_PAD. The width is the contract with the
+        // daemon's strcmp ordering, not decoration.
+        assert_eq!(p.file_name().unwrap(), "feed-000000000041.json");
         assert_eq!(fs::read_to_string(&p).unwrap(), body);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// THE REASON FOR THE PADDING.
+    ///
+    /// The daemon sorts spool filenames with `strcmp` and applies them in that
+    /// order. Unpadded, `feed-10.json` sorts before `feed-2.json`: serial 10 is
+    /// applied first and serial 2 is then rejected STALE and deleted. The
+    /// update is silently lost -- and unlike a gap, which the daemon refuses
+    /// and recovers from via a snapshot, a stale is applied-order corruption
+    /// that nothing repairs.
+    ///
+    /// This asserts the ordering property directly rather than the filename
+    /// text, so it keeps holding if the padding width ever changes.
+    #[test]
+    fn spool_names_sort_in_serial_order() {
+        let dir = tempdir("order");
+        // Deliberately adversarial: a serial that is a prefix of a longer one,
+        // the 9/10 boundary, and a three-digit jump.
+        for serial in [1u64, 2, 9, 10, 11, 100, 101, 1000] {
+            write_message(&dir, serial, r#"{"serial":0}"#).unwrap();
+        }
+
+        let mut names: Vec<String> = fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        // This is exactly what the daemon does: strcmp, via qsort.
+        names.sort();
+
+        let serials: Vec<u64> = names
+            .iter()
+            .map(|n| {
+                n.trim_start_matches("feed-")
+                    .trim_end_matches(".json")
+                    .parse()
+                    .unwrap()
+            })
+            .collect();
+
+        assert_eq!(
+            serials,
+            vec![1, 2, 9, 10, 11, 100, 101, 1000],
+            "strcmp order must equal serial order, or the daemon applies \
+             out of order and drops the lower serial as STALE"
+        );
         fs::remove_dir_all(&dir).ok();
     }
 
@@ -193,7 +269,7 @@ mod tests {
             .flatten()
             .map(|e| e.file_name().to_string_lossy().into_owned())
             .collect();
-        assert_eq!(names, vec!["feed-7.json".to_string()]);
+        assert_eq!(names, vec!["feed-000000000007.json".to_string()]);
         fs::remove_dir_all(&dir).ok();
     }
 
@@ -204,7 +280,7 @@ mod tests {
         write_message(&dir, 9, r#"{"serial":9,"add":["203.0.113.1"]}"#).unwrap();
         let n = fs::read_dir(&dir).unwrap().count();
         assert_eq!(n, 1, "same serial is the same message, not a second one");
-        assert!(fs::read_to_string(dir.join("feed-9.json"))
+        assert!(fs::read_to_string(dir.join("feed-000000000009.json"))
             .unwrap()
             .contains("203.0.113.1"));
         fs::remove_dir_all(&dir).ok();
