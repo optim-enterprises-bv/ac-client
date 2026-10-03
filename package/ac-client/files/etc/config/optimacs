@@ -130,6 +130,37 @@ config optimacs 'agent'
 	option img_dir       '/var/apclient/images'
 	option pid_file      '/var/run/apclient.pid'
 
+	# ── Passive motion sensing ─────────────────────────────────────────────
+	# Derive "is someone moving" from the RSSI variance of the mesh and
+	# client links this device already has, and report only the state
+	# changes (Idle <-> Motion) as Device.X_OptimACS_Sensing.Motion.{i}.State.
+	#
+	# OFF BY DEFAULT, and deliberately so. Presence in a home -- somebody is
+	# moving about, right now, in this house -- is personal data about
+	# whoever lives there, including people who never agreed to anything and
+	# own none of the equipment. It is not anonymous: it arrives tagged with
+	# a device that has an address and a subscriber. Switch this on only
+	# where the occupants have been asked and have said yes.
+	#
+	# Nothing else turns it on: with this unset the sampler is never
+	# started, so the device does not compute presence and quietly withhold
+	# it -- it never computes it at all.
+	# option motion_enabled  '0'
+
+	# How often each link's signal is read, in milliseconds (200-5000,
+	# default 500). Values outside the range are clamped.
+	#
+	# 500 ms matches what is being measured: a person crossing between two
+	# radios takes about a second. Sampling much slower steps over the
+	# crossing entirely -- the feature then looks configured and never
+	# fires, which is worse than being off. Much faster costs one fork of
+	# `iw` per interface per tick for readings the driver has not refreshed.
+	#
+	# Measured 2026-09-21 on a D50 (Cortex-A53, ipq50xx): 100 station dumps
+	# in 0.72 s, about 7 ms each, so 500 ms over three interfaces is roughly
+	# 4% of one core.
+	# option motion_period_ms '500'
+
 	# ── Process behaviour ──────────────────────────────────────────────────
 	# Send log messages to syslog (1) or stderr (0).
 	option log_syslog    '1'

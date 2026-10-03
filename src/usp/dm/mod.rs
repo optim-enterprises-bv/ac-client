@@ -20,6 +20,7 @@ pub mod hosts;
 pub mod ip;
 pub mod mesh;
 pub mod misc;
+pub mod motion;
 pub mod ndpid_flows;
 pub mod neighbors;
 pub mod qos;
@@ -213,6 +214,20 @@ async fn dispatch_get(cfg: &ClientConfig, path: &str) -> Params {
         enforcement::get(cfg, path)
     } else if path.starts_with("Device.X_OptimACS_Reputation") {
         reputation::get(cfg, path)
+    } else if path.starts_with("Device.X_OptimACS_Sensing.Motion") {
+        // BEFORE the general Sensing arm, and narrower than it. Two reasons,
+        // and the second one is the important one:
+        //
+        // Motion is a different observation with a different lifetime -- live
+        // per-link state, not a spool of firewall drops. And `sensing::get`
+        // DELETES what it reports as it reports it, so answering a `.Motion`
+        // GET through that arm would silently consume a batch of drop
+        // observations and ship them under a path the controller is not
+        // reading them from.
+        //
+        // The prefix also catches `MotionNumberOfEntries`, which is a sibling
+        // of the table rather than a member of it.
+        motion::get(cfg, path)
     } else if path.starts_with("Device.X_OptimACS_Sensing") {
         // Consent state is merged in rather than given its own arm.
         //
@@ -222,6 +237,10 @@ async fn dispatch_get(cfg: &ClientConfig, path: &str) -> Params {
         // model, invisible to the only caller.
         let mut m = sensing::get(cfg, path);
         m.extend(consent::get(cfg, path));
+        // Motion, for the same reason as the consent state below it: the
+        // controller polls the PREFIX, so a sub-tree only reachable by its own
+        // exact path is one nothing ever asks for.
+        m.extend(motion::get(cfg, path));
         m
     } else if path.starts_with("Device.X_OptimACS_DPI") {
         // Both producers answer under this prefix: sensord's own classified
@@ -323,6 +342,37 @@ mod dispatch_tests {
     /// falls through to "read-only or unknown path", while a routed one reaches
     /// `mesh::set` and is rejected as "unknown mesh parameter". Confirmed to
     /// fail by removing the dispatch arm.
+    /// The motion sub-tree must be answered by `motion`, and the arm must sit
+    /// ahead of the Sensing arm.
+    ///
+    /// `sensing::get` consumes its spool as it reports, so an ordering mistake
+    /// here does not show up as a wrong value -- it shows up as firewall drop
+    /// observations vanishing from a device, days later, with nothing to tie
+    /// it to the motion object. The `PendingBatches` assertion is what pins
+    /// the order: that key can only come from the arm that drains the spool.
+    #[tokio::test]
+    async fn the_motion_object_is_answered_ahead_of_the_sensing_spool() {
+        let cfg = ClientConfig::default();
+
+        let got = dispatch_get(&cfg, "Device.X_OptimACS_Sensing.Motion.").await;
+        assert_eq!(
+            got.get("Device.X_OptimACS_Sensing.MotionEnable"),
+            Some(&"0".to_string()),
+            "GET dispatch does not route the motion sub-tree"
+        );
+        assert!(
+            !got.contains_key("Device.X_OptimACS_Sensing.PendingBatches"),
+            "the motion sub-tree reached sensing::get, which drains the spool"
+        );
+
+        // The prefix the controller actually polls must still see motion.
+        let prefix = dispatch_get(&cfg, "Device.X_OptimACS_Sensing.").await;
+        assert!(
+            prefix.contains_key("Device.X_OptimACS_Sensing.MotionNumberOfEntries"),
+            "a prefix GET cannot see the motion object at all"
+        );
+    }
+
     #[tokio::test]
     async fn the_mesh_object_is_reachable_through_dispatch() {
         let cfg = ClientConfig::default();
