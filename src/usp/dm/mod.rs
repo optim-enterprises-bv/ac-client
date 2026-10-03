@@ -9,6 +9,7 @@ pub mod appfilter;
 pub mod bridge;
 pub mod claim;
 pub mod consent;
+pub mod csi;
 pub mod device_info;
 pub mod dhcp;
 pub mod diagnostics;
@@ -214,6 +215,16 @@ async fn dispatch_get(cfg: &ClientConfig, path: &str) -> Params {
         enforcement::get(cfg, path)
     } else if path.starts_with("Device.X_OptimACS_Reputation") {
         reputation::get(cfg, path)
+    } else if path.starts_with("Device.X_OptimACS_Sensing.Csi") {
+        // BEFORE the general Sensing arm, for exactly the reasons the Motion
+        // arm below is: `sensing::get` DELETES its spool as it reports, so a
+        // `.Csi` GET answered through it would silently consume a batch of
+        // firewall drop observations and ship them under a path the controller
+        // is not reading them from.
+        //
+        // The prefix also catches `CsiEnable` and `CsiNumberOfEntries`, which
+        // are siblings of the table rather than members of it.
+        csi::get(cfg, path)
     } else if path.starts_with("Device.X_OptimACS_Sensing.Motion") {
         // BEFORE the general Sensing arm, and narrower than it. Two reasons,
         // and the second one is the important one:
@@ -241,6 +252,8 @@ async fn dispatch_get(cfg: &ClientConfig, path: &str) -> Params {
         // controller polls the PREFIX, so a sub-tree only reachable by its own
         // exact path is one nothing ever asks for.
         m.extend(motion::get(cfg, path));
+        // And CSI, which is a second sensor under the same prefix.
+        m.extend(csi::get(cfg, path));
         m
     } else if path.starts_with("Device.X_OptimACS_DPI") {
         // Both producers answer under this prefix: sensord's own classified
@@ -370,6 +383,45 @@ mod dispatch_tests {
         assert!(
             prefix.contains_key("Device.X_OptimACS_Sensing.MotionNumberOfEntries"),
             "a prefix GET cannot see the motion object at all"
+        );
+    }
+
+    /// The CSI sub-tree must be answered by `csi`, and its arm must sit ahead
+    /// of the Sensing arm.
+    ///
+    /// The ordering mistake does not show up as a wrong value: `sensing::get`
+    /// drains its spool as it reports, so it shows up as firewall drop
+    /// observations vanishing from a device, days later, with nothing to tie it
+    /// to the CSI object. The `PendingBatches` assertion is what pins the
+    /// order -- that key can only come from the arm that drains the spool.
+    #[tokio::test]
+    async fn the_csi_object_is_answered_ahead_of_the_sensing_spool() {
+        let cfg = ClientConfig::default();
+
+        let got = dispatch_get(&cfg, "Device.X_OptimACS_Sensing.Csi.").await;
+        assert_eq!(
+            got.get("Device.X_OptimACS_Sensing.CsiEnable"),
+            Some(&"0".to_string()),
+            "GET dispatch does not route the CSI sub-tree"
+        );
+        assert!(
+            !got.contains_key("Device.X_OptimACS_Sensing.PendingBatches"),
+            "the CSI sub-tree reached sensing::get, which drains the spool"
+        );
+        assert!(
+            !got.contains_key("Device.X_OptimACS_Sensing.MotionEnable"),
+            "the Csi arm must be narrower than the Motion arm, not overlap it"
+        );
+
+        // The prefix the controller actually polls must see BOTH sensors.
+        let prefix = dispatch_get(&cfg, "Device.X_OptimACS_Sensing.").await;
+        assert!(
+            prefix.contains_key("Device.X_OptimACS_Sensing.CsiNumberOfEntries"),
+            "a prefix GET cannot see the CSI object at all"
+        );
+        assert!(
+            prefix.contains_key("Device.X_OptimACS_Sensing.MotionNumberOfEntries"),
+            "adding CSI to the prefix GET displaced motion"
         );
     }
 

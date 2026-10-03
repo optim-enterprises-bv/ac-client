@@ -87,6 +87,23 @@ pub async fn run(cfg: Arc<ClientConfig>, gnss: Arc<std::sync::Mutex<Option<GnssP
         dm::motion::spawn(cfg2, status_tx.clone(), agent2)
     };
 
+    // Channel-state sensing, if the operator consented to that separately.
+    //
+    // Its own switch rather than a mode of `motion_enabled`: it measures more
+    // about a home than RSSI variance does, and it puts the radio into a mode
+    // that sounds the channel with extra frames. An operator who consented to
+    // the first has not thereby consented to the second.
+    //
+    // THE BINDING IS LOAD-BEARING, for a stronger reason than above: dropping
+    // this handle is what stops the captures and writes `enable_cfr` back to 0.
+    // A `let _ = ...` would retire the reader immediately AND leave every peer
+    // being sounded ten times a second for as long as the device stays up.
+    let _csi_stop = {
+        let cfg2 = Arc::clone(&cfg);
+        let agent2 = agent_id.clone();
+        dm::csi::spawn(cfg2, status_tx.clone(), agent2)
+    };
+
     // Connect MTP
     info!("Starting MTP connection...");
     match cfg.mtp {

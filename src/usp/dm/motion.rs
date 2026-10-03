@@ -93,8 +93,11 @@ pub enum State {
 }
 
 impl State {
-    /// The value reported for `...Motion.{i}.State`.
-    fn as_str(self) -> &'static str {
+    /// The value reported for `...Motion.{i}.State`, and for `...Csi.{i}.State`:
+    /// [`super::csi`] runs this same detector over a different feature, so the
+    /// two objects must spell a state the same way or a controller has to learn
+    /// two vocabularies for one answer.
+    pub(super) fn as_str(self) -> &'static str {
         match self {
             State::Learning => "Learning",
             State::Idle => "Idle",
@@ -172,7 +175,13 @@ pub struct LinkDetector {
     // ── State ────────────────────────────────────────────────────────────────
     state: State,
     /// Raw readings, newest last. The Hampel stage judges its centre.
-    raw: VecDeque<i32>,
+    ///
+    /// Held as `f64` rather than the `i32` the RSSI sampler produces so that
+    /// [`push_f64`](Self::push_f64) can feed it a continuous quantity. For the
+    /// integer readings [`push`](Self::push) supplies this is not a change of
+    /// behaviour: every value here was already widened to `f64` before it was
+    /// sorted, compared or averaged, so the arithmetic is the same to the bit.
+    raw: VecDeque<f64>,
     /// Filtered readings feeding the short-window variance.
     short: VecDeque<f64>,
     /// Running ambient statistics, kept as counts rather than a growing vector
@@ -227,16 +236,63 @@ impl Default for LinkDetector {
 }
 
 impl LinkDetector {
+    /// A detector for a feature that has no absolute saturation level.
+    ///
+    /// Every threshold in this struct is a ratio or a variance in dB except
+    /// `saturation_dbm`, which compares against an absolute RSSI to decide
+    /// whether the receiver's own gain stage is flickering. A caller measuring
+    /// something other than a signal level -- [`super::csi`] measures a channel
+    /// motion energy -- has no such level, so it disables the gate rather than
+    /// feeding it a number chosen to never trigger.
+    ///
+    /// A constructor rather than a struct literal at the call site because the
+    /// private state fields make `..Default::default()` unusable from another
+    /// module, and because the decision it encodes deserves to be explained in
+    /// the place that owns the field.
+    pub(super) fn unsaturating() -> Self {
+        Self {
+            saturation_dbm: f64::INFINITY,
+            ..Default::default()
+        }
+    }
+
     /// Feed one signal reading, taken at `now_secs` on the caller's clock.
     ///
     /// Returns the state change this sample caused, if any. `None` is the
     /// overwhelmingly common answer and means "nothing to report", not "no
     /// opinion".
     pub fn push(&mut self, dbm: i32, now_secs: f64) -> Option<Transition> {
+        self.push_f64(f64::from(dbm), now_secs)
+    }
+
+    /// Feed one reading that is not a whole number of dBm.
+    ///
+    /// The detector's arithmetic never cared that RSSI arrives as an integer —
+    /// every stage widened it before using it — so this is the same detector,
+    /// not a second one. It exists because [`super::csi`] measures a quantity
+    /// that is genuinely continuous: a channel-response motion energy in dB,
+    /// whose whole signal at rest is a spread of about 0.6 dB. Rounding that to
+    /// `i32` would quantise every resting window to one integer and throw away
+    /// exactly the structure the detector is there to watch.
+    ///
+    /// Every threshold below is still in dB, which is why a dB-shaped feature
+    /// can be fed to a detector whose fields are named for dBm: what the
+    /// hysteresis actually tests is a RATIO of variances and a variance in dB²,
+    /// and neither asks what the zero of the scale means. The one field that
+    /// does is `saturation_dbm`, which compares against an absolute level; a
+    /// caller whose scale has no such level disables it by setting the field to
+    /// infinity rather than by pretending its readings are dBm.
+    pub fn push_f64(&mut self, value: f64, now_secs: f64) -> Option<Transition> {
         if self.start_at.is_none() {
             self.start_at = Some(now_secs);
         }
-        let value = self.hampel(dbm)?;
+        // A NaN would sort unpredictably in the Hampel stage and then poison
+        // the baseline for the life of the link. Dropped rather than clamped:
+        // a non-number is a missing sample, not an extreme one.
+        if !value.is_finite() {
+            return None;
+        }
+        let value = self.hampel(value)?;
 
         self.short.push_back(value);
         while self.short.len() > self.short_window() {
@@ -305,12 +361,12 @@ impl LinkDetector {
     ///
     /// Returns `None` until the ring is full; those first few samples are lost
     /// once per link, at startup, and are not worth a special case.
-    fn hampel(&mut self, dbm: i32) -> Option<f64> {
+    fn hampel(&mut self, reading: f64) -> Option<f64> {
         // Clamped at use rather than validated at construction: the tuning
         // fields are public, a zero window indexes an empty ring, and a panic
         // in here kills the sampler task for every link on the device.
         let window = self.hampel_window.max(1);
-        self.raw.push_back(dbm);
+        self.raw.push_back(reading);
         while self.raw.len() > window {
             self.raw.pop_front();
         }
@@ -318,7 +374,7 @@ impl LinkDetector {
             return None;
         }
 
-        let mut sorted: Vec<f64> = self.raw.iter().map(|&v| f64::from(v)).collect();
+        let mut sorted: Vec<f64> = self.raw.iter().copied().collect();
         sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
         let median = sorted[sorted.len() / 2];
 
@@ -329,7 +385,7 @@ impl LinkDetector {
         let sigma = (1.4826 * devs[devs.len() / 2]).max(self.mad_floor);
         let limit = self.hampel_sigmas * sigma;
 
-        let centre = f64::from(self.raw[self.raw.len() / 2]);
+        let centre = self.raw[self.raw.len() / 2];
         let suspects = sorted.iter().filter(|v| (*v - median).abs() > limit).count();
         if (centre - median).abs() > limit && suspects == 1 {
             Some(median)
@@ -467,7 +523,7 @@ impl LinkDetector {
     /// would read as somebody walking past, most reliably at night when
     /// phones sleep. The baseline survives because it is still true: the room
     /// did not change while nobody was reporting from it.
-    fn resync(&mut self) {
+    pub(super) fn resync(&mut self) {
         self.raw.clear();
         self.short.clear();
         self.above = 0;
@@ -489,7 +545,9 @@ pub enum LinkKind {
 }
 
 impl LinkKind {
-    fn as_str(self) -> &'static str {
+    /// Shared with [`super::csi`], which classifies the same links the same
+    /// way. See [`State::as_str`].
+    pub(super) fn as_str(self) -> &'static str {
         match self {
             LinkKind::Mesh => "mesh",
             LinkKind::Client => "client",
@@ -528,12 +586,17 @@ static CLOCK: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
 
 /// The shared clock origin. Identical on every call, for the life of the
 /// process.
-fn clock_origin() -> Instant {
+///
+/// Visible to [`super::csi`], which keeps a table with the same lifetime and
+/// needs the same origin for the same reasons. One origin for both is not
+/// merely convenient: the two tables describe the same links seen two ways,
+/// and a future that compares them must not have to reconcile two zeroes.
+pub(super) fn clock_origin() -> Instant {
     *CLOCK.get_or_init(Instant::now)
 }
 
 /// Seconds since the sampler clock started.
-fn now_secs() -> f64 {
+pub(super) fn now_secs() -> f64 {
     clock_origin().elapsed().as_secs_f64()
 }
 
@@ -612,7 +675,7 @@ fn parse_ap_ifaces(text: &str) -> Vec<String> {
 /// Mesh peers are gated on `mesh plink: ESTAB` because a peer can sit in
 /// OPN_SNT with a plausible signal and no link at all. Client stations have no
 /// such line and need none — a station in the dump is associated.
-fn signals(dump: &str, kind: LinkKind) -> Vec<(String, i32)> {
+pub(super) fn signals(dump: &str, kind: LinkKind) -> Vec<(String, i32)> {
     crate::usp::dm::wifi::parse_station_dump(dump)
         .into_iter()
         .filter(|sta| match kind {
