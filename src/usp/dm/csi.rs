@@ -59,6 +59,17 @@
 //! a reader that falls behind does not slow the radio down, it loses captures,
 //! and nothing in the record stream says so.
 //!
+//! # What sits on top of this
+//!
+//! [`super::vitals`] is a second stage over the same records. It does not touch
+//! the radio, the relay, or the framing: it consumes two more per-record
+//! scalars this module computes beside the magnitudes — [`mean_mag`] and
+//! [`mean_phase`] — and asks two questions the two-second motion window cannot,
+//! because both need half a minute of a link that is NOT moving. Breathing and
+//! heart rates are experimental candidates and not measurements; the fall
+//! candidate is a shape in this module's own energy series. Consent is the same
+//! consent: with `csi_enabled` false neither stage exists.
+//!
 //! # Consent
 //!
 //! Off by default, and for a stronger version of the reason motion sensing is.
@@ -89,6 +100,7 @@ use log::{debug, info, warn};
 use crate::config::ClientConfig;
 use crate::usp::agent::StatusSender;
 use crate::usp::dm::motion::{self, LinkDetector, LinkKind, State, Transition};
+use crate::usp::dm::vitals::{FallDetector, FallEvent, Vitals, VitalsWindow};
 use crate::usp::endpoint::EndpointId;
 use crate::usp::message::{build_value_change_notify, encode_msg};
 use crate::usp::record;
@@ -494,6 +506,159 @@ pub fn magnitudes(rec: &Record) -> Vec<f32> {
         .collect()
 }
 
+/// Mean magnitude over the live tone positions of one record.
+///
+/// The second of the three per-record scalars, and the plainest: it is the
+/// received power of the sounding, in the receiver's own units. A chest moving
+/// through the path changes it by a fraction of a percent, which is nothing to
+/// a motion detector and is exactly the size of thing a thirty-second transform
+/// can pull out of the noise.
+///
+/// Live positions only, for the reason [`MIN_TONE_MAG`] gives. `None` when the
+/// payload holds no live position at all, which means it was not a channel
+/// response.
+pub fn mean_mag(mag: &[f32]) -> Option<f64> {
+    let mut acc = 0.0f64;
+    let mut used = 0usize;
+    for &v in mag {
+        let v = f64::from(v);
+        if v < MIN_TONE_MAG {
+            continue;
+        }
+        acc += v;
+        used += 1;
+    }
+    (used > 0).then(|| acc / used as f64)
+}
+
+/// Mean phase of one record: per chain, the tone phases unwrapped along the
+/// tones and stripped of their linear slope, averaged; then averaged over
+/// chains.
+///
+/// # Why the slope has to go
+///
+/// The raw phase of a CFR capture advances almost linearly with the subcarrier
+/// index. That ramp is the receiver's sampling-time offset against the
+/// transmitter — a clock artefact — and it is large: a few whole cycles across
+/// 256 tones, and a DIFFERENT few after every re-sync of the same completely
+/// still link. Left in, it is the entire signal, and the millimetre of chest
+/// wall this stage exists to see is four decimal places underneath it. Fitting
+/// a least-squares line over the tone index and removing its SLOPE leaves the
+/// intercept — the phase common to every subcarrier, which is the path.
+///
+/// Removing the slope and then averaging over tones is the same arithmetic as
+/// taking that intercept, and it is deliberately not the same as removing the
+/// whole fitted line: subtracting the intercept too would leave a residual
+/// whose mean is exactly zero by construction, i.e. no signal at all.
+///
+/// # Why the dead tones are skipped in the unwrap and not just in the fit
+///
+/// Guard and DC subcarriers arrive as near-zero I and Q, so their `atan2` is
+/// uniformly random. Unwrapping THROUGH one injects a 2-pi step into every tone
+/// after it, which tilts the fitted slope and takes the answer with it. The
+/// unwrap therefore steps from live tone to live tone, and the one- to
+/// three-tone gaps that leaves are far short of the half-cycle per step the
+/// unwrap can tolerate.
+///
+/// # Why the chains are aligned before they are averaged
+///
+/// Each chain has its own constant phase offset, so the per-chain intercepts
+/// sit anywhere in `(-pi, pi]` and two of them either side of the wrap average
+/// to something near zero that is not between them. Each chain is brought to
+/// within half a turn of the first before it is added.
+///
+/// O(chains x tones), one `atan2` per position: the same order as
+/// [`magnitudes`], and paid on the same reader thread.
+pub fn mean_phase(rec: &Record) -> Option<f64> {
+    let chains = rec.chains();
+    let tones = rec.tones();
+    if chains == 0 || tones == 0 {
+        return None;
+    }
+
+    let mut acc = 0.0f64;
+    let mut used = 0usize;
+    let mut reference: Option<f64> = None;
+    for c in 0..chains {
+        let Some(theta) = chain_phase(rec, c, tones) else {
+            continue;
+        };
+        let theta = match reference {
+            None => {
+                reference = Some(theta);
+                theta
+            }
+            Some(r) => r + wrap_pi(theta - r),
+        };
+        acc += theta;
+        used += 1;
+    }
+    (used > 0).then(|| acc / used as f64)
+}
+
+/// The slope-free phase of one chain, or `None` if it has fewer than two live
+/// tones — which is fewer than a line can be fitted through.
+fn chain_phase(rec: &Record, chain: usize, tones: usize) -> Option<f64> {
+    let base = chain * tones * 2;
+    let (mut n, mut sx, mut sy, mut sxx, mut sxy) = (0.0f64, 0.0f64, 0.0f64, 0.0f64, 0.0f64);
+    let mut prev: Option<f64> = None;
+
+    for k in 0..tones {
+        let i = f64::from(*rec.iq.get(base + 2 * k)?);
+        let q = f64::from(*rec.iq.get(base + 2 * k + 1)?);
+        if i.hypot(q) < MIN_TONE_MAG {
+            continue;
+        }
+        let raw = q.atan2(i);
+        // Unwrapped against the last LIVE tone: the smallest step congruent to
+        // the raw difference is the one a continuous phase would have taken.
+        let phi = match prev {
+            None => raw,
+            Some(p) => p + wrap_pi(raw - p),
+        };
+        prev = Some(phi);
+
+        let x = k as f64;
+        n += 1.0;
+        sx += x;
+        sy += phi;
+        sxx += x * x;
+        sxy += x * phi;
+    }
+
+    if n < 2.0 {
+        return None;
+    }
+    let denom = n * sxx - sx * sx;
+    // Zero only when every live tone is the same tone, which cannot happen
+    // here; flat is the honest fallback and costs one comparison.
+    let slope = if denom.abs() > f64::EPSILON {
+        (n * sxy - sx * sy) / denom
+    } else {
+        0.0
+    };
+    // The mean of `phi - slope * x`, which is the fitted line's value at tone
+    // zero. See the doc comment on `mean_phase` for why this is the quantity
+    // and not the residual.
+    Some((sy - slope * sx) / n)
+}
+
+/// Fold an angle into `(-pi, pi]`.
+///
+/// `pub(super)` because [`super::vitals`] needs the same fold to unwrap the
+/// per-record scalar along TIME, and two copies of a modular reduction is two
+/// chances to get the open end of the interval wrong.
+pub(super) fn wrap_pi(a: f64) -> f64 {
+    use std::f64::consts::{PI, TAU};
+    let mut a = a % TAU;
+    if a > PI {
+        a -= TAU;
+    } else if a <= -PI {
+        a += TAU;
+    }
+    a
+}
+
 /// The last N records of one link, and the motion energy over them.
 #[derive(Debug, Clone)]
 pub struct CsiWindow {
@@ -778,6 +943,35 @@ struct CsiLink {
     energy_db: Option<f64>,
     last_seen: f64,
     last_motion_at: Option<String>,
+    /// The last estimate, copied in by the run loop after it ran the transform
+    /// OUTSIDE the lock. See [`WinState::vitals`].
+    vitals: Vitals,
+    /// The window the estimate was made over, kept so [`render`] can tell a
+    /// current estimate from one this link has stopped producing.
+    vitals_span: f64,
+    /// When this link's detector last entered `Idle`, or `None` while it is in
+    /// any other state.
+    ///
+    /// Kept here rather than asked of the detector because the detector knows
+    /// what state it is in and not how long it has been in it, and the vitals
+    /// gate is entirely about the duration: a link that stopped moving one
+    /// record ago still has a window full of the person who was moving.
+    idle_since: Option<f64>,
+    fall: FallDetector,
+    last_fall_at: Option<String>,
+}
+
+impl CsiLink {
+    /// One Notify-worthy change on this link.
+    fn change(&self, param: &'static str, value: &'static str) -> Change {
+        Change {
+            instance: self.instance,
+            iface: self.iface.clone(),
+            peer: self.peer.clone(),
+            param,
+            value,
+        }
+    }
 }
 
 /// Every CSI link currently tracked. A `static` for the same reason
@@ -932,6 +1126,18 @@ struct Sample {
     /// time. The hardware supplies the intervals, the process clock supplies
     /// the epoch, and neither is asked for what it does not know.
     at: f64,
+    /// [`mean_mag`] of this record, and [`mean_phase`] of it.
+    ///
+    /// Computed on the READER thread beside the magnitudes, for the same reason
+    /// they are: the `atan2` per position belongs off the tokio runtime, and
+    /// carrying two `f64` costs the queue nothing where carrying the I/Q would
+    /// cost it 8 KB a record.
+    ///
+    /// `None` on a payload with no live tone, which is a payload that was not a
+    /// channel response. Not fabricated as zero: a zero mean phase is a real
+    /// phase a real link could have.
+    mean_mag: Option<f64>,
+    mean_phase: Option<f64>,
 }
 
 /// What one radio's reader has produced since the last drain.
@@ -1028,6 +1234,69 @@ fn drain_inbox() -> Vec<Batch> {
 /// Which interface and which side of the radio a captured peer is on.
 type PeerMap = HashMap<(String, [u8; 6]), (String, LinkKind)>;
 
+/// How a link's windows are keyed: the radio it is on and the peer it is with.
+type WinKey = (String, [u8; 6]);
+
+/// The vitals and fall settings a run was started with.
+///
+/// Carried into [`apply`] rather than read from the config there, for the same
+/// reason the table is a parameter: `apply` is the lifecycle and it is tested
+/// without a config, a radio, or a process. One struct rather than four
+/// arguments because it is passed through unchanged, and a four-argument tail
+/// of `f64` is where a transposed pair hides.
+#[derive(Debug, Clone, Copy)]
+struct Tuning {
+    /// Seconds of scalars behind an estimate, and the stillness required.
+    vitals_span: f64,
+    /// In-band power share below which nothing is reported.
+    min_confidence: f64,
+    /// dB above the ambient that opens a fall candidate.
+    fall_rise_db: f64,
+    /// Seconds of stillness before a candidate is raised.
+    fall_still_secs: f64,
+    /// The sounding period in seconds, which is what the vitals ring measures
+    /// an unacceptable gap against.
+    period_secs: f64,
+}
+
+impl Tuning {
+    /// What `cfg` asks for. The clamping happened in [`crate::config`]; this is
+    /// only the widening.
+    fn from_config(cfg: &ClientConfig) -> Self {
+        Self {
+            vitals_span: cfg.csi_vitals_window_secs as f64,
+            min_confidence: cfg.csi_vitals_min_confidence,
+            fall_rise_db: cfg.csi_fall_rise_db,
+            fall_still_secs: cfg.csi_fall_still_secs as f64,
+            period_secs: cfg.csi_period_ms as f64 / 1000.0,
+        }
+    }
+}
+
+impl Default for Tuning {
+    /// The shipped defaults, so a test that is not about tuning does not have
+    /// to state it.
+    fn default() -> Self {
+        Self::from_config(&ClientConfig::default())
+    }
+}
+
+/// One parameter change worth a Notify.
+///
+/// A struct rather than the tuple this used to be: there are now two parameters
+/// that notify, `State` and `FallCandidate`, and a bare
+/// `(u32, String, String, &str, &str)` puts the leaf name and the value next to
+/// each other as two anonymous strings.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Change {
+    instance: u32,
+    iface: String,
+    peer: String,
+    /// The leaf under `Device.X_OptimACS_Sensing.Csi.{i}.`
+    param: &'static str,
+    value: &'static str,
+}
+
 /// One link's feature window, and when it last had a record.
 ///
 /// Owned by the run loop and NOT by the shared table. The windows are the
@@ -1038,6 +1307,15 @@ type PeerMap = HashMap<(String, [u8; 6]), (String, LinkKind)>;
 /// for the table update itself.
 struct WinState {
     window: CsiWindow,
+    /// Half a minute of per-record scalars, and the transform over them.
+    ///
+    /// Here and NOT on the link, which is the object the data-model GET locks.
+    /// The transform is the one part of this module that is not O(1) per
+    /// record, and it allocates; running it inside `apply` meant running it
+    /// while holding the mutex a GET contends for, which is exactly what the
+    /// split between `features` and `apply` exists to prevent. The link keeps
+    /// only the four scalars the estimate produced.
+    vitals: VitalsWindow,
     last_at: f64,
 }
 
@@ -1066,7 +1344,8 @@ struct Feature {
 /// Returns the features and, per radio, its cumulative framing counters.
 fn features(
     batches: Vec<Batch>,
-    windows: &mut HashMap<(String, [u8; 6]), WinState>,
+    windows: &mut HashMap<WinKey, WinState>,
+    tune: &Tuning,
     cap: usize,
     now: f64,
 ) -> (Vec<Feature>, Vec<(String, u32, u32)>) {
@@ -1079,6 +1358,11 @@ fn features(
             let key = (batch.phy.clone(), sample.peer);
             let st = windows.entry(key).or_insert_with(|| WinState {
                 window: CsiWindow::new(cap),
+                vitals: VitalsWindow::new(
+                    tune.vitals_span,
+                    tune.min_confidence,
+                    tune.period_secs,
+                ),
                 last_at: sample.at,
             });
 
@@ -1093,8 +1377,21 @@ fn features(
             let resync = sample.at - st.last_at > STALE_GAP_SECS;
             if resync {
                 st.window.clear();
+                // The vitals ring has its own, much shorter, gap rule -- see
+                // `vitals::MAX_GAP_PERIODS` -- and would clear itself on the
+                // next push anyway. Cleared here too so that the two windows
+                // are provably in step after a resync rather than one push out.
+                st.vitals.clear();
             }
             st.last_at = sample.at;
+            // The vitals ring takes EVERY record, including those taken while
+            // the energy window is still filling: the ring is half a minute
+            // long and the energy window is two seconds, so refusing the first
+            // twenty would delay nothing and put a condition on the one path
+            // that has to stay O(1) per record.
+            if let (Some(m), Some(p)) = (sample.mean_mag, sample.mean_phase) {
+                st.vitals.push(sample.at, m, p);
+            }
             st.window.push(sample.mag);
 
             feats.push(Feature {
@@ -1114,6 +1411,53 @@ fn features(
     (feats, streams)
 }
 
+/// Run the vitals transform for every link, holding NO lock.
+///
+/// Called between the two lock acquisitions of a tick, on the windows the run
+/// loop owns, using the `idle_since` that was read off the detectors under the
+/// first one. Being one drain (250 ms) behind the detector costs nothing: the
+/// gate the value feeds is thirty seconds of stillness.
+///
+/// Returns only the links whose reported value CHANGED, which on the great
+/// majority of ticks is none of them -- the estimate is gated to once every two
+/// seconds and the drain runs four times a second. That is what lets the
+/// storing pass below skip its lock entirely most of the time.
+fn estimate_vitals(
+    windows: &mut HashMap<WinKey, WinState>,
+    idle: &[(WinKey, Option<f64>)],
+    now: f64,
+) -> Vec<(WinKey, Vitals)> {
+    let mut out = Vec::new();
+    for (key, since) in idle {
+        if let Some(st) = windows.get_mut(key) {
+            if let Some(v) = st.vitals.update(now, *since) {
+                out.push((key.clone(), v));
+            }
+        }
+    }
+    out
+}
+
+/// Copy finished estimates onto their links. Four scalars each; no transform,
+/// no allocation, and therefore a lock held for as long as a few moves.
+fn store_vitals(table: &mut [CsiLink], vitals: &[(WinKey, Vitals)]) {
+    for (key, v) in vitals {
+        if let Some(link) = table.iter_mut().find(|l| l.phy == key.0 && l.key == key.1) {
+            link.vitals = *v;
+        }
+    }
+}
+
+/// The wall-clock spelling of a time on the shared process clock.
+///
+/// The process clock is monotonic and has no epoch, so a time on it can only be
+/// named by how far back it is from a time that does. Floored at zero: a record
+/// stamped after `now` is a clamp artefact, not the future.
+fn wall_clock(at: f64, now: f64) -> String {
+    let back = ((now - at).max(0.0) * 1000.0).min(f64::from(i32::MAX)) as i64;
+    (chrono::Utc::now() - chrono::Duration::milliseconds(back)).to_rfc3339()
+}
+
 /// Feed a tick's features into `table` and return the state changes.
 ///
 /// Pure, and takes the table rather than reaching for the `static`, for the
@@ -1130,8 +1474,9 @@ fn apply(
     feats: Vec<Feature>,
     streams: &[(String, u32, u32)],
     peers: &PeerMap,
+    tune: &Tuning,
     now: f64,
-) -> Vec<(u32, String, String, &'static str)> {
+) -> Vec<Change> {
     let mut changes = Vec::new();
 
     for f in feats {
@@ -1169,6 +1514,11 @@ fn apply(
                     energy_db: None,
                     last_seen: f.at,
                     last_motion_at: None,
+                    vitals: Vitals::default(),
+                    vitals_span: tune.vitals_span,
+                    idle_since: None,
+                    fall: FallDetector::new(tune.fall_rise_db, tune.fall_still_secs),
+                    last_fall_at: None,
                 });
                 table.len() - 1
             }
@@ -1180,6 +1530,15 @@ fn apply(
         if f.resync {
             debug!("csi: {} {} resyncing after a gap", link.phy, link.peer);
             link.detector.resync();
+            link.idle_since = None;
+            link.vitals = Vitals::default();
+            // A sequence in progress is a claim about the last few seconds, and
+            // after a hole there is nothing to claim. Without this a `Still`
+            // that began before a twenty-second gap matures on the first record
+            // after it and reports a fall nothing watched -- and it does so
+            // while `energy_db` is `None` through the refill, so the detector
+            // never even saw the records in between.
+            link.fall.reset();
         }
 
         link.last_seen = f.at.max(link.last_seen);
@@ -1196,13 +1555,41 @@ fn apply(
         link.energy_db = Some(db);
         match link.detector.push_f64(db, f.at) {
             Some(Transition::ToMotion) => {
-                link.last_motion_at = Some(chrono::Utc::now().to_rfc3339());
-                changes.push((link.instance, link.iface.clone(), link.peer.clone(), "Motion"));
+                link.last_motion_at = Some(wall_clock(f.at, now));
+                changes.push(link.change("State", "Motion"));
             }
             Some(Transition::ToIdle) => {
-                changes.push((link.instance, link.iface.clone(), link.peer.clone(), "Idle"));
+                changes.push(link.change("State", "Idle"));
             }
             None => {}
+        }
+
+        // Read AFTER the detector has had this record: the gate is a question
+        // about the state this very record produced, not the one before it.
+        if link.detector.state() == State::Idle {
+            link.idle_since.get_or_insert(f.at);
+        } else {
+            link.idle_since = None;
+        }
+
+        // The fall stage runs on the energy the detector just judged, against
+        // the ambient the detector learnt -- `None` while it is still learning,
+        // which is what stops every link firing on every boot.
+        if let Some(event) = link.fall.push(db, link.detector.baseline_dbm(), f.at) {
+            let value = match event {
+                FallEvent::Raised => {
+                    // Stamped from the RECORD's time, not from the drain's.
+                    // A drain runs a quarter-second after the records it
+                    // carries, a fall matures `still_secs` after the impact,
+                    // and a backlog can be seconds deep -- so `Utc::now()` here
+                    // is the time the agent noticed, which is not what anybody
+                    // reading `LastFallAt` is asking.
+                    link.last_fall_at = Some(wall_clock(f.at, now));
+                    "1"
+                }
+                FallEvent::Cleared => "0",
+            };
+            changes.push(link.change("FallCandidate", value));
         }
     }
 
@@ -1222,7 +1609,13 @@ fn apply(
     // so "Motion" would be the controller's last and uncorrectable word on it.
     for link in table.iter() {
         if now - link.last_seen > STALE_SECS && link.detector.state() == State::Motion {
-            changes.push((link.instance, link.iface.clone(), link.peer.clone(), "Idle"));
+            changes.push(link.change("State", "Idle"));
+        }
+        // A fall candidate is retracted on the way out for the same reason:
+        // "somebody fell here" must not be a controller's last and
+        // uncorrectable word on an instance that is about to disappear.
+        if now - link.last_seen > STALE_SECS && link.fall.candidate() {
+            changes.push(link.change("FallCandidate", "0"));
         }
     }
     table.retain(|l| now - l.last_seen <= STALE_SECS);
@@ -1770,10 +2163,13 @@ fn stamp(records: &[Record], now: f64, seen: &mut HashMap<[u8; 6], f64>) -> Vec<
                 _ => at,
             };
             seen.insert(r.peer, at);
+            let mag = magnitudes(r);
             Sample {
                 peer: r.peer,
                 bw: r.capture_bw,
-                mag: magnitudes(r),
+                mean_mag: mean_mag(&mag),
+                mean_phase: mean_phase(r),
+                mag,
                 at,
             }
         })
@@ -2046,6 +2442,7 @@ async fn run(
     }
 
     let period_ms = cfg.csi_period_ms;
+    let tune = Tuning::from_config(&cfg);
     // Records per window, from the two settings that define it. Floored at two
     // by `CsiWindow::new`, which is the only place the floor belongs.
     let win_cap = (cfg.csi_window_secs * 1000 / period_ms.max(1)) as usize;
@@ -2064,6 +2461,15 @@ async fn run(
         "csi: sounding every {period_ms} ms on {}; {win_cap}-record windows over {} s",
         phys.join(", "),
         cfg.csi_window_secs
+    );
+    info!(
+        "csi: vitals over {} s at confidence >= {:.2}; fall at +{:.0} dB then {} s still. \
+         Breathing and heart rates are EXPERIMENTAL CANDIDATES, not measurements: they \
+         need a still subject inside the link's own path, and nothing should act on one",
+        cfg.csi_vitals_window_secs,
+        cfg.csi_vitals_min_confidence,
+        cfg.csi_fall_rise_db,
+        cfg.csi_fall_still_secs
     );
 
     // The guard is created BEFORE the radios are touched, so that a failure
@@ -2157,7 +2563,7 @@ async fn run(
         let now = motion::now_secs();
         // The windows and the square roots are worked out first, holding no
         // lock; see `features`.
-        let (feats, streams) = features(drain_inbox(), &mut windows, win_cap, now);
+        let (feats, streams) = features(drain_inbox(), &mut windows, &tune, win_cap, now);
 
         // `apply` runs on EVERY tick, empty drain included. It is the only
         // thing that retracts a link which vanished mid-Motion and then drops
@@ -2165,14 +2571,31 @@ async fn run(
         // `continue` on an empty drain would skip the eviction exactly when it
         // is due. A peer that left the house while in Motion would read as
         // somebody moving in it until the agent restarted.
-        let changes = {
+        let (changes, idle) = {
             let mut guard = links();
             let table = guard.get_or_insert_with(Vec::new);
-            apply(table, feats, &streams, &peers, now)
+            let changes = apply(table, feats, &streams, &peers, &tune, now);
+            // Read out under the same lock the detectors were updated under,
+            // and used outside it. At most eight links, one small clone each.
+            let idle: Vec<(WinKey, Option<f64>)> = table
+                .iter()
+                .map(|l| ((l.phy.clone(), l.key), l.idle_since))
+                .collect();
+            (changes, idle)
         };
-        for (instance, iface, peer, state) in changes {
-            info!("csi: {iface} {peer} -> {state}");
-            notify(&tx, &agent_id, &cfg.controller_id, instance, state);
+
+        // The transforms. Outside every lock, which is the whole point of the
+        // two-acquisition shape: a 512-point FFT per series per link is the
+        // one piece of work here that a data-model GET must never wait behind.
+        let estimates = estimate_vitals(&mut windows, &idle, now);
+        if !estimates.is_empty() {
+            let mut guard = links();
+            store_vitals(guard.get_or_insert_with(Vec::new), &estimates);
+        }
+
+        for c in changes {
+            info!("csi: {} {} {} -> {}", c.iface, c.peer, c.param, c.value);
+            notify(&tx, &agent_id, &cfg.controller_id, &c);
         }
     }
 }
@@ -2243,14 +2666,9 @@ fn name_peers(desired: &[Want]) -> PeerMap {
 /// channel, and blocking here would stop the drain — the records the reader
 /// threads keep producing would queue and eventually be dropped, so a stalled
 /// uplink would degrade the sensing rather than just its reporting.
-fn notify(
-    tx: &StatusSender,
-    agent_id: &EndpointId,
-    controller_id: &str,
-    instance: u32,
-    state: &str,
-) {
-    let path = format!("Device.X_OptimACS_Sensing.Csi.{instance}.State");
+fn notify(tx: &StatusSender, agent_id: &EndpointId, controller_id: &str, c: &Change) {
+    let path = format!("Device.X_OptimACS_Sensing.Csi.{}.{}", c.instance, c.param);
+    let state = c.value;
     let msg = build_value_change_notify("status", &path, state);
     let msg_bytes = match encode_msg(&msg) {
         Ok(b) => b,
@@ -2352,6 +2770,45 @@ fn render(table: &[CsiLink], enabled: bool, now: f64) -> HashMap<String, String>
             link.last_motion_at.clone().unwrap_or_default(),
         );
         m.insert(format!("{base}.Bandwidth"), bw_mhz(link.bw).to_string());
+
+        // Vitals. Empty is the normal answer and is not an error: it means the
+        // link has not been still for a whole window, or that what was in the
+        // window did not clear the confidence floor. Filtered on `is_finite`
+        // for the reason `MotionEnergyDb` is -- "NaN" and "inf" reach a
+        // controller as values no comparison it makes is true for.
+        // Blanked once the link has stopped producing records for longer than
+        // the window the estimate was made over. The link itself survives for
+        // `STALE_SECS`, which is twice as long: without this a peer that went
+        // away mid-estimate would go on reporting a breathing rate for a room
+        // it has no measurements from, and the only thing that would say so is
+        // `RecordsPerSec` reading 0 next to it.
+        let v = if now - link.last_seen > link.vitals_span {
+            Vitals::default()
+        } else {
+            link.vitals
+        };
+        let bpm = |x: Option<f64>| {
+            x.filter(|d| d.is_finite())
+                .map_or(String::new(), |d| format!("{d:.1}"))
+        };
+        m.insert(format!("{base}.BreathingBpm"), bpm(v.breathing_bpm));
+        m.insert(format!("{base}.HeartBpm"), bpm(v.heart_bpm));
+        m.insert(
+            format!("{base}.VitalsConfidence"),
+            v.confidence
+                .filter(|d| d.is_finite())
+                .map_or(String::new(), |d| format!("{d:.2}")),
+        );
+        // A boolean, not an empty string: unlike a rate, "no fall candidate" is
+        // something the agent knows rather than something it could not work out.
+        m.insert(
+            format!("{base}.FallCandidate"),
+            if link.fall.candidate() { "1" } else { "0" }.into(),
+        );
+        m.insert(
+            format!("{base}.LastFallAt"),
+            link.last_fall_at.clone().unwrap_or_default(),
+        );
     }
     m
 }
@@ -2679,6 +3136,157 @@ mod tests {
              the payload is not chain-outer",
             &r.chain_rssi[..4]
         );
+    }
+
+    /// A record built from complex values, so a test can state the channel it
+    /// wants instead of hunting for one in a capture.
+    ///
+    /// `f` gives (I, Q) for a (chain, tone); the DMA header is filled in so
+    /// that [`Record::tones`] derives the shape back out of it, exactly as it
+    /// does on the wire.
+    fn synth(chains: usize, tones: usize, mut f: impl FnMut(usize, usize) -> (f64, f64)) -> Record {
+        let mut iq = Vec::with_capacity(chains * tones * 2);
+        for c in 0..chains {
+            for k in 0..tones {
+                let (i, q) = f(c, k);
+                iq.push(i.round() as i16);
+                iq.push(q.round() as i16);
+            }
+        }
+        Record {
+            peer: [0; 6],
+            status: 1,
+            capture_bw: 2,
+            chan_bw: 2,
+            phy_mode: 0,
+            prim20: 0,
+            cf1: 0,
+            cf2: 0,
+            num_rx_chain: chains as u8,
+            timestamp: 0,
+            chain_rssi: [0; 8],
+            dma: DmaHdr {
+                header_words: 12,
+                num_chains: chains as u8,
+                total_bytes: (chains * tones * 4) as u16,
+                ..DmaHdr::default()
+            },
+            iq,
+        }
+    }
+
+    /// A tone at unit magnitude and phase `p`, big enough that the i16
+    /// quantisation is four decimal places below anything asserted.
+    fn tone(p: f64) -> (f64, f64) {
+        (10_000.0 * p.cos(), 10_000.0 * p.sin())
+    }
+
+    /// The mean magnitude is over LIVE positions, for the reason
+    /// [`MIN_TONE_MAG`] gives: a guard tone is not a quiet subcarrier, it is
+    /// not a subcarrier, and averaging it in scales the answer by however many
+    /// of them this bandwidth happens to have.
+    #[test]
+    fn the_mean_magnitude_skips_the_dead_subcarriers() {
+        let m: Vec<f32> = (0..64).map(|k| if k < 4 { 0.0 } else { 1000.0 }).collect();
+        assert!(
+            (mean_mag(&m).expect("sixty live tones") - 1000.0).abs() < 1e-9,
+            "the dead tones dragged the mean down"
+        );
+        assert!(
+            mean_mag(&[0.0f32; 16]).is_none(),
+            "a payload with no live tone is not a channel response"
+        );
+    }
+
+    /// The phase ramp across subcarriers is a clock, not a channel.
+    ///
+    /// Every CFR capture carries a phase that advances linearly with the
+    /// subcarrier index, and the slope is the receiver's sampling-time offset
+    /// against the transmitter — it changes with every re-sync of the same
+    /// still link and swamps everything a chest does. Removing the
+    /// least-squares slope across tones is what leaves the part of the phase
+    /// that is the path.
+    ///
+    /// Two records of the SAME channel with two different ramps must produce
+    /// the same scalar. Without the slope removal they differ by half the
+    /// ramp, which is radians — hundreds of times a heartbeat.
+    #[test]
+    fn a_timing_ramp_across_tones_does_not_reach_the_mean_phase() {
+        let theta = 0.4;
+        let a = synth(2, 128, |_, k| tone(theta + 0.05 * k as f64));
+        let b = synth(2, 128, |_, k| tone(theta - 0.09 * k as f64));
+        let pa = mean_phase(&a).expect("a live record");
+        let pb = mean_phase(&b).expect("a live record");
+
+        assert!((pa - theta).abs() < 0.01, "ramp +0.05 gave {pa:.4}, not {theta}");
+        assert!((pb - theta).abs() < 0.01, "ramp -0.09 gave {pb:.4}, not {theta}");
+        assert!(
+            (pa - pb).abs() < 0.02,
+            "two ramps over one channel gave {pa:.4} and {pb:.4}; \
+             the timing slope reached the scalar"
+        );
+    }
+
+    /// What the slope removal must NOT remove: a rotation of the whole
+    /// channel, which is what a body moving through the path does.
+    #[test]
+    fn a_rotation_of_the_whole_channel_does_reach_the_mean_phase() {
+        let at = |theta: f64| {
+            mean_phase(&synth(1, 128, move |_, k| tone(theta + 0.05 * k as f64)))
+                .expect("a live record")
+        };
+        let moved = at(0.3) - at(0.0);
+        assert!(
+            (moved - 0.3).abs() < 0.01,
+            "a 0.3 rad rotation of the channel moved the scalar by {moved:.4}"
+        );
+    }
+
+    /// The guard and DC subcarriers arrive as near-zero I and Q, so their
+    /// `atan2` is uniformly random. Carried into the unwrap they inject a
+    /// 2-pi step into every tone after them, and the fitted slope — and with
+    /// it the whole answer — is then whatever the noise chose.
+    #[test]
+    fn a_dead_subcarrier_does_not_break_the_unwrap() {
+        // The shape a real 80 MHz block has: guards at both edges, DC in the
+        // middle.
+        let dead = |k: usize| !(3..=124).contains(&k) || k == 64;
+        let r = synth(1, 128, |_, k| {
+            if dead(k) {
+                (0.0, 0.0)
+            } else {
+                tone(0.4 + 0.05 * k as f64)
+            }
+        });
+        let p = mean_phase(&r).expect("a live record");
+        assert!(
+            (p - 0.4).abs() < 0.01,
+            "seven dead subcarriers moved the scalar to {p:.4}"
+        );
+    }
+
+    /// Both scalars, on the real capture, must be numbers a ring can hold.
+    #[test]
+    fn the_fixture_yields_finite_per_record_scalars() {
+        let p = parse(FIXTURE);
+        for r in &p.records {
+            let m = mean_mag(&magnitudes(r)).expect("the fixture has live tones");
+            assert!(m.is_finite() && m > 0.0, "mean magnitude {m}");
+            let ph = mean_phase(r).expect("the fixture has live tones");
+            assert!(
+                ph.is_finite() && ph.abs() < 1e3,
+                "mean phase {ph} is not a phase"
+            );
+        }
+    }
+
+    /// A record with no payload at all has no scalars, and must say so rather
+    /// than divide by the zero tones it has.
+    #[test]
+    fn an_empty_record_has_no_scalars() {
+        let r = synth(0, 0, |_, _| (0.0, 0.0));
+        assert!(mean_phase(&r).is_none());
+        assert!(mean_mag(&magnitudes(&r)).is_none());
     }
 
     /// A window that is not full reports nothing.
@@ -3341,6 +3949,11 @@ phy#0
     fn sample(peer: u8, at: f64, mag: Vec<f32>) -> Sample {
         Sample {
             peer: [0, 0, 0, 0, 0, peer],
+            mean_mag: mean_mag(&mag),
+            // A constant phase. The tests around this helper are about the
+            // table and the detector; a link whose phase never moves simply
+            // reports no vitals, which is the quiet answer they expect.
+            mean_phase: Some(0.0),
             mag,
             bw: 2,
             at,
@@ -3366,6 +3979,8 @@ phy#0
     struct Rig {
         table: Vec<CsiLink>,
         windows: HashMap<(String, [u8; 6]), WinState>,
+        /// The shipped tuning unless a test replaces it.
+        tune: Tuning,
     }
 
     impl Rig {
@@ -3375,9 +3990,21 @@ phy#0
             peers: &PeerMap,
             now: f64,
             cap: usize,
-        ) -> Vec<(u32, String, String, &'static str)> {
-            let (feats, streams) = features(batches, &mut self.windows, cap, now);
-            apply(&mut self.table, feats, &streams, peers, now)
+        ) -> Vec<Change> {
+            let (feats, streams) = features(batches, &mut self.windows, &self.tune, cap, now);
+            let changes = apply(&mut self.table, feats, &streams, peers, &self.tune, now);
+            // The two passes `run` does between and after its lock
+            // acquisitions. Driven here so that every test through this rig
+            // exercises the same order the agent runs them in, and so a test
+            // can assert that the transform is NOT part of `apply`.
+            let idle: Vec<(WinKey, Option<f64>)> = self
+                .table
+                .iter()
+                .map(|l| ((l.phy.clone(), l.key), l.idle_since))
+                .collect();
+            let estimates = estimate_vitals(&mut self.windows, &idle, now);
+            store_vitals(&mut self.table, &estimates);
+            changes
         }
     }
 
@@ -3508,12 +4135,13 @@ phy#0
         );
         assert_eq!(
             changes,
-            vec![(
+            vec![Change {
                 instance,
-                "phy1-mesh0".to_string(),
-                "00:00:00:00:00:01".to_string(),
-                "Idle"
-            )],
+                iface: "phy1-mesh0".to_string(),
+                peer: "00:00:00:00:00:01".to_string(),
+                param: "State",
+                value: "Idle",
+            }],
             "an evicted link in Motion must be retracted, on its own instance"
         );
     }
@@ -3623,6 +4251,11 @@ phy#0
             energy_db: Some(-22.347),
             last_seen: 10.0,
             last_motion_at: Some("2026-09-22T10:00:00+00:00".into()),
+            vitals: Vitals::default(),
+            vitals_span: 30.0,
+            idle_since: None,
+            fall: FallDetector::new(12.0, 10.0),
+            last_fall_at: Some("2026-09-22T10:01:00+00:00".into()),
         };
         link.detector.push_f64(-22.0, 0.0);
 
@@ -3661,6 +4294,24 @@ phy#0
             Some(&"80".to_string()),
             "reported in MHz, not as the driver's code"
         );
+        // A link that has never been still long enough reports no vitals at
+        // all -- and reports the fall flag anyway, because "no candidate" is
+        // something the agent knows.
+        assert_eq!(m.get(&format!("{base}.BreathingBpm")), Some(&String::new()));
+        assert_eq!(m.get(&format!("{base}.HeartBpm")), Some(&String::new()));
+        assert_eq!(
+            m.get(&format!("{base}.VitalsConfidence")),
+            Some(&String::new())
+        );
+        assert_eq!(
+            m.get(&format!("{base}.FallCandidate")),
+            Some(&"0".to_string()),
+            "the fall flag is a boolean, never empty"
+        );
+        assert_eq!(
+            m.get(&format!("{base}.LastFallAt")),
+            Some(&"2026-09-22T10:01:00+00:00".to_string())
+        );
 
         // A link with no window yet reports an empty energy, not a zero: 0 dB
         // is a real energy a real link could have.
@@ -3679,6 +4330,285 @@ phy#0
         assert_eq!(
             m.get("Device.X_OptimACS_Sensing.Csi.9.LastMotionAt"),
             Some(&String::new())
+        );
+    }
+
+    /// A `Feature` with an energy stated outright, so a test can drive the
+    /// shape of a fall rather than build magnitudes that happen to have that
+    /// variance. The energy is what `apply` consumes; how it was computed is
+    /// `CsiWindow`'s business and is tested there.
+    fn feature(at: f64, db: f64) -> Feature {
+        Feature {
+            phy: "phy1".into(),
+            peer: [0, 0, 0, 0, 0, 1],
+            bw: 2,
+            at,
+            energy_db: Some(db),
+            resync: false,
+        }
+    }
+
+    /// `FallCandidate` notifies on BOTH edges, on its own path, with the same
+    /// instance the link's `State` uses.
+    ///
+    /// Both edges because a controller that is told about a 1 and never about
+    /// the 0 has a device that says somebody is on the floor for the rest of
+    /// the day. The vitals do NOT appear here and must not: they change every
+    /// two seconds, and a Notify each time is a Notify storm for a number the
+    /// poll already carries.
+    #[test]
+    fn a_fall_candidate_notifies_on_both_edges() {
+        let peers = peer_map();
+        let tune = Tuning {
+            fall_still_secs: 1.0,
+            ..Tuning::default()
+        };
+        let mut table = Vec::new();
+
+        // One record creates the link; its detector is then shrunk so it
+        // learns an ambient in seconds rather than in ten minutes.
+        apply(&mut table, vec![feature(0.0, -22.0)], &[], &peers, &tune, 0.0);
+        table[0].detector = tuned(2.0, 1.0);
+
+        let drive = |table: &mut Vec<CsiLink>, from: f64, secs: f64, db: f64| {
+            let feats: Vec<Feature> = (0..(secs * 10.0) as i64)
+                .map(|i| feature(from + i as f64 / 10.0, db))
+                .collect();
+            let now = from + secs;
+            apply(table, feats, &[], &peers, &tune, now)
+        };
+
+        // Five seconds of ambient so the detector leaves Learning and has a
+        // baseline for the fall stage to measure against.
+        let learn = drive(&mut table, 0.1, 5.0, -22.0);
+        assert!(
+            table[0].detector.baseline_dbm().is_some(),
+            "the detector never left Learning: {learn:?}"
+        );
+
+        // The fall: half a second of impact, then stillness.
+        let mut changes = drive(&mut table, 5.1, 0.5, -6.0);
+        changes.extend(drive(&mut table, 5.6, 4.0, -22.0));
+
+        let falls: Vec<&Change> = changes
+            .iter()
+            .filter(|c| c.param == "FallCandidate")
+            .collect();
+        assert_eq!(falls.len(), 1, "expected one raise, got {changes:?}");
+        assert_eq!(falls[0].value, "1");
+        assert_eq!(falls[0].instance, table[0].instance);
+        assert_eq!(falls[0].peer, "00:00:00:00:00:01");
+        assert!(
+            table[0].last_fall_at.is_some(),
+            "LastFallAt was not stamped"
+        );
+
+        let m = render(&table, true, 9.6);
+        let base = format!("Device.X_OptimACS_Sensing.Csi.{}", table[0].instance);
+        assert_eq!(m.get(&format!("{base}.FallCandidate")), Some(&"1".to_string()));
+
+        // Getting up clears it, on the same path.
+        let cleared = drive(&mut table, 9.6, 2.0, -9.0);
+        let backs: Vec<&Change> = cleared
+            .iter()
+            .filter(|c| c.param == "FallCandidate")
+            .collect();
+        assert_eq!(backs.len(), 1, "expected one clear, got {cleared:?}");
+        assert_eq!(backs[0].value, "0");
+        assert!(!table[0].fall.candidate());
+    }
+
+    /// The transform is not part of `apply`, and only its result is.
+    ///
+    /// `apply` runs under the mutex a data-model GET contends for. A 512-point
+    /// FFT per series per link, plus the vectors it used to allocate, ran there
+    /// — which is exactly what the split between `features` and `apply` exists
+    /// to prevent, and what this module's own comments claimed was not
+    /// happening. The window now lives beside the run loop's other windows and
+    /// the link holds four scalars.
+    ///
+    /// Asserted behaviourally rather than structurally: `apply` alone, given a
+    /// full window's worth of records, produces a link with no vitals on it,
+    /// and the estimate appears only once the out-of-lock pass has run.
+    #[test]
+    fn the_transform_runs_outside_apply_and_only_its_result_reaches_the_link() {
+        let peers = peer_map();
+        let tune = Tuning {
+            vitals_span: 20.0,
+            ..Tuning::default()
+        };
+        let mut windows: HashMap<WinKey, WinState> = HashMap::new();
+        let mut table: Vec<CsiLink> = Vec::new();
+
+        // Thirty seconds of a still link with a 0.25 Hz breath on it, driven
+        // through `features` and `apply` ONLY -- the two halves of the tick
+        // that take the lock between them.
+        let mut now = 0.0;
+        for i in 0..300 {
+            now = f64::from(i) / 10.0;
+            let breath = (std::f64::consts::TAU * 0.25 * now).sin();
+            let row = vec![100.0 + 2.0 * breath as f32; 32];
+            let mut sm = sample(1, now, row);
+            sm.mean_mag = Some(100.0 + 2.0 * breath);
+            sm.mean_phase = Some(0.0);
+            let (feats, streams) = features(batch("phy1", vec![sm]), &mut windows, &tune, 4, now);
+            apply(&mut table, feats, &streams, &peers, &tune, now);
+        }
+
+        assert_eq!(table.len(), 1, "the link was never created");
+        assert_eq!(
+            table[0].vitals,
+            Vitals::default(),
+            "apply produced an estimate, so the transform ran under the lock"
+        );
+        assert!(
+            windows.values().next().is_some(),
+            "the vitals ring is not beside the other windows"
+        );
+
+        // Now the pass that runs with no lock held, and the copy-back.
+        table[0].idle_since = Some(0.0);
+        let idle: Vec<(WinKey, Option<f64>)> = table
+            .iter()
+            .map(|l| ((l.phy.clone(), l.key), l.idle_since))
+            .collect();
+        let estimates = estimate_vitals(&mut windows, &idle, now);
+        assert_eq!(estimates.len(), 1, "the transform produced nothing");
+        store_vitals(&mut table, &estimates);
+
+        let bpm = table[0]
+            .vitals
+            .breathing_bpm
+            .expect("the breath did not reach the link");
+        assert!((bpm - 15.0).abs() <= 1.0, "reported {bpm:.2} BPM, not 15");
+
+        // And it does not re-run inside the two-second gate, so the storing
+        // pass takes no lock on the ticks in between.
+        assert!(
+            estimate_vitals(&mut windows, &idle, now + 0.25).is_empty(),
+            "the transform ran again a quarter of a second later"
+        );
+    }
+
+    /// An estimate is about the thirty seconds behind it, so it stops meaning
+    /// anything the moment the records stop — and the link survives a further
+    /// thirty seconds after that before it is evicted.
+    #[test]
+    fn vitals_go_blank_when_the_records_stop_not_when_the_link_is_evicted() {
+        let mut link = CsiLink {
+            instance: 3,
+            phy: "phy1".into(),
+            iface: "phy1-mesh0".into(),
+            peer: "00:00:00:00:00:01".into(),
+            key: [0, 0, 0, 0, 0, 1],
+            kind: LinkKind::Mesh,
+            detector: csi_detector(),
+            records: 0,
+            arrivals: VecDeque::new(),
+            errors: 0,
+            resyncs: 0,
+            bw: 2,
+            energy_db: Some(-22.0),
+            last_seen: 100.0,
+            last_motion_at: None,
+            vitals: Vitals::default(),
+            vitals_span: 30.0,
+            idle_since: None,
+            fall: FallDetector::new(12.0, 10.0),
+            last_fall_at: None,
+        };
+        let mut w = VitalsWindow::new(30.0, 0.35, 0.1);
+        for i in 0..300 {
+            let t = f64::from(i) / 10.0;
+            w.push(t, 100.0 + 2.0 * (std::f64::consts::TAU * 0.25 * t).sin(), 0.0);
+        }
+        let _ = w.update(30.0, Some(0.0));
+        link.vitals = w.vitals();
+        assert!(link.vitals.breathing_bpm.is_some(), "the fixture is wrong");
+
+        let fresh = render(std::slice::from_ref(&link), true, 110.0);
+        assert!(
+            !fresh["Device.X_OptimACS_Sensing.Csi.3.BreathingBpm"].is_empty(),
+            "a link still reporting must keep its estimate"
+        );
+
+        // Records stopped 31 s ago: still in the table (STALE_SECS is 60), but
+        // the window the estimate was made over no longer holds any of them.
+        let stale = render(std::slice::from_ref(&link), true, 131.0);
+        assert_eq!(
+            stale["Device.X_OptimACS_Sensing.Csi.3.BreathingBpm"],
+            String::new(),
+            "a link that stopped reporting kept its breathing rate"
+        );
+        assert_eq!(
+            stale["Device.X_OptimACS_Sensing.Csi.3.VitalsConfidence"],
+            String::new()
+        );
+        assert_eq!(
+            stale["Device.X_OptimACS_Sensing.Csi.3.RecordsPerSec"],
+            "0".to_string(),
+            "the link itself must still be reported"
+        );
+    }
+
+    /// `LastFallAt` is the time of the RECORD, not the time the agent noticed.
+    ///
+    /// A drain runs a quarter-second after the records it carries, a candidate
+    /// matures `csi_fall_still_secs` after the impact, and a backlog can be
+    /// seconds deep. Stamped at drain time, a fall that happened at 10:00:00
+    /// reads 10:00:10 or later — and the one thing anybody reading this
+    /// parameter wants is when it happened.
+    #[test]
+    fn the_fall_time_is_the_record_s_and_not_the_drain_s() {
+        let before = chrono::Utc::now();
+        // A record 12.5 s back on the process clock.
+        let stamped = wall_clock(100.0, 112.5);
+        let parsed = chrono::DateTime::parse_from_rfc3339(&stamped)
+            .expect("LastFallAt must be RFC 3339");
+
+        let back = before.signed_duration_since(parsed).num_milliseconds();
+        assert!(
+            (12_000..=13_000).contains(&back),
+            "a record 12.5 s old was stamped {back} ms back"
+        );
+        // A stamp from the future is a clamp artefact, not a prophecy.
+        let now = wall_clock(200.0, 100.0);
+        let ahead = chrono::DateTime::parse_from_rfc3339(&now).unwrap();
+        assert!(
+            ahead.signed_duration_since(before).num_milliseconds() >= 0,
+            "a record stamped after `now` went backwards"
+        );
+    }
+
+    /// An instance that is about to leave the tree must not leave a standing
+    /// fall candidate behind it: that would be the controller's last and
+    /// uncorrectable word on the link.
+    #[test]
+    fn an_evicted_link_with_a_standing_candidate_is_retracted_first() {
+        let peers = peer_map();
+        let tune = Tuning::default();
+        let mut table = Vec::new();
+        apply(&mut table, vec![feature(0.0, -22.0)], &[], &peers, &tune, 0.0);
+        // Raised by hand: the raising is `FallDetector`'s to test, the
+        // retraction on eviction is `apply`'s. Driven as an UNBROKEN stream of
+        // records, because a fall no longer matures across a gap -- an earlier
+        // version of this fixture jumped from 0.4 s to 11 s and passed only
+        // because of the defect that abort now fixes.
+        table[0].fall = FallDetector::new(12.0, 1.0);
+        for i in 0..30 {
+            let t = f64::from(i) / 10.0;
+            let db = if (5..10).contains(&i) { -6.0 } else { -22.0 };
+            table[0].fall.push(db, Some(-22.0), t);
+        }
+        assert!(table[0].fall.candidate(), "the fixture did not raise one");
+
+        let changes = apply(&mut table, Vec::new(), &[], &peers, &tune, STALE_SECS + 20.0);
+        assert!(table.is_empty(), "the stale link must be dropped");
+        assert!(
+            changes
+                .iter()
+                .any(|c| c.param == "FallCandidate" && c.value == "0"),
+            "an evicted link with a candidate must be retracted: {changes:?}"
         );
     }
 
@@ -3720,6 +4650,11 @@ phy#0
             energy_db: Some(f64::NAN),
             last_seen: 0.0,
             last_motion_at: None,
+            vitals: Vitals::default(),
+            vitals_span: 30.0,
+            idle_since: None,
+            fall: FallDetector::new(12.0, 10.0),
+            last_fall_at: None,
         };
         let m = render(&[link], true, 0.0);
         // `format!("{:.2}")` renders a NaN as "NaN" and an infinity as "inf",
@@ -3739,6 +4674,106 @@ phy#0
             m.get("Device.X_OptimACS_Sensing.Csi.1.Bandwidth"),
             Some(&"80".to_string()),
             "an unknown width must read as a width, not as 0"
+        );
+    }
+
+    /// The vitals parameters are floats out of a transform, which is the other
+    /// place a NaN can come from. A degenerate estimate must render empty for
+    /// exactly the reason a degenerate energy does.
+    #[test]
+    fn a_degenerate_vitals_estimate_renders_empty_not_as_text() {
+        let mut link = CsiLink {
+            instance: 1,
+            phy: "phy1".into(),
+            iface: "phy1-mesh0".into(),
+            peer: "00:00:00:00:00:01".into(),
+            key: [0, 0, 0, 0, 0, 1],
+            kind: LinkKind::Mesh,
+            detector: csi_detector(),
+            records: 0,
+            arrivals: VecDeque::new(),
+            errors: 0,
+            resyncs: 0,
+            bw: 2,
+            energy_db: Some(-22.0),
+            last_seen: 0.0,
+            last_motion_at: None,
+            vitals: Vitals::default(),
+            vitals_span: 30.0,
+            idle_since: None,
+            fall: FallDetector::new(12.0, 10.0),
+            last_fall_at: None,
+        };
+        // A window of NaNs is what a dead link produces; the ring drops them,
+        // so the estimate stays absent rather than becoming a non-number. Run
+        // through a real window and copied onto the link the way the run loop
+        // does it, because the link now holds only the result.
+        let mut w = VitalsWindow::new(30.0, 0.35, 0.1);
+        for i in 0..400 {
+            w.push(f64::from(i) / 10.0, f64::NAN, f64::NAN);
+        }
+        let _ = w.update(40.0, Some(0.0));
+        link.vitals = w.vitals();
+        link.last_seen = 40.0;
+
+        let m = render(std::slice::from_ref(&link), true, 40.0);
+        assert!(
+            !m.values().any(|v| v.contains("NaN") || v.contains("inf")),
+            "a non-number reached the data model: {m:?}"
+        );
+        assert_eq!(
+            m.get("Device.X_OptimACS_Sensing.Csi.1.BreathingBpm"),
+            Some(&String::new())
+        );
+    }
+
+    /// A still link with a chest in the path reports the rates, to two
+    /// decimals of confidence, on the paths the controller subscribes to.
+    #[test]
+    fn a_still_link_reports_its_vitals_on_the_data_model() {
+        let mut link = CsiLink {
+            instance: 7,
+            phy: "phy1".into(),
+            iface: "phy1-mesh0".into(),
+            peer: "00:00:00:00:00:01".into(),
+            key: [0, 0, 0, 0, 0, 1],
+            kind: LinkKind::Mesh,
+            detector: csi_detector(),
+            records: 0,
+            arrivals: VecDeque::new(),
+            errors: 0,
+            resyncs: 0,
+            bw: 2,
+            energy_db: Some(-22.0),
+            last_seen: 0.0,
+            last_motion_at: None,
+            vitals: Vitals::default(),
+            vitals_span: 30.0,
+            idle_since: None,
+            fall: FallDetector::new(12.0, 10.0),
+            last_fall_at: None,
+        };
+        let mut w = VitalsWindow::new(30.0, 0.35, 0.1);
+        for i in 0..300 {
+            let t = f64::from(i) / 10.0;
+            let breath = (std::f64::consts::TAU * 0.25 * t).sin();
+            w.push(t, 100.0 + 2.0 * breath, 0.0);
+        }
+        let _ = w.update(30.0, Some(0.0));
+        link.vitals = w.vitals();
+        link.last_seen = 30.0;
+
+        let m = render(std::slice::from_ref(&link), true, 30.0);
+        let base = "Device.X_OptimACS_Sensing.Csi.7";
+        let br: f64 = m[&format!("{base}.BreathingBpm")]
+            .parse()
+            .expect("a breathing rate must be a number");
+        assert!((br - 15.0).abs() <= 1.0, "reported {br} BPM, not 15");
+        let conf = &m[&format!("{base}.VitalsConfidence")];
+        assert_eq!(conf.len(), 4, "two decimals, got {conf:?}");
+        assert!(
+            m[&format!("{base}.HeartBpm")].is_empty(),
+            "a breathing-only window reported a heart rate"
         );
     }
 
@@ -4127,7 +5162,14 @@ phy#0
         tx.try_send(vec![0xAA]).expect("the channel starts empty");
 
         let id = EndpointId::new("os::00005A::test");
-        notify(&tx, &id, "controller", 4, "Motion");
+        let change = Change {
+            instance: 4,
+            iface: "phy1-mesh0".into(),
+            peer: "00:00:00:00:00:01".into(),
+            param: "State",
+            value: "Motion",
+        };
+        notify(&tx, &id, "controller", &change);
 
         assert_eq!(
             rx.try_recv().expect("the queued record survives"),

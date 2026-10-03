@@ -29,6 +29,7 @@ pub mod reputation;
 pub mod security;
 pub mod sensing;
 pub mod usteer;
+pub mod vitals;
 pub mod wifi;
 
 use crate::config::ClientConfig;
